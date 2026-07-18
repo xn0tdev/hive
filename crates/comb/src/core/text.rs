@@ -1,6 +1,6 @@
 //! Styled text: a [`Span`] is a run of one style, a [`Line`] is a row of spans.
 
-use crate::style::Style;
+use crate::core::style::Style;
 
 #[derive(Clone, Debug, Default)]
 pub struct Span {

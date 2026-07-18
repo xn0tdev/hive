@@ -1,8 +1,8 @@
 //! Reusable visual effects. Each takes an animation `phase` (a monotonically
 //! rising frame counter) so callers stay in control of timing.
 
-use crate::style::{Color, Modifier, Style};
-use crate::text::Span;
+use crate::core::style::{Color, Modifier, Style};
+use crate::core::text::Span;
 
 /// A grayscale "shimmer": a bright highlight sweeps left-to-right across `text`,
 /// so a word glows while something is in flight. `phase` is the frame counter.

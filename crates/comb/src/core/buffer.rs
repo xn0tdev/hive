@@ -2,9 +2,9 @@
 //! Two buffers (front = on screen, back = next frame) are diffed so the terminal
 //! only receives the cells that actually changed.
 
-use crate::geom::{Rect, Size};
-use crate::style::Style;
-use crate::text::Line;
+use crate::core::geom::{Rect, Size};
+use crate::core::style::Style;
+use crate::core::text::Line;
 
 /// One character cell. `'\0'` marks a *transparent* cell — it is skipped when a
 /// surface is composited, letting lower layers show through.
@@ -209,7 +209,7 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::{Color, Style};
+    use crate::core::style::{Color, Style};
 
     #[test]
     fn set_str_clips_at_edge() {

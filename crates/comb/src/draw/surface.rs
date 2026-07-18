@@ -7,8 +7,8 @@
 //! which is how overlays (menus, popups, toasts) sit *above* the scene without
 //! reflowing it.
 
-use crate::buffer::Buffer;
-use crate::geom::{Rect, Size};
+use crate::core::buffer::Buffer;
+use crate::core::geom::{Rect, Size};
 
 pub struct Surface {
     pub area: Rect,
@@ -70,7 +70,7 @@ impl Compositor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::{Color, Style};
+    use crate::core::style::{Color, Style};
 
     #[test]
     fn higher_z_wins_and_transparency_shows_through() {

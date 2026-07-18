@@ -7,11 +7,11 @@ use std::mem::MaybeUninit;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::buffer::Buffer;
-use crate::event::{self, Event};
-use crate::geom::{Rect, Size};
-use crate::style::{Color, Modifier, Style};
-use crate::surface::Compositor;
+use crate::core::buffer::Buffer;
+use crate::core::geom::{Rect, Size};
+use crate::core::style::{Color, Modifier, Style};
+use crate::draw::surface::Compositor;
+use crate::term::event::{self, Event};
 
 const STDIN: i32 = libc::STDIN_FILENO;
 const STDOUT: i32 = libc::STDOUT_FILENO;

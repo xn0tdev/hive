@@ -1,9 +1,9 @@
 //! Box-drawing borders and framed blocks, added as methods on [`Buffer`].
 
-use crate::buffer::Buffer;
-use crate::geom::Rect;
-use crate::style::Style;
-use crate::text::{Line, Span};
+use crate::core::buffer::Buffer;
+use crate::core::geom::Rect;
+use crate::core::style::Style;
+use crate::core::text::{Line, Span};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Border {
@@ -82,8 +82,8 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::Size;
-    use crate::style::Style;
+    use crate::core::geom::Size;
+    use crate::core::style::Style;
 
     #[test]
     fn rounded_border_corners() {

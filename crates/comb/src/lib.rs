@@ -22,21 +22,20 @@
 //! }).unwrap();
 //! ```
 
-pub mod border;
-pub mod buffer;
-pub mod effects;
-pub mod event;
-pub mod geom;
-pub mod style;
-pub mod surface;
-pub mod terminal;
-pub mod text;
+// Logic is grouped into folders; `lib.rs` just wires them and re-exports a flat,
+// stable public API so callers use `comb::Buffer`, `comb::Style`, etc.
+pub mod core;
+pub mod draw;
+pub mod term;
 
-pub use border::Border;
-pub use buffer::{Buffer, Cell};
-pub use event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
-pub use geom::{Pos, Rect, Size};
-pub use style::{Color, Modifier, Style};
-pub use surface::{Compositor, Surface};
-pub use terminal::{render, restore, Frame, MouseMode, Terminal};
-pub use text::{Line, Span};
+// The `effects` module is re-exported by name so `comb::effects::…` keeps working.
+pub use crate::draw::effects;
+
+pub use crate::core::buffer::{Buffer, Cell};
+pub use crate::core::geom::{Pos, Rect, Size};
+pub use crate::core::style::{Color, Modifier, Style};
+pub use crate::core::text::{Line, Span};
+pub use crate::draw::border::Border;
+pub use crate::draw::surface::{Compositor, Surface};
+pub use crate::term::event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
+pub use crate::term::terminal::{render, restore, Frame, MouseMode, Terminal};
