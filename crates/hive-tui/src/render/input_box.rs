@@ -48,22 +48,37 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     if app.input.is_empty() {
         let placeholder = if app.running {
             "Add a follow-up"
-        } else if !app.pending_images.is_empty() {
-            "Describe what to do with the attached image(s)"
+        } else if app.has_pending_attaches() {
+            "Describe what to do with the attachment(s)"
         } else {
             "Ask hive anything"
         };
-        lines.push(Line::from(vec![
-            Span::styled(PROMPT, prompt_style),
-            Span::styled(
-                placeholder,
-                Style::default()
-                    .fg(theme.faint)
-                    .bg(bg)
-                    .add(Modifier::ITALIC),
-            ),
-        ]));
+        let mut spans = vec![Span::styled(PROMPT, prompt_style)];
+        if app.has_pending_attaches() {
+            spans.push(Span::styled(
+                format!("{} ", app.attachment_tags_line()),
+                Style::default().fg(theme.warn).bg(bg),
+            ));
+        }
+        spans.push(Span::styled(
+            placeholder,
+            Style::default()
+                .fg(theme.faint)
+                .bg(bg)
+                .add(Modifier::ITALIC),
+        ));
+        lines.push(Line::from(spans));
     } else {
+        if app.has_pending_attaches() {
+            // Tags sit above the typed text (no second prompt).
+            lines.push(Line::from(vec![
+                Span::styled("  ", text_style),
+                Span::styled(
+                    app.attachment_tags_line(),
+                    Style::default().fg(theme.warn).bg(bg),
+                ),
+            ]));
+        }
         for (first, text) in app.input.wrapped_rows(width) {
             let head = if first {
                 Span::styled(PROMPT, prompt_style)
@@ -74,8 +89,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    let tag_rows = usize::from(app.has_pending_attaches() && !app.input.is_empty());
     let visible = inner.height as usize;
-    let scroll = app.input.view_scroll(visible, width);
+    let scroll = app.input.view_scroll(visible.saturating_sub(tag_rows), width);
     f.buffer()
         .set_lines_on(inner, &lines, scroll, Style::default().bg(bg));
 
@@ -97,7 +113,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    if !app.input_focused {
+    if !app.input_focused || app.palette_open() || app.about_open() {
         return;
     }
 
@@ -106,7 +122,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let max_x = inner.x + inner.width.saturating_sub(1);
     let max_y = inner.y + inner.height.saturating_sub(1);
     let x = (inner.x + x_off + vcol as u16).min(max_x);
-    let y = (inner.y + vrow.saturating_sub(scroll) as u16).min(max_y);
+    let y = (inner.y + (vrow + tag_rows).saturating_sub(scroll) as u16).min(max_y);
     f.set_cursor(x, y);
 }
 
@@ -251,6 +267,7 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "m".into(),
+            model_choices: Vec::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),

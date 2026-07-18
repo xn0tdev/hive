@@ -1,5 +1,5 @@
 //! Builds and draws the scrolling conversation transcript. The greeting lives
-//! only on the landing screen; the turn working cubes live in the footer.
+//! only on the landing screen; the turn working cubes sit by the footer mode chip.
 
 use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
@@ -542,6 +542,7 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "m".into(),
+            model_choices: Vec::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),

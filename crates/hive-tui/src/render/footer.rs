@@ -1,9 +1,11 @@
 //! Footer content: `model · tokens` and the working directory. Exposed as
 //! reusable lines so both the bottom bar and the centered landing can use them.
 //! BUILD/PLAN chip sits on the model row (right), under the input strip.
-//! While a turn is running, a compact 5-cube ping-pong wave sits before the model.
+//! While a turn is running, a compact 5-cube ping-pong wave sits just left of
+//! the mode chip (or flush-right when there is no chip) — not next to the model.
 
 use comb::{Buffer, Color, Frame, Line, Rect, Span, Style};
+use hive_core::AgentMode;
 
 use crate::render::input_box;
 
@@ -19,17 +21,13 @@ const WORKING_GLYPH_LIT: char = '■';
 const WORKING_GLYPH_DIM: char = '▪';
 /// Brightness at/above which a cube switches to the large lit glyph.
 const WORKING_GLYPH_THRESHOLD: f32 = 0.45;
+/// Gap between the cubes and the mode chip (columns).
+const WORKING_CHIP_GAP: u16 = 1;
 
-/// Soft ping-pong cubes + `model · tokens · attachments` as a single line.
-/// Wave travels while a turn is running; idle shows model only.
+/// `model · tokens · attachments` as a single line (no activity chrome).
 pub fn model_line(app: &crate::app::App) -> Line {
     let theme = &app.theme;
     let mut spans = Vec::new();
-
-    if app.running {
-        spans.extend(working_spans(app.spinner, theme));
-        spans.push(Span::styled("  ", Style::default()));
-    }
 
     spans.push(Span::styled(
         app.model_display.clone(),
@@ -42,10 +40,10 @@ pub fn model_line(app: &crate::app::App) -> Line {
             Style::default().fg(theme.faint),
         ));
     }
-    if !app.pending_images.is_empty() {
+    if app.has_pending_attaches() {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
         spans.push(Span::styled(
-            format!("{} image(s) attached", app.pending_images.len()),
+            app.attachment_tags_line(),
             Style::default().fg(theme.warn),
         ));
     }
@@ -65,11 +63,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &crate::app::App) {
     }
     buf.paint(area, Style::default());
     buf.set_line(area.x, area.y, &model_line(app), area.width);
+    draw_working(buf, Rect::new(area.x, area.y, area.width, 1), app, 0);
     buf.set_line(area.x, area.y + 1, &cwd_line(app), area.width);
 }
 
 /// Model + cwd under the input; BUILD/PLAN on the model row (right).
-/// Toasts are drawn separately (centered), so they never replace the chip.
+/// Working cubes sit just left of the chip. Toasts are drawn separately
+/// (centered), so they never replace the chip.
 pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
     if area.height < 2 {
         return;
@@ -77,9 +77,39 @@ pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
     f.buffer().paint(area, Style::default());
     f.buffer()
         .set_line(area.x, area.y, &model_line(app), area.width);
+    let chip_w = mode_chip_width(app);
+    draw_working(
+        f.buffer(),
+        Rect::new(area.x, area.y, area.width, 1),
+        app,
+        chip_w,
+    );
     input_box::draw_mode_chip(f, Rect::new(area.x, area.y, area.width, 1), app);
     f.buffer()
         .set_line(area.x, area.y + 1, &cwd_line(app), area.width);
+}
+
+/// Soft ping-pong cubes on the model row, right-aligned (left of an optional chip).
+fn draw_working(buf: &mut Buffer, area: Rect, app: &crate::app::App, chip_w: u16) {
+    if !app.running || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = Line::from(working_spans(app.spinner, &app.theme));
+    let w = line.width() as u16;
+    let reserve = chip_w.saturating_add(if chip_w > 0 { WORKING_CHIP_GAP } else { 0 });
+    if area.width < w.saturating_add(reserve) {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(w + reserve);
+    buf.set_line(x, area.y, &line, w);
+}
+
+fn mode_chip_width(app: &crate::app::App) -> u16 {
+    let label = match app.agent_mode {
+        AgentMode::Plan => " PLAN ",
+        AgentMode::Build => " BUILD ",
+    };
+    label.chars().count() as u16
 }
 
 /// Soft ping-pong cubes: lit peak travels L→R then R→L and loops (no label).
@@ -166,6 +196,7 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
+            model_choices: Vec::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
@@ -287,45 +318,22 @@ mod tests {
     }
 
     #[test]
-    fn model_line_hides_working_when_idle() {
-        let a = app();
-        let t = line_text(&model_line(&a));
-        assert!(t.contains("Kimi 2.6"), "{t}");
-        assert!(!t.contains("Working"), "{t}");
-        assert_eq!(working_glyph_count(&t), 0, "{t}");
-    }
-
-    #[test]
-    fn model_line_shows_dots_when_running() {
+    fn model_line_stays_clean_when_idle_or_running() {
         let mut a = app();
+        let idle = line_text(&model_line(&a));
+        assert_eq!(idle, "Kimi 2.6", "{idle}");
+        assert_eq!(working_glyph_count(&idle), 0, "{idle}");
+
         a.apply(AgentEvent::TurnStarted);
         a.spinner = 4;
-        let t = line_text(&model_line(&a));
-        assert!(!t.contains("Working"), "{t}");
-        assert!(t.contains("Kimi 2.6"), "{t}");
-        assert_eq!(working_glyph_count(&t), WORKING_BLOCKS, "{t}");
-        // Cubes sit before the model name, packed with no gap chars between them.
-        let start = t
-            .char_indices()
-            .find(|(_, c)| *c == WORKING_GLYPH_LIT || *c == WORKING_GLYPH_DIM)
-            .map(|(i, _)| i)
-            .unwrap();
-        assert!(start < t.find("Kimi 2.6").unwrap(), "{t}");
-        let cubes: String = t[start..]
-            .chars()
-            .take(WORKING_BLOCKS)
-            .collect();
-        assert!(
-            cubes
-                .chars()
-                .all(|c| c == WORKING_GLYPH_LIT || c == WORKING_GLYPH_DIM),
-            "cubes should be adjacent: {t}"
-        );
-        assert_eq!(cubes.chars().count(), WORKING_BLOCKS, "{t}");
+        let running = line_text(&model_line(&a));
+        assert_eq!(running, "Kimi 2.6", "{running}");
+        assert!(!running.contains("Working"), "{running}");
+        assert_eq!(working_glyph_count(&running), 0, "{running}");
     }
 
     #[test]
-    fn footer_draw_shows_working_near_model() {
+    fn footer_draw_shows_working_near_mode_chip() {
         use comb::{render, Size};
 
         let mut a = app();
@@ -337,6 +345,47 @@ mod tests {
         let text = buf.text();
         assert!(!text.contains("Working"), "{text}");
         assert!(text.contains("Kimi 2.6"), "{text}");
+        assert!(text.contains("BUILD"), "{text}");
         assert_eq!(working_glyph_count(&text), WORKING_BLOCKS, "{text}");
+
+        // Cubes sit on the model row between the model name and the chip.
+        let model_row = text
+            .lines()
+            .find(|l| l.contains("Kimi 2.6") && l.contains("BUILD"))
+            .unwrap_or("");
+        let model_i = model_row.find("Kimi 2.6").unwrap();
+        let cube_i = model_row
+            .char_indices()
+            .find(|(_, c)| *c == WORKING_GLYPH_LIT || *c == WORKING_GLYPH_DIM)
+            .map(|(i, _)| i)
+            .expect("cubes on model row");
+        let build_i = model_row.find("BUILD").unwrap();
+        assert!(model_i < cube_i, "model left of cubes: {model_row:?}");
+        assert!(cube_i < build_i, "cubes left of chip: {model_row:?}");
+        let cubes: String = model_row[cube_i..]
+            .chars()
+            .take(WORKING_BLOCKS)
+            .collect();
+        assert!(
+            cubes
+                .chars()
+                .all(|c| c == WORKING_GLYPH_LIT || c == WORKING_GLYPH_DIM),
+            "cubes should be adjacent: {model_row:?}"
+        );
+    }
+
+    #[test]
+    fn footer_hides_working_when_idle() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::AssistantTextDelta("hi".into()));
+        a.apply(AgentEvent::TurnFinished);
+
+        let buf = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Kimi 2.6"), "{text}");
+        assert_eq!(working_glyph_count(&text), 0, "{text}");
     }
 }

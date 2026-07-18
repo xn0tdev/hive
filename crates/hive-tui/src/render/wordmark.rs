@@ -47,10 +47,10 @@ pub const HEIGHT: u16 = ART.len() as u16;
 
 /// Styled lines for the wordmark. When `bonk` is active, a dark shimmer ring
 /// expands from the click cell and paints the blocks behind it.
-pub fn wordmark(theme: &Theme, bonk: Option<&LogoBonk>) -> Vec<Line> {
+pub fn lines(theme: &Theme, bonk: Option<&LogoBonk>) -> Vec<Line> {
     debug_assert!(
         ART.iter().all(|r| r.chars().count() == WIDTH as usize),
-        "mascot rows must share WIDTH"
+        "wordmark rows must share WIDTH"
     );
 
     let elapsed = bonk
@@ -174,5 +174,21 @@ pub fn hit_cell(logo: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
     } else {
         // Clicks in letter gaps still count — juicier hit target.
         Some((lx, ly))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    #[test]
+    fn wordmark_has_block_glyphs() {
+        let theme = Theme::from_name("gray");
+        let lines = lines(&theme, None);
+        assert_eq!(lines.len(), HEIGHT as usize);
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_str())).collect();
+        assert!(text.contains('█'));
+        assert!(!text.contains("(o.o)"));
     }
 }

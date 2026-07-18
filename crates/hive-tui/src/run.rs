@@ -14,12 +14,13 @@ use hive_core::event::EventReceiver;
 use hive_core::message::ImageSource;
 use hive_core::AgentMode;
 
+use crate::app::palette::PaletteMode;
 use crate::app::App;
+use crate::commands::{self, CmdId};
 use crate::render;
 use crate::{InputCommand, TuiInit};
 
-const HELP: &str =
-    "commands: /model <id-or-role> · /image <path> · /copy · /new · /clear · /cost · /quit — tab plan/build, enter send, shift+enter newline, esc stops, ctrl+t thoughts, double ctrl+c quits";
+const UNKNOWN_HINT: &str = "Ctrl+P for commands · /about for About";
 
 /// Poll interval while something is animating (spinner / shimmer).
 const ANIM_TICK: Duration = Duration::from_millis(100);
@@ -62,7 +63,10 @@ fn run_loop(
             }
         }
 
-        app.tick();
+        if app.tick() {
+            // Idle composer blur (or other tick-side visual change).
+            dirty = true;
+        }
         let animating = app.needs_animation();
         let spinner_moved = animating && app.spinner != last_spinner;
 
@@ -109,11 +113,20 @@ fn handle_key(
     let shift = key.mods.shift;
 
     let special = app.in_special_view();
-    let menu_open = !special && app.slash_prefix().is_some() && !app.menu_items().is_empty();
+    let menu_open = !special
+        && !app.palette_open()
+        && !app.about_open()
+        && app.slash_prefix().is_some()
+        && !app.menu_items().is_empty();
 
     // Any key other than ctrl+c cancels a pending quit confirmation.
     if !(ctrl && key.code == KeyCode::Char('c')) {
         app.disarm_quit();
+    }
+
+    // About overlay captures keys while open (esc / Ctrl+P).
+    if app.about_open() {
+        return handle_about_key(app, key);
     }
 
     // Plan preview: section select / amend / Build / back.
@@ -127,6 +140,9 @@ fn handle_key(
         match key.code {
             KeyCode::Char('q') if ctrl => return true,
             KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+            KeyCode::Char('p') if ctrl => {
+                app.open_palette();
+            }
             KeyCode::Esc | KeyCode::Backspace => app.leave_subagent_view(),
             KeyCode::Left => app.leave_subagent_view(),
             KeyCode::PageUp => app.scroll_up(5),
@@ -138,10 +154,19 @@ fn handle_key(
         return false;
     }
 
+    // Command palette captures keys while open.
+    if app.palette_open() {
+        return handle_palette_key(app, key, input_tx);
+    }
+
     // Global chords work whether or not the composer is focused.
     match key.code {
         KeyCode::Char('q') if ctrl => return true,
         KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('p') if ctrl => {
+            app.open_palette();
+            return false;
+        }
         KeyCode::Char('y') if ctrl => {
             copy_last_answer(app);
             return false;
@@ -185,8 +210,14 @@ fn handle_key(
         }
     }
 
+    // Keys that edit or move within the composer refresh the idle-blur timer.
+    // Pure transcript scroll (arrows at input edges, PageUp/Down above) does not.
+    let mut composer_activity = false;
     match key.code {
-        KeyCode::Tab if menu_open => complete_selected(app),
+        KeyCode::Tab if menu_open => {
+            complete_selected(app);
+            composer_activity = true;
+        }
         KeyCode::Tab if !menu_open => {
             app.toggle_agent_mode();
         }
@@ -195,6 +226,7 @@ fn handle_key(
             if let Some(cmd) = app.menu_selected() {
                 if cmd.takes_arg {
                     complete_selected(app);
+                    composer_activity = true;
                 } else {
                     app.input.take();
                     app.reset_menu();
@@ -207,6 +239,7 @@ fn handle_key(
             // (`\n` parses as Enter+SHIFT; kitty/xterm send CSI with mods.)
             if shift || alt || ctrl {
                 app.input.newline();
+                composer_activity = true;
             } else {
                 return submit(app, input_tx);
             }
@@ -214,29 +247,54 @@ fn handle_key(
         // Ctrl+J → newline when the host remaps it to Char('j')+CTRL.
         KeyCode::Char('j') if ctrl => {
             app.input.newline();
+            composer_activity = true;
         }
         KeyCode::Char(ch) if !ctrl => {
             app.input.insert(ch);
             app.reset_menu();
+            composer_activity = true;
         }
         KeyCode::Backspace => {
             app.input.backspace();
             app.reset_menu();
+            composer_activity = true;
         }
-        KeyCode::Left => app.input.left(),
-        KeyCode::Right => app.input.right(),
-        KeyCode::Home => app.input.home(),
-        KeyCode::End => app.input.end(),
-        KeyCode::Up if menu_open => app.menu_up(),
-        KeyCode::Down if menu_open => app.menu_down(),
+        KeyCode::Left => {
+            app.input.left();
+            composer_activity = true;
+        }
+        KeyCode::Right => {
+            app.input.right();
+            composer_activity = true;
+        }
+        KeyCode::Home => {
+            app.input.home();
+            composer_activity = true;
+        }
+        KeyCode::End => {
+            app.input.end();
+            composer_activity = true;
+        }
+        KeyCode::Up if menu_open => {
+            app.menu_up();
+            composer_activity = true;
+        }
+        KeyCode::Down if menu_open => {
+            app.menu_down();
+            composer_activity = true;
+        }
         // Multiline: arrows move inside the input; at the edges they scroll chat.
         KeyCode::Up => {
-            if !app.input.up() {
+            if app.input.up() {
+                composer_activity = true;
+            } else {
                 app.scroll_up(1);
             }
         }
         KeyCode::Down => {
-            if !app.input.down() {
+            if app.input.down() {
+                composer_activity = true;
+            } else {
                 app.scroll_down(1);
             }
         }
@@ -248,19 +306,33 @@ fn handle_key(
             } else if !app.input.is_empty() {
                 let _ = app.input.take();
                 app.reset_menu();
+                composer_activity = true;
             } else {
                 app.blur_input();
             }
         }
         _ => {}
     }
+    if composer_activity {
+        app.note_input_activity();
+    }
     false
 }
 
 /// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
 /// chats, hits `← back` / Build, or bonks the logo.
-/// Returns `true` when state changed and a redraw is needed.
-fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
+///
+/// Palette / About overlays are keyboard-only — mouse events are swallowed so
+/// they don't leak through to the chat underneath.
+/// Returns `true` when the UI should redraw.
+fn handle_mouse(
+    app: &mut App,
+    m: Mouse,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    if app.about_open() || app.palette_open() {
+        return false;
+    }
     match m.kind {
         MouseKind::ScrollUp => {
             app.scroll_up(3);
@@ -355,7 +427,7 @@ fn handle_plan_key(
                 let msg = app.plan_amend_message(notes.trim());
                 app.plan_view.selected.clear();
                 app.plan_view.amending = false;
-                app.input_focused = false;
+                app.blur_input();
                 app.leave_special_view();
                 app.agent_mode = AgentMode::Plan;
                 app.push_user(msg.clone());
@@ -369,23 +441,32 @@ fn handle_plan_key(
             KeyCode::Esc => {
                 if !app.input.is_empty() {
                     let _ = app.input.take();
+                    app.note_input_activity();
                 } else {
                     app.plan_view.selected.clear();
                     app.plan_view.amending = false;
-                    app.input_focused = false;
+                    app.blur_input();
                 }
                 return false;
             }
             KeyCode::Char(ch) if !ctrl => {
                 app.input.insert(ch);
+                app.note_input_activity();
                 return false;
             }
             KeyCode::Backspace => {
                 app.input.backspace();
+                app.note_input_activity();
                 return false;
             }
-            KeyCode::Left => app.input.left(),
-            KeyCode::Right => app.input.right(),
+            KeyCode::Left => {
+                app.input.left();
+                app.note_input_activity();
+            }
+            KeyCode::Right => {
+                app.input.right();
+                app.note_input_activity();
+            }
             _ => {}
         }
         return false;
@@ -457,7 +538,17 @@ fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let text = app.input.take();
     let trimmed = text.trim().to_string();
 
-    if trimmed.is_empty() && app.pending_images.is_empty() {
+    // A lone pasted path becomes an attachment tag instead of a message.
+    if !trimmed.starts_with('/') {
+        if let Some(leftover) = app.try_attach_pasted_path(&trimmed) {
+            if leftover.is_empty() {
+                app.flash(format!("Attached {}", app.attachment_tags_line()));
+                return false;
+            }
+        }
+    }
+
+    if trimmed.is_empty() && !app.has_pending_attaches() {
         return false;
     }
 
@@ -465,15 +556,41 @@ fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
         return handle_slash(app, rest, input_tx);
     }
 
-    let display = if trimmed.is_empty() {
-        "[image]".to_string()
-    } else {
-        text.clone()
+    let attaches = app.take_pending_attaches();
+    let tags = attaches
+        .iter()
+        .map(|a| a.tag())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let file_notes: Vec<String> = attaches
+        .iter()
+        .filter(|a| a.image.is_none())
+        .map(|a| format!("[Attached file: {}]", a.path))
+        .collect();
+    let images: Vec<ImageSource> = attaches.into_iter().filter_map(|a| a.image).collect();
+
+    let display = match (tags.is_empty(), trimmed.is_empty()) {
+        (true, true) => return false,
+        (false, true) => tags,
+        (true, false) => text.clone(),
+        (false, false) => format!("{tags} {text}"),
     };
+
+    let mut agent_text = text;
+    if !file_notes.is_empty() {
+        if !agent_text.is_empty() {
+            agent_text.push('\n');
+        }
+        agent_text.push_str(&file_notes.join("\n"));
+    }
+
     app.push_user(display);
-    let images = app.take_pending_images();
     let mode = app.agent_mode;
-    let _ = input_tx.send(InputCommand::User { text, images, mode });
+    let _ = input_tx.send(InputCommand::User {
+        text: agent_text,
+        images,
+        mode,
+    });
     false
 }
 
@@ -482,60 +599,198 @@ fn handle_slash(app: &mut App, cmd: &str, input_tx: &UnboundedSender<InputComman
     let name = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
 
-    match name {
-        "quit" | "q" | "exit" => return true,
-        "clear" | "reset" | "new" => {
-            // Full new chat → centered Home landing (no leftover Notice blocks).
+    // Removed command: steer users to attach / paste.
+    if name.eq_ignore_ascii_case("image") {
+        app.notice(" /image was removed — paste a path or use /attach <path>");
+        return false;
+    }
+
+    let Some(def) = commands::resolve(name) else {
+        app.notice(format!("unknown command: /{name}  — {UNKNOWN_HINT}"));
+        return false;
+    };
+
+    run_command(app, def.id, arg, input_tx)
+}
+
+fn run_command(
+    app: &mut App,
+    id: CmdId,
+    arg: &str,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    match id {
+        CmdId::Quit => return true,
+        CmdId::Clear => {
             app.new_chat();
             let _ = input_tx.send(InputCommand::Clear);
             app.flash("New chat");
         }
-        "model" => {
+        CmdId::Model => {
             if arg.is_empty() {
-                app.notice("usage: /model <id-or-role>  (roles: default, smart, fast, vision)");
+                app.open_model_picker();
             } else {
                 let _ = input_tx.send(InputCommand::SetModel(arg.to_string()));
             }
         }
-        "image" => load_image(app, arg),
-        "copy" => copy_last_answer(app),
-        "cost" => app.notice(format!(
+        CmdId::Attach => match app.attach_path(arg) {
+            Ok(tag) => app.flash(format!("Attached {tag}")),
+            Err(e) => app.notice(e),
+        },
+        CmdId::Copy => copy_last_answer(app),
+        CmdId::Cost => app.notice(format!(
             "tokens — prompt {} · completion {} · total {}",
             app.usage.prompt_tokens, app.usage.completion_tokens, app.usage.total_tokens
         )),
-        "help" => app.notice(HELP),
-        other => app.notice(format!("unknown command: /{other}  ({HELP})")),
+        CmdId::About => app.open_about(),
     }
     false
 }
 
-fn load_image(app: &mut App, path: &str) {
-    if path.is_empty() {
-        app.notice("usage: /image <path>");
-        return;
-    }
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            app.add_pending_image(ImageSource::Base64 {
-                media_type: media_type(path),
-                data,
-            });
-            app.notice(format!("Attached image: {path}"));
+fn handle_about_key(app: &mut App, key: Key) -> bool {
+    let ctrl = key.mods.ctrl;
+    match key.code {
+        KeyCode::Esc => app.close_about(),
+        KeyCode::Char('p') if ctrl => {
+            app.close_about();
+            app.open_palette();
         }
-        Err(e) => app.notice(format!("cannot read image {path}: {e}")),
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        _ => {}
     }
+    false
 }
 
-fn media_type(path: &str) -> String {
-    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "image/png",
+fn handle_palette_key(
+    app: &mut App,
+    key: Key,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    let ctrl = key.mods.ctrl;
+    let choices = app.model_choices.clone();
+
+    match key.code {
+        KeyCode::Esc => {
+            if let Some(pal) = app.palette.as_ref() {
+                if pal.mode == PaletteMode::Models {
+                    // Back to the main command list.
+                    app.open_palette();
+                } else {
+                    app.close_palette();
+                }
+            } else {
+                app.close_palette();
+            }
+        }
+        KeyCode::Char('p') if ctrl => {
+            app.close_palette();
+        }
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        KeyCode::Up => {
+            let visible = app.palette_list_visible as usize;
+            if let Some(pal) = app.palette.as_mut() {
+                if visible > 0 {
+                    pal.move_up_visible(&choices, visible);
+                } else {
+                    pal.move_up(&choices);
+                }
+            }
+        }
+        KeyCode::Down => {
+            let visible = app.palette_list_visible as usize;
+            if let Some(pal) = app.palette.as_mut() {
+                if visible > 0 {
+                    pal.move_down_visible(&choices, visible);
+                } else {
+                    pal.move_down(&choices);
+                }
+            }
+        }
+        KeyCode::Enter => return activate_palette(app, input_tx),
+        KeyCode::Backspace => {
+            if let Some(pal) = app.palette.as_mut() {
+                pal.backspace(&choices);
+            }
+        }
+        KeyCode::Left => {
+            if let Some(pal) = app.palette.as_mut() {
+                pal.left();
+            }
+        }
+        KeyCode::Right => {
+            if let Some(pal) = app.palette.as_mut() {
+                pal.right();
+            }
+        }
+        KeyCode::Char(ch) if !ctrl => {
+            if let Some(pal) = app.palette.as_mut() {
+                pal.insert(ch, &choices);
+            }
+        }
+        _ => {}
     }
-    .to_string()
+    false
+}
+
+fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    let mode = app.palette.as_ref().map(|p| p.mode);
+    match mode {
+        Some(PaletteMode::Models) => {
+            let key = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_model(&app.model_choices))
+                .map(|c| c.key.clone());
+            app.close_palette();
+            if let Some(key) = key {
+                let _ = input_tx.send(InputCommand::SetModel(key));
+                app.flash("Switching model…");
+            }
+            false
+        }
+        Some(PaletteMode::Commands) => {
+            let id = app.palette.as_ref().and_then(|p| p.selected_cmd_id());
+            let takes_arg = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_command())
+                .map(|c| c.takes_arg)
+                .unwrap_or(false);
+            let name = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_command())
+                .map(|c| c.name);
+            app.close_palette();
+            match id {
+                Some(CmdId::Model) => {
+                    app.open_model_picker();
+                    false
+                }
+                Some(CmdId::Attach) => {
+                    app.focus_input();
+                    app.input.value = "/attach ".into();
+                    app.input.cursor = app.input.value.chars().count();
+                    app.note_input_activity();
+                    false
+                }
+                Some(_id) if takes_arg => {
+                    if let Some(name) = name {
+                        app.focus_input();
+                        app.input.value = format!("/{name} ");
+                        app.input.cursor = app.input.value.chars().count();
+                        app.note_input_activity();
+                    }
+                    false
+                }
+                Some(id) => run_command(app, id, "", input_tx),
+                None => false,
+            }
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -548,10 +803,259 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "m".into(),
+            model_choices: vec![
+                crate::ModelChoice {
+                    key: "default".into(),
+                    display: "Default".into(),
+                    detail: "default".into(),
+                },
+                crate::ModelChoice {
+                    key: "fast".into(),
+                    display: "Fast".into(),
+                    detail: "fast".into(),
+                },
+            ],
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
         })
+    }
+
+    fn ctrl(code: KeyCode) -> Key {
+        Key {
+            code,
+            mods: KeyMods::CTRL,
+        }
+    }
+
+    #[test]
+    fn ctrl_p_opens_command_palette() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(!app.palette_open());
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('p')),
+            &tx,
+            &interrupt
+        ));
+        assert!(app.palette_open());
+        assert_eq!(
+            app.palette.as_ref().unwrap().mode,
+            crate::app::palette::PaletteMode::Commands
+        );
+        assert!(
+            !app.palette.as_ref().unwrap().search_focused,
+            "search starts unfocused"
+        );
+    }
+
+    #[test]
+    fn palette_typing_focuses_search() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('p')),
+            &tx,
+            &interrupt
+        ));
+        assert!(!handle_key(
+            &mut app,
+            Key {
+                code: KeyCode::Char('m'),
+                mods: KeyMods::NONE,
+            },
+            &tx,
+            &interrupt
+        ));
+        let pal = app.palette.as_ref().unwrap();
+        assert!(pal.search_focused);
+        assert_eq!(pal.query, "m");
+    }
+
+    #[test]
+    fn palette_switch_model_opens_picker_and_selects() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        // Move selection to Switch model if needed and activate.
+        if let Some(pal) = app.palette.as_mut() {
+            // Ensure we land on Model.
+            for _ in 0..8 {
+                if pal.selected_cmd_id() == Some(CmdId::Model) {
+                    break;
+                }
+                pal.move_down(&app.model_choices.clone());
+            }
+        }
+        assert_eq!(
+            app.palette.as_ref().and_then(|p| p.selected_cmd_id()),
+            Some(CmdId::Model)
+        );
+        assert!(!activate_palette(&mut app, &tx));
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::Models)
+        );
+        assert!(!activate_palette(&mut app, &tx));
+        match rx.try_recv() {
+            Ok(InputCommand::SetModel(k)) => assert_eq!(k, "default"),
+            other => panic!("expected SetModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_aliases_resolve_clear_and_quit() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!handle_slash(&mut app, "new", &tx));
+        assert!(matches!(rx.try_recv(), Ok(InputCommand::Clear)));
+        assert!(handle_slash(&mut app, "exit", &tx));
+        assert!(handle_slash(&mut app, "quit", &tx));
+    }
+
+    #[test]
+    fn slash_about_aliases_open_about() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        for name in ["about", "help", "version"] {
+            app.close_about();
+            assert!(!app.about_open());
+            assert!(!handle_slash(&mut app, name, &tx));
+            assert!(app.about_open(), "/{name} should open About");
+        }
+    }
+
+    #[test]
+    fn palette_about_opens_about_overlay() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        if let Some(pal) = app.palette.as_mut() {
+            for _ in 0..16 {
+                if pal.selected_cmd_id() == Some(CmdId::About) {
+                    break;
+                }
+                pal.move_down(&app.model_choices.clone());
+            }
+        }
+        assert_eq!(
+            app.palette.as_ref().and_then(|p| p.selected_cmd_id()),
+            Some(CmdId::About)
+        );
+        assert!(!activate_palette(&mut app, &tx));
+        assert!(!app.palette_open());
+        assert!(app.about_open());
+    }
+
+    #[test]
+    fn about_esc_closes() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        app.open_about();
+        assert!(!handle_key(
+            &mut app,
+            Key {
+                code: KeyCode::Esc,
+                mods: KeyMods::NONE,
+            },
+            &tx,
+            &interrupt
+        ));
+        assert!(!app.about_open());
+    }
+
+    fn esc_key() -> Key {
+        Key {
+            code: KeyCode::Esc,
+            mods: KeyMods::NONE,
+        }
+    }
+
+    #[test]
+    fn palette_esc_closes() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        app.open_palette();
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(!app.palette_open());
+    }
+
+    #[test]
+    fn palette_models_esc_returns_to_commands() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        app.open_model_picker();
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::Models)
+        );
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(app.palette_open());
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::Commands)
+        );
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(!app.palette_open());
+    }
+
+    #[test]
+    fn overlay_mouse_is_ignored() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        assert!(!handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 0,
+                row: 0,
+            },
+            &tx
+        ));
+        assert!(app.palette_open());
+        app.close_palette();
+        app.open_about();
+        assert!(!handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::ScrollDown,
+                col: 40,
+                row: 7,
+            },
+            &tx
+        ));
+        assert!(app.about_open());
+    }
+
+    #[test]
+    fn attach_image_path_without_image_command() {
+        let path = std::env::temp_dir().join("hive-tui-attach-test.png");
+        std::fs::write(&path, [0x89, 0x50, 0x4e, 0x47]).unwrap();
+        let mut app = test_app();
+        let tag = app.attach_path(path.to_str().unwrap()).unwrap();
+        assert_eq!(tag, "[Image #1]");
+        assert!(app.has_pending_attaches());
+        assert!(commands::resolve("image").is_none());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.input.value = "look".into();
+        assert!(!submit(&mut app, &tx));
+        let _ = std::fs::remove_file(&path);
+        match rx.try_recv() {
+            Ok(InputCommand::User { text, images, .. }) => {
+                assert_eq!(text, "look");
+                assert_eq!(images.len(), 1);
+            }
+            other => panic!("expected User with image, got {other:?}"),
+        }
     }
 
     fn key(code: KeyCode) -> Key {
@@ -600,6 +1104,24 @@ mod tests {
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
         assert_eq!(app.scroll_from_bottom, 1);
+    }
+
+    #[test]
+    fn page_scroll_does_not_refresh_idle_blur_timer() {
+        let mut app = test_app();
+        app.focus_input();
+        let before = app.input_last_activity;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::PageDown),
+            &tx,
+            &interrupt
+        ));
+        assert_eq!(app.input_last_activity, before);
+        assert!(app.input_focused);
     }
 
     #[test]

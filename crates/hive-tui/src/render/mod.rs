@@ -5,21 +5,25 @@
 //!   centered input, all vertically centered, with the model/cwd status
 //!   left-aligned right under the input.
 //! - Active chat → the flowing bottom-anchored layout (transcript with inline
-//!   subagent cards, input strip, slash menu, footer with working cubes).
+//!   subagent cards, input strip, slash menu, footer; working cubes by the mode chip).
 //! - Subagent view → same layout, but the transcript shows that agent's thread
 //!   and the input strip is replaced by a clickable `← back` button (no caret).
 //! - Plan view → markdown preview of Plan.md; bottom bar is back/Build or amend.
 
+pub mod bee;
 pub mod markdown;
-pub mod mascot;
 pub mod spinner;
 pub mod tools;
+pub mod wordmark;
 pub mod wrap;
 
+mod about;
 mod footer;
 mod input_box;
 mod menu;
+mod palette;
 mod sidebar;
+mod strip_paint;
 mod toast;
 mod transcript;
 
@@ -60,17 +64,17 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
 
     // The menu is an overlay (see below), so it's NOT part of the centered
     // group — opening it doesn't move the wordmark or input.
-    let group_h = mascot::HEIGHT + gap + 1 /*version*/ + gap + input_h + 2 /*status*/;
+    let group_h = wordmark::HEIGHT + gap + 1 /*version*/ + gap + input_h + 2 /*status*/;
     let mut y = area.y + area.height.saturating_sub(group_h) / 2;
 
     // Block "HIVE", centered as one block so the letters stay aligned.
-    let art_x = area.x + area.width.saturating_sub(mascot::WIDTH) / 2;
-    let logo = Rect::new(art_x, y, mascot::WIDTH, mascot::HEIGHT);
+    let art_x = area.x + area.width.saturating_sub(wordmark::WIDTH) / 2;
+    let logo = Rect::new(art_x, y, wordmark::WIDTH, wordmark::HEIGHT);
     app.logo_hit = Some(logo);
     let bonk = app.logo_bonk.clone();
     f.buffer()
-        .set_lines(logo, &mascot::wordmark(&app.theme, bonk.as_ref()), 0);
-    y += mascot::HEIGHT + gap;
+        .set_lines(logo, &wordmark::lines(&app.theme, bonk.as_ref()), 0);
+    y += wordmark::HEIGHT + gap;
 
     // Version, centered under the wordmark.
     let version = Line::from(Span::styled(
@@ -103,6 +107,9 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Toasts sit centered on the bottom edge of the screen (not on the model row).
     toast::draw(f, area, app);
+
+    draw_palette(f, area, app);
+    draw_about(f, area, app);
 }
 
 /// The normal, bottom-anchored conversation layout.
@@ -137,7 +144,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Manual vertical layout, bottom-anchored: footer (model+cwd, chip on the
     // model row) on the last two rows, then input, transcript above.
-    // Working cubes live on the model row, not above the input.
+    // Working cubes sit just left of the mode chip on the model row.
     let footer_y = area.bottom().saturating_sub(2);
     let input_y = footer_y.saturating_sub(input_h);
     let transcript_h = input_y.saturating_sub(area.y);
@@ -179,11 +186,34 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Centered toast on the bottom edge of the screen (same as landing).
     toast::draw(f, area, app);
+
+    draw_palette(f, area, app);
+    draw_about(f, area, app);
+}
+
+fn draw_palette(f: &mut Frame, area: Rect, app: &mut App) {
+    if !app.palette_open() {
+        app.palette_list_visible = 0;
+        return;
+    }
+    app.palette_list_visible = palette::list_visible(area, app);
+    palette::draw(f.buffer(), area, app);
+    if let Some((x, y)) = palette::search_cursor(area, app) {
+        f.set_cursor(x, y);
+    }
+}
+
+fn draw_about(f: &mut Frame, area: Rect, app: &mut App) {
+    if !app.about_open() {
+        return;
+    }
+    about::draw(f.buffer(), area, app);
 }
 
 fn input_height(app: &mut App, band_width: u16) -> u16 {
     // Persist wrap width so Up/Down between frames use the same soft-wrap.
     app.input.text_cols = input_box::text_cols(band_width);
     // text rows + one padding row above and below, inside the strip
-    app.input.visible_line_count(app.input.text_cols) as u16 + 2
+    let tag = u16::from(app.has_pending_attaches() && !app.input.is_empty());
+    app.input.visible_line_count(app.input.text_cols) as u16 + 2 + tag
 }

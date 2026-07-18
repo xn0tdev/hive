@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use hive_core::config::AppConfig;
+use hive_core::config::{AppConfig, ModelRole};
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
 use hive_core::{all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills};
 use hive_llm::FireworksProvider;
-use hive_tui::TuiInit;
+use hive_tui::{ModelChoice, TuiInit};
 
 use crate::config;
 use crate::driver;
@@ -76,9 +76,24 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let default_display = cfg.models.default.display_name().to_string();
     let agent = builder.build(event_tx.clone(), default_model.clone(), 0, spawner);
 
+    let model_choices = [
+        (ModelRole::Default, "default"),
+        (ModelRole::Smart, "smart"),
+        (ModelRole::Fast, "fast"),
+        (ModelRole::Vision, "vision"),
+    ]
+    .into_iter()
+    .map(|(role, key)| ModelChoice {
+        key: key.to_string(),
+        display: cfg.model_display(role).to_string(),
+        detail: key.to_string(),
+    })
+    .collect();
+
     let tui_init = TuiInit {
         model: default_model,
         model_display: default_display,
+        model_choices,
         cwd: cwd.display().to_string(),
         theme: cfg.ui.theme.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),

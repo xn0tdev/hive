@@ -1,6 +1,7 @@
 //! The TUI application state and how it reacts to `AgentEvent`s.
 
 pub mod input;
+pub mod palette;
 pub mod state;
 
 use std::collections::HashMap;
@@ -12,12 +13,14 @@ use hive_core::provider::Usage;
 use hive_core::AgentMode;
 
 use crate::commands;
-use crate::render::mascot::LogoBonk;
+use crate::render::wordmark::LogoBonk;
 use crate::render::spinner;
 use crate::render::tools::parse_sections;
 use crate::render::ProjectSnapshot;
 use crate::theme::Theme;
-use crate::TuiInit;
+use crate::{ModelChoice, TuiInit};
+
+use palette::PaletteState;
 
 use input::InputState;
 use state::{
@@ -66,6 +69,22 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// A file or image queued for the next turn, shown as a composer tag.
+#[derive(Clone)]
+pub struct PendingAttach {
+    /// Display label without brackets, e.g. `Image #1` or `File #1`.
+    pub label: String,
+    pub path: String,
+    /// Set for image attachments (vision path unchanged).
+    pub image: Option<ImageSource>,
+}
+
+impl PendingAttach {
+    pub fn tag(&self) -> String {
+        format!("[{}]", self.label)
+    }
+}
+
 pub struct App {
     pub(crate) blocks: Vec<Block>,
     pub(crate) input: InputState,
@@ -80,7 +99,14 @@ pub struct App {
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
-    pub(crate) pending_images: Vec<ImageSource>,
+    /// Files / images queued for the next user message (shown as tags).
+    pub(crate) pending_attaches: Vec<PendingAttach>,
+    /// Roles offered in the Switch-model picker.
+    pub(crate) model_choices: Vec<ModelChoice>,
+    /// Ctrl+P command palette / model picker.
+    pub(crate) palette: Option<PaletteState>,
+    /// Centered About overlay (HIVE wordmark + version + tagline).
+    pub(crate) about_open: bool,
     /// Selected row in the slash command menu.
     pub(crate) menu_index: usize,
     /// Short-lived status message shown in the footer (not the chat).
@@ -107,6 +133,9 @@ pub struct App {
     pub(crate) input_hit: Option<Rect>,
     /// Whether the main input has keyboard focus (caret + typing).
     pub(crate) input_focused: bool,
+    /// Wall clock of the last key that affected the composer (typing / caret).
+    /// Cleared when blurred. Used for idle auto-blur.
+    pub(crate) input_last_activity: Option<std::time::Instant>,
     /// BUILD / PLAN mode for the next user turn.
     pub(crate) agent_mode: AgentMode,
     /// Plan preview selection / amend state.
@@ -119,12 +148,18 @@ pub struct App {
     pub(crate) sidebar_open: bool,
     /// Hit target for the sidebar show/hide control (last draw).
     pub(crate) sidebar_toggle_hit: Option<Rect>,
+    /// Visible list rows in the palette (last draw) — keeps keyboard selection in view.
+    pub(crate) palette_list_visible: u16,
 }
 
 /// How long the ctrl+c confirmation window lives.
 pub const FLASH_MS: u128 = 1500;
 /// Bottom toast lifetime — short so it doesn't linger.
 pub const TOAST_MS: u128 = 700;
+/// Composer auto-blur after this many ms with no typing / caret keys.
+/// Transcript scroll and global chords do not refresh the timer, so a stuck
+/// caret does not linger while the user reads. Mid-range of the 8–15s band.
+pub const INPUT_IDLE_BLUR_MS: u128 = 12_000;
 
 impl App {
     pub fn new(init: TuiInit) -> Self {
@@ -145,7 +180,10 @@ impl App {
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
-            pending_images: Vec::new(),
+            pending_attaches: Vec::new(),
+            model_choices: init.model_choices,
+            palette: None,
+            about_open: false,
             menu_index: 0,
             flash_msg: None,
             ctrl_c_armed: None,
@@ -158,12 +196,14 @@ impl App {
             build_hit: None,
             input_hit: None,
             input_focused: true,
+            input_last_activity: Some(std::time::Instant::now()),
             agent_mode: AgentMode::Build,
             plan_view: PlanViewState::default(),
             md_cache: MdCache::default(),
             project: ProjectSnapshot::default(),
             sidebar_open: true,
             sidebar_toggle_hit: None,
+            palette_list_visible: 0,
         };
         app.blocks.push(Block::Welcome);
         app.project.refresh_if_stale(&app.cwd);
@@ -219,7 +259,7 @@ impl App {
         self.scroll_from_bottom = 0;
         self.back_hit = None;
         self.build_hit = None;
-        self.input_focused = false;
+        self.blur_input();
     }
 
     /// Open the Plan.md markdown preview.
@@ -235,7 +275,7 @@ impl App {
         self.scroll_from_bottom = 0;
         self.back_hit = None;
         self.build_hit = None;
-        self.input_focused = false;
+        self.blur_input();
         let _ = self.input.take();
     }
 
@@ -247,7 +287,7 @@ impl App {
         self.build_hit = None;
         self.plan_view = PlanViewState::default();
         let _ = self.input.take();
-        self.input_focused = true;
+        self.focus_input();
     }
 
     /// Return to the main agent transcript.
@@ -273,9 +313,9 @@ impl App {
         }
         self.plan_view.amending = !self.plan_view.selected.is_empty();
         if self.plan_view.amending {
-            self.input_focused = true;
+            self.focus_input();
         } else {
-            self.input_focused = false;
+            self.blur_input();
             let _ = self.input.take();
         }
     }
@@ -316,10 +356,35 @@ impl App {
 
     pub fn focus_input(&mut self) {
         self.input_focused = true;
+        self.input_last_activity = Some(std::time::Instant::now());
     }
 
     pub fn blur_input(&mut self) {
         self.input_focused = false;
+        self.input_last_activity = None;
+    }
+
+    /// Record that the user touched the composer (typing, caret, slash menu).
+    pub fn note_input_activity(&mut self) {
+        if self.input_focused {
+            self.input_last_activity = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Blur the composer when focused but idle past [`INPUT_IDLE_BLUR_MS`].
+    /// Returns true when focus was dropped (caller should redraw).
+    pub fn maybe_idle_blur_input(&mut self) -> bool {
+        if !self.input_focused {
+            return false;
+        }
+        let Some(at) = self.input_last_activity else {
+            return false;
+        };
+        if at.elapsed().as_millis() < INPUT_IDLE_BLUR_MS {
+            return false;
+        }
+        self.blur_input();
+        true
     }
 
     /// True when `(col, row)` lands inside the input strip from the last draw.
@@ -335,12 +400,14 @@ impl App {
 
     /// Advance the animation frame from wall-clock time. Called every loop
     /// iteration; mouse/key event bursts don't speed the animation up because
-    /// the frame is a pure function of elapsed time.
-    pub fn tick(&mut self) {
+    /// the frame is a pure function of elapsed time. Also idle-blurs the
+    /// composer when typing has paused — returns true if a redraw is needed.
+    pub fn tick(&mut self) -> bool {
         self.spinner = (self.anim_start.elapsed().as_millis() / 100) as usize;
         if self.logo_bonk.as_ref().is_some_and(|b| !b.alive()) {
             self.logo_bonk = None;
         }
+        self.maybe_idle_blur_input()
     }
 
     /// True when the frame should keep painting (spinner / shimmer / bonk / flash).
@@ -368,7 +435,7 @@ impl App {
         let Some(logo) = self.logo_hit else {
             return false;
         };
-        let Some((lx, ly)) = crate::render::mascot::hit_cell(logo, col, row) else {
+        let Some((lx, ly)) = crate::render::wordmark::hit_cell(logo, col, row) else {
             return false;
         };
         self.logo_bonk = Some(LogoBonk::fresh(lx, ly));
@@ -491,9 +558,11 @@ impl App {
         self.blocks.push(Block::Welcome);
         self.usage = Usage::default();
         self.scroll_from_bottom = 0;
-        self.pending_images.clear();
+        self.pending_attaches.clear();
         self.input.clear();
         self.reset_menu();
+        self.close_palette();
+        self.close_about();
         self.running = false;
         self.click_hits.clear();
         self.view = ChatView::Main;
@@ -503,12 +572,99 @@ impl App {
         self.md_cache = MdCache::default();
     }
 
-    pub fn add_pending_image(&mut self, src: ImageSource) {
-        self.pending_images.push(src);
+    pub fn has_pending_attaches(&self) -> bool {
+        !self.pending_attaches.is_empty()
     }
 
-    pub fn take_pending_images(&mut self) -> Vec<ImageSource> {
-        std::mem::take(&mut self.pending_images)
+    pub fn attachment_tags_line(&self) -> String {
+        self.pending_attaches
+            .iter()
+            .map(PendingAttach::tag)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Attach a path: images become vision sources; other files are path notes.
+    pub fn attach_path(&mut self, path: &str) -> Result<String, String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("usage: /attach <path>".into());
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let is_image = is_image_path(path);
+        let n = self.pending_attaches.len() + 1;
+        let (label, image) = if is_image {
+            let data = base64_encode(&bytes);
+            (
+                format!("Image #{n}"),
+                Some(ImageSource::Base64 {
+                    media_type: media_type_for(path),
+                    data,
+                }),
+            )
+        } else {
+            (format!("File #{n}"), None)
+        };
+        let tag = format!("[{label}]");
+        self.pending_attaches.push(PendingAttach {
+            label,
+            path: path.to_string(),
+            image,
+        });
+        Ok(tag)
+    }
+
+    /// If `text` is (or ends with) an existing image/file path, attach it.
+    /// Returns the leftover text with the path removed when attached.
+    pub fn try_attach_pasted_path(&mut self, text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains(' ') {
+            return None;
+        }
+        let path = trimmed.trim_matches('"').trim_matches('\'');
+        if !std::path::Path::new(path).is_file() {
+            return None;
+        }
+        if self.attach_path(path).is_ok() {
+            Some(String::new())
+        } else {
+            None
+        }
+    }
+
+    pub fn take_pending_attaches(&mut self) -> Vec<PendingAttach> {
+        std::mem::take(&mut self.pending_attaches)
+    }
+
+    pub fn open_palette(&mut self) {
+        self.about_open = false;
+        self.palette = Some(PaletteState::commands());
+    }
+
+    pub fn open_model_picker(&mut self) {
+        self.about_open = false;
+        self.palette = Some(PaletteState::models());
+    }
+
+    pub fn close_palette(&mut self) {
+        self.palette = None;
+    }
+
+    pub fn palette_open(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    pub fn open_about(&mut self) {
+        self.close_palette();
+        self.about_open = true;
+    }
+
+    pub fn close_about(&mut self) {
+        self.about_open = false;
+    }
+
+    pub fn about_open(&self) -> bool {
+        self.about_open
     }
 
     /// Apply an agent event. Returns `true` when the visible UI should redraw
@@ -927,6 +1083,31 @@ fn is_subagent_tool(name: &str) -> bool {
     matches!(name, "verify_project" | "spawn_subagent" | "spawn_swarm")
 }
 
+fn is_image_path(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+    )
+}
+
+fn media_type_for(path: &str) -> String {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+    .to_string()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,6 +1118,7 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "m".into(),
+            model_choices: Vec::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
@@ -1049,5 +1231,30 @@ mod tests {
         assert!(msg.contains("Alpha"), "{msg}");
         assert!(msg.contains("make it shorter"), "{msg}");
         assert!(msg.contains(".hive/Plan.md"), "{msg}");
+    }
+
+    #[test]
+    fn idle_timeout_blurs_focused_input() {
+        let mut a = app();
+        assert!(a.input_focused);
+        a.input_last_activity = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64));
+        assert!(a.tick(), "idle blur should request a redraw");
+        assert!(!a.input_focused);
+        assert!(a.input_last_activity.is_none());
+    }
+
+    #[test]
+    fn recent_composer_activity_keeps_focus() {
+        let mut a = app();
+        a.focus_input();
+        assert!(!a.tick());
+        assert!(a.input_focused);
+
+        a.input_last_activity = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64));
+        a.note_input_activity();
+        assert!(!a.tick());
+        assert!(a.input_focused);
     }
 }

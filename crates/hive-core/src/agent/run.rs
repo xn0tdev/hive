@@ -81,7 +81,6 @@ impl AgentBuilder {
             depth,
             cwd,
             mode,
-            max_steps: 50,
             vision_cache: HashMap::new(),
         }
     }
@@ -114,7 +113,6 @@ pub struct Agent {
     depth: usize,
     cwd: PathBuf,
     mode: AgentMode,
-    max_steps: usize,
     vision_cache: HashMap<String, String>,
 }
 
@@ -190,7 +188,7 @@ impl Agent {
 
         let mut final_text = String::new();
 
-        for step in 0..self.max_steps {
+        loop {
             if interrupt.load(Ordering::Relaxed) {
                 self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                 break;
@@ -249,10 +247,8 @@ impl Agent {
                 self.run_tool(&tc.id, &tc.name, &tc.arguments).await;
             }
 
-            if step + 1 == self.max_steps {
-                self.emit(AgentEvent::Notice(
-                    "Reached step limit for this turn.".to_string(),
-                ));
+            if interrupt.load(Ordering::Relaxed) {
+                break;
             }
         }
 

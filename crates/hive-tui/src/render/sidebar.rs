@@ -428,6 +428,7 @@ mod tests {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "Model".into(),
+            model_choices: Vec::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0".into(),
