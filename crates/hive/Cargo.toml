@@ -11,8 +11,7 @@ path = "src/main.rs"
 [dependencies]
 hive-core = { workspace = true }
 hive-llm = { workspace = true }
-hive-agent = { workspace = true }
-comb-tui = { workspace = true }
+hive-tui = { workspace = true }
 comb = { workspace = true }
 
 tokio = { workspace = true }

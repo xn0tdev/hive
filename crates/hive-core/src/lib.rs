@@ -1,7 +1,12 @@
-//! `hive-core` is the contract layer: traits and plain domain types shared by
-//! every other crate. It has no heavy dependencies and knows nothing about
-//! concrete providers, tools, or the TUI. Everything else depends on this and
-//! only this, which keeps the workspace decoupled and easy to extend.
+//! `hive-core` — contracts plus the agent brain.
+//!
+//! Layout:
+//! - root modules — shared types and traits (`config`, `tool`, `provider`, …)
+//! - [`agent`] — the YOLO loop, session, prompt
+//! - [`tools`] — filesystem, shell, web, skill, delegate
+//! - [`swarm`] — concurrent subagents
+//! - [`skills`] — disk-backed `SKILL.md` loader
+//! - [`vision_impl`] — describe-and-inject vision fallback
 
 pub mod config;
 pub mod error;
@@ -13,6 +18,12 @@ pub mod spawner;
 pub mod tool;
 pub mod vision;
 
+pub mod agent;
+pub mod skills;
+pub mod swarm;
+pub mod tools;
+mod vision_impl;
+
 pub use config::{AppConfig, ModelRole, Secrets};
 pub use error::{CoreError, Result};
 pub use event::{AgentEvent, EventReceiver, EventSender, Renderer, SubagentStatus};
@@ -22,3 +33,9 @@ pub use skill::{no_skills, NoSkills, SkillMeta, SkillSource};
 pub use spawner::{noop_spawner, NoopSpawner, SubagentOutcome, SubagentSpawner, SubagentTask};
 pub use tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 pub use vision::{no_vision, NoVision, VisionDescriber};
+
+pub use agent::{Agent, AgentBuilder, Session, UserInput};
+pub use skills::DiskSkills;
+pub use swarm::new_spawner;
+pub use tools::all_tools;
+pub use vision_impl::DescribeVision;

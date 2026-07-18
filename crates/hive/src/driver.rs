@@ -1,15 +1,14 @@
-//! The agent driver: consumes `InputCommand`s from the TUI and runs turns on
-//! the agent. Kept separate from the TUI so the loop is UI-agnostic.
+//! Agent driver: consumes `InputCommand`s from the TUI and runs turns.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use comb_tui::InputCommand;
-use hive_agent::{Agent, UserInput};
 use hive_core::config::{AppConfig, ModelRole};
 use hive_core::event::{AgentEvent, EventSender};
+use hive_core::{Agent, UserInput};
+use hive_tui::InputCommand;
 
 pub async fn run(
     mut agent: Agent,
@@ -39,7 +38,6 @@ pub async fn run(
     }
 }
 
-/// Accept either a role name (default/smart/fast/vision) or a literal model id.
 fn resolve_model(cfg: &AppConfig, s: &str) -> String {
     match ModelRole::parse(s) {
         Some(role) => cfg.model(role).to_string(),

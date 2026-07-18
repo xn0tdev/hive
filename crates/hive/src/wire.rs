@@ -1,8 +1,5 @@
-//! The composition root. This is the ONLY place that knows every concrete
-//! implementation: it builds them, injects them through core traits, and starts
-//! the driver + TUI. Concrete pieces come from just a few crates now —
-//! `hive-llm` (provider) and `hive-agent` (loop + tools + swarm + skills +
-//! vision) — so wiring a new capability is usually a one-line change here.
+//! Composition root: builds concrete implementations, injects them through
+//! core traits, and starts the driver + TUI.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -10,19 +7,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use hive_agent::{AgentBuilder, DescribeVision, DiskSkills};
 use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
-use comb_tui::TuiInit;
+use hive_core::{all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills};
 use hive_llm::FireworksProvider;
+use hive_tui::TuiInit;
 
 use crate::config;
 use crate::driver;
 
-/// Set up file logging (never touches the TUI). Returns a guard that must live
-/// for the program's lifetime.
 pub fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let dir = directories::BaseDirs::new()
         .map(|b| b.cache_dir().join("hive"))
@@ -43,17 +38,14 @@ pub fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    // Seed a sample skill on first run so the feature is discoverable.
     let global_skills = config::config_dir().join("skills");
     seed_sample_skill(&global_skills);
     let skill_dirs = vec![global_skills, cwd.join(".hive").join("skills")];
 
-    // Channels between agent driver and TUI.
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
     let interrupt = Arc::new(AtomicBool::new(false));
 
-    // --- concrete implementations, injected via core traits ---
     let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
         cfg.provider.base_url.clone(),
         cfg.secrets.provider_api_key.clone(),
@@ -61,7 +53,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
     let vision: Arc<dyn VisionDescriber> =
         Arc::new(DescribeVision::new(provider.clone(), cfg.models.vision.clone()));
-    let tools = hive_agent::all_tools();
+    let tools = all_tools();
 
     let builder = AgentBuilder {
         provider: provider.clone(),
@@ -71,9 +63,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         config: cfg.clone(),
     };
 
-    // The swarm is both built from the builder and injected back as the main
-    // agent's spawner.
-    let spawner = hive_agent::new_spawner(
+    let spawner = new_spawner(
         builder.clone(),
         event_tx.clone(),
         cfg.swarm.max_concurrent,
@@ -92,7 +82,6 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
 
     install_panic_hook();
 
-    // Run the agent driver on the async runtime; run the TUI on a blocking task.
     let driver_interrupt = interrupt.clone();
     let driver_cfg = cfg.clone();
     let driver_events = event_tx.clone();
@@ -100,15 +89,12 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         driver::run(agent, input_rx, driver_events, driver_interrupt, driver_cfg).await;
     });
 
-    tokio::task::spawn_blocking(move || comb_tui::run(tui_init, event_rx, input_tx, interrupt))
+    tokio::task::spawn_blocking(move || hive_tui::run(tui_init, event_rx, input_tx, interrupt))
         .await??;
 
     Ok(())
 }
 
-/// Make sure the terminal is restored if a panic escapes the TUI. `comb` saves
-/// the original termios when it enters raw mode, so `restore` can undo raw mode,
-/// leave the alternate screen, and stop mouse reporting from here.
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

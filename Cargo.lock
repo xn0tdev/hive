@@ -109,17 +109,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "comb-tui"
-version = "0.1.0"
-dependencies = [
- "base64",
- "comb",
- "hive-core",
- "tokio",
- "unicode-width",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -354,11 +343,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "comb",
- "comb-tui",
  "directories",
- "hive-agent",
  "hive-core",
  "hive-llm",
+ "hive-tui",
  "tokio",
  "toml",
  "tracing",
@@ -367,32 +355,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "hive-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "hive-core",
- "ignore",
- "inventory",
- "regex",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "hive-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "globset",
+ "ignore",
  "inventory",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -408,6 +385,17 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hive-tui"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "comb",
+ "hive-core",
+ "tokio",
+ "unicode-width",
 ]
 
 [[package]]

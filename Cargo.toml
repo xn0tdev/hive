@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "lib/*"]
 
 [workspace.package]
 edition = "2021"
@@ -31,14 +31,10 @@ ignore = "0.4"
 globset = "0.4"
 regex = "1"
 
-# Internal crates: core (contracts) → llm (provider), agent (loop + tools +
-# swarm + skills + vision), tui (frontend on the native `comb` engine), and the
-# hive binary that wires them.
-comb = { path = "crates/comb" }
-comb-tui = { path = "crates/comb-tui" }
+comb = { path = "lib/comb" }
 hive-core = { path = "crates/hive-core" }
 hive-llm = { path = "crates/hive-llm" }
-hive-agent = { path = "crates/hive-agent" }
+hive-tui = { path = "crates/hive-tui" }
 
 [profile.release]
 lto = "thin"

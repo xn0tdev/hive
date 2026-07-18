@@ -1,0 +1,12 @@
+[package]
+name = "hive-tui"
+edition.workspace = true
+version.workspace = true
+description = "Hive terminal frontend on the comb engine"
+
+[dependencies]
+hive-core = { workspace = true }
+comb = { workspace = true }
+tokio = { workspace = true }
+base64 = { workspace = true }
+unicode-width = "0.2"
