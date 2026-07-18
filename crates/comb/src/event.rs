@@ -247,7 +247,12 @@ fn parse_sgr_mouse(buf: &mut Vec<u8>) -> Option<Event> {
     } else if released {
         MouseKind::Up
     } else if cb & 0x20 != 0 {
-        MouseKind::Drag
+        // Motion: a held button drags; no button (bits == 3) is a hover move.
+        if cb & 0x3 == 3 {
+            MouseKind::Moved
+        } else {
+            MouseKind::Drag
+        }
     } else {
         match cb & 0x3 {
             0 => MouseKind::Down(MouseButton::Left),

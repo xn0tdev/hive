@@ -22,6 +22,7 @@
 //! }).unwrap();
 //! ```
 
+pub mod border;
 pub mod buffer;
 pub mod effects;
 pub mod event;
@@ -31,10 +32,11 @@ pub mod surface;
 pub mod terminal;
 pub mod text;
 
+pub use border::Border;
 pub use buffer::{Buffer, Cell};
 pub use event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
 pub use geom::{Pos, Rect, Size};
 pub use style::{Color, Modifier, Style};
 pub use surface::{Compositor, Surface};
-pub use terminal::{Frame, Terminal};
+pub use terminal::{render, restore, Frame, MouseMode, Terminal};
 pub use text::{Line, Span};

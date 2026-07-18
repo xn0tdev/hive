@@ -127,6 +127,16 @@ impl Buffer {
         }
     }
 
+    /// Draw `lines` top-down within `area`, starting at logical index `scroll`,
+    /// clipped to the area's height and width. The Paragraph-with-scroll of comb.
+    pub fn set_lines(&mut self, area: Rect, lines: &[Line], scroll: usize) {
+        for row in 0..area.height {
+            let idx = scroll + row as usize;
+            let Some(line) = lines.get(idx) else { break };
+            self.set_line(area.x, area.y + row, line, area.width);
+        }
+    }
+
     /// Fill a rectangle with `ch`/`style` (intersected with the buffer).
     pub fn fill(&mut self, rect: Rect, ch: char, style: Style) {
         let r = rect.intersection(self.area());
@@ -177,6 +187,22 @@ impl Buffer {
             }
         }
         out
+    }
+
+    /// The whole buffer as text, rows joined by `\n` (transparent cells become
+    /// spaces). Handy for snapshot-style assertions in tests.
+    pub fn text(&self) -> String {
+        let mut s = String::with_capacity((self.width as usize + 1) * self.height as usize);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let ch = self.cells[y as usize * self.width as usize + x as usize].ch;
+                s.push(if ch == '\0' { ' ' } else { ch });
+            }
+            if y + 1 < self.height {
+                s.push('\n');
+            }
+        }
+        s
     }
 }
 

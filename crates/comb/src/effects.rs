@@ -45,3 +45,62 @@ pub fn pulse(phase: usize, period: usize, lo: u8, hi: u8) -> Color {
     let v = v as u8;
     Color::rgb(v, v, v)
 }
+
+/// A named spinner: a cyclic set of single-width frames. Advance with `phase`.
+pub struct Spinner {
+    pub name: &'static str,
+    pub frames: &'static [&'static str],
+}
+
+impl Spinner {
+    pub fn frame(&self, phase: usize) -> &'static str {
+        if self.frames.is_empty() {
+            " "
+        } else {
+            self.frames[phase % self.frames.len()]
+        }
+    }
+}
+
+/// A gallery of ready-made spinners — every frame is one cell wide, no emoji, so
+/// they line up perfectly in the grid.
+pub const SPINNERS: &[Spinner] = &[
+    Spinner { name: "braille", frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] },
+    Spinner { name: "dots", frames: &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"] },
+    Spinner { name: "line", frames: &["|", "/", "-", "\\"] },
+    Spinner { name: "arc", frames: &["◜", "◠", "◝", "◞", "◡", "◟"] },
+    Spinner { name: "circle", frames: &["◐", "◓", "◑", "◒"] },
+    Spinner { name: "triangle", frames: &["◢", "◣", "◤", "◥"] },
+    Spinner { name: "quadrant", frames: &["▖", "▘", "▝", "▗"] },
+    Spinner { name: "bar", frames: &["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█", "▉", "▊", "▌", "▍", "▎"] },
+    Spinner { name: "star", frames: &["✶", "✸", "✹", "✺", "✹", "✷"] },
+    Spinner { name: "bounce", frames: &["⠁", "⠂", "⠄", "⠂"] },
+];
+
+/// Render a fractional progress bar of `width` cells using eighth-block glyphs
+/// for a smooth sub-cell edge. Returns styled spans (filled run + empty run).
+pub fn bar(fraction: f32, width: usize, filled: Style, empty: Style) -> Vec<Span> {
+    let frac = fraction.clamp(0.0, 1.0);
+    let total = width as f32 * frac;
+    let full = (total.floor() as usize).min(width);
+    let eighths = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+    let mut s = "█".repeat(full);
+    let mut used = full;
+    if used < width {
+        let idx = ((total - full as f32) * 8.0).round() as usize;
+        if idx > 0 {
+            s.push_str(eighths[idx.min(7)]);
+            used += 1;
+        }
+    }
+
+    let mut out = Vec::new();
+    if !s.is_empty() {
+        out.push(Span::styled(s, filled));
+    }
+    if used < width {
+        out.push(Span::styled(" ".repeat(width - used), empty));
+    }
+    out
+}

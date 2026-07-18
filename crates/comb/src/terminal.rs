@@ -4,6 +4,7 @@
 
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::buffer::Buffer;
@@ -14,6 +15,54 @@ use crate::surface::Compositor;
 
 const STDIN: i32 = libc::STDIN_FILENO;
 const STDOUT: i32 = libc::STDOUT_FILENO;
+
+/// How much mouse activity the terminal reports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseMode {
+    /// No mouse reporting.
+    Off,
+    /// Button presses, releases, and the wheel (default).
+    Buttons,
+    /// The above plus motion while a button is held (drag).
+    Drag,
+    /// The above plus all motion (hover). Noisier, but enables hover effects.
+    Motion,
+}
+
+/// The original termios, saved when a [`Terminal`] enters raw mode, so a panic
+/// hook can undo it via [`restore`] even without the `Terminal` in hand.
+static SAVED_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
+
+/// Best-effort terminal reset for panic hooks: leave the alternate screen, show
+/// the cursor, stop mouse reporting, and undo raw mode if we saved the original
+/// settings. Safe to call with no active `Terminal`.
+pub fn restore() {
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    let _ = out.flush();
+    if let Some(t) = *SAVED_TERMIOS.lock().unwrap() {
+        unsafe {
+            libc::tcsetattr(STDIN, libc::TCSANOW, &t);
+        }
+    }
+}
+
+/// Render a single frame into an in-memory [`Buffer`] without a real terminal —
+/// the closure gets the same [`Frame`] it would on screen. Used by tests.
+pub fn render<F: FnOnce(&mut Frame)>(size: Size, f: F) -> Buffer {
+    let mut back = Buffer::blank(size);
+    {
+        let mut frame = Frame {
+            root: &mut back,
+            comp: Compositor::new(),
+            cursor: None,
+            size,
+        };
+        f(&mut frame);
+        let _ = frame.finish();
+    }
+    back
+}
 
 /// What you draw into for one frame: a root buffer plus any overlay layers,
 /// composited in z-order when the frame is finished.
@@ -79,6 +128,7 @@ impl Terminal {
         let mut raw = orig;
         unsafe { libc::cfmakeraw(&mut raw) };
         set_termios(&raw)?;
+        *SAVED_TERMIOS.lock().unwrap() = Some(orig);
 
         let size = query_size();
         let mut term = Terminal {
@@ -98,6 +148,18 @@ impl Terminal {
 
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// Choose how much mouse activity to receive. Disables the other modes first
+    /// so switching is clean. SGR extended coordinates stay on for wide screens.
+    pub fn mouse_mode(&mut self, mode: MouseMode) -> io::Result<()> {
+        let seq = match mode {
+            MouseMode::Off => "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l",
+            MouseMode::Buttons => "\x1b[?1002l\x1b[?1003l\x1b[?1000h\x1b[?1006h",
+            MouseMode::Drag => "\x1b[?1000l\x1b[?1003l\x1b[?1002h\x1b[?1006h",
+            MouseMode::Motion => "\x1b[?1000l\x1b[?1002l\x1b[?1003h\x1b[?1006h",
+        };
+        self.write_raw(seq)
     }
 
     /// Build a frame, then flush the minimal diff to the terminal.
@@ -212,7 +274,7 @@ impl Drop for Terminal {
         // disable mouse · show cursor · leave alt screen
         let _ = self
             .out
-            .write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+            .write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l");
         let _ = self.out.flush();
         unsafe {
             libc::tcsetattr(STDIN, libc::TCSANOW, &self.orig);
