@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::event::{AgentEvent, EventSender, SubagentStatus};
+use crate::event::{AgentEvent, EventSender, SubagentLine, SubagentStatus};
 use crate::spawner::{noop_spawner, SubagentOutcome, SubagentSpawner, SubagentTask};
 
 use crate::agent::AgentBuilder;
@@ -47,10 +47,15 @@ impl Inner {
         let _permit = self.sem.acquire().await.ok();
 
         let id = task.id.clone();
-        let label = truncate(&task.prompt, 44);
+        let label = if task.label.trim().is_empty() {
+            truncate(&task.prompt, 44)
+        } else {
+            task.label.clone()
+        };
         let _ = self.events.send(AgentEvent::SubagentSpawned {
             id: id.clone(),
             label,
+            prompt: task.prompt.clone(),
         });
 
         // Allow nested delegation until the depth cap; then hand subagents a
@@ -64,14 +69,23 @@ impl Inner {
             noop_spawner()
         };
 
-        // Subagent events are discarded; the swarm surfaces status via the
-        // SubagentStatus events above/below instead.
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(rx);
+        // Forward selected child events so the TUI can show the subagent
+        // conversation and a live status line under the card header.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let fwd = self.events.clone();
+        let fwd_id = id.clone();
+        let forward = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                forward_child(&fwd, &fwd_id, ev);
+            }
+        });
 
         let model = self.builder.config.model(task.model_role).to_string();
-        let mut agent = self.builder.build(tx, model, task.depth, child_spawner);
-        let result = agent.run_headless(task.prompt).await;
+        let result = {
+            let mut agent = self.builder.build(tx, model, task.depth, child_spawner);
+            agent.run_headless(task.prompt).await
+        }; // agent (and its event sender) dropped → forwarder exits
+        let _ = forward.await;
 
         let ok = !result.trim().is_empty();
         let _ = self.events.send(AgentEvent::SubagentStatus {
@@ -81,7 +95,8 @@ impl Inner {
             } else {
                 SubagentStatus::Failed
             },
-            detail: truncate(&result, 60),
+            // Short status only — the full report lives in the transcript.
+            detail: if ok { "done".into() } else { "failed".into() },
         });
 
         SubagentOutcome {
@@ -89,6 +104,82 @@ impl Inner {
             result: Ok(result),
         }
     }
+}
+
+fn forward_child(events: &EventSender, id: &str, ev: AgentEvent) {
+    match ev {
+        AgentEvent::ToolStarted {
+            name,
+            args_preview,
+            ..
+        } => {
+            let detail = tool_detail(&name, &args_preview);
+            let _ = events.send(AgentEvent::SubagentStatus {
+                id: id.to_string(),
+                status: SubagentStatus::Running,
+                detail: detail.clone(),
+            });
+            let _ = events.send(AgentEvent::SubagentTranscript {
+                id: id.to_string(),
+                line: SubagentLine::Tool {
+                    name,
+                    detail: args_preview,
+                    ok: None,
+                },
+            });
+        }
+        AgentEvent::ToolFinished {
+            name,
+            ok,
+            summary,
+            ..
+        } => {
+            let _ = events.send(AgentEvent::SubagentTranscript {
+                id: id.to_string(),
+                line: SubagentLine::Tool {
+                    name,
+                    detail: summary,
+                    ok: Some(ok),
+                },
+            });
+        }
+        AgentEvent::ReasoningDelta(t) => {
+            if t.is_empty() {
+                return;
+            }
+            let _ = events.send(AgentEvent::SubagentTranscript {
+                id: id.to_string(),
+                line: SubagentLine::Thinking(t),
+            });
+        }
+        AgentEvent::AssistantMessage(t) => {
+            if t.trim().is_empty() {
+                return;
+            }
+            let _ = events.send(AgentEvent::SubagentTranscript {
+                id: id.to_string(),
+                line: SubagentLine::Assistant(t),
+            });
+        }
+        AgentEvent::Notice(t) => {
+            let _ = events.send(AgentEvent::SubagentTranscript {
+                id: id.to_string(),
+                line: SubagentLine::Notice(t),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn tool_detail(name: &str, args: &str) -> String {
+    let s = if args.trim().is_empty() {
+        name.to_string()
+    } else if name == "run_shell" {
+        format!("$ {args}")
+    } else {
+        format!("{name} · {args}")
+    };
+    truncate(&s, 56)
 }
 
 #[async_trait]

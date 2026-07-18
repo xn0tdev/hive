@@ -7,6 +7,8 @@ use crate::config::ModelRole;
 #[derive(Debug, Clone)]
 pub struct SubagentTask {
     pub id: String,
+    /// Short UI label (e.g. "Checking project") shown in the transcript card.
+    pub label: String,
     pub prompt: String,
     pub model_role: ModelRole,
     /// Recursion depth of the agent that will run this task.

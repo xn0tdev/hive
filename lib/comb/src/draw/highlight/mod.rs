@@ -3,6 +3,7 @@
 mod json;
 mod rust;
 mod shell;
+mod toml;
 
 use crate::core::style::{Color, Style};
 use crate::core::text::{Line, Span};
@@ -15,6 +16,7 @@ pub enum Lang {
     Rust,
     Json,
     Shell,
+    Toml,
 }
 
 /// Token colours for a code block. Tune per theme.
@@ -58,6 +60,25 @@ pub fn highlight(source: &str, lang: Lang, theme: &HighlightTheme) -> Vec<Line> 
         Lang::Rust => rust::highlight(source, theme),
         Lang::Json => json::highlight(source, theme),
         Lang::Shell => shell::highlight(source, theme),
+        Lang::Toml => toml::highlight(source, theme),
+    }
+}
+
+/// Map a markdown fence info string (`rust`, `bash`, …) to a [`Lang`].
+pub fn lang_from_info(info: &str) -> Lang {
+    // Fence labels are often `rust,no_run` or `toml title="…"`.
+    let token = info
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '{' || c == '=')
+        .find(|t| !t.is_empty())
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '#')
+        .to_ascii_lowercase();
+    match token.as_str() {
+        "rs" | "rust" => Lang::Rust,
+        "json" | "jsonc" => Lang::Json,
+        "sh" | "bash" | "shell" | "zsh" | "fish" => Lang::Shell,
+        "toml" => Lang::Toml,
+        _ => Lang::Plain,
     }
 }
 

@@ -1,5 +1,6 @@
 //! Borderless tinted input strip: → prompt, placeholder, hardware cursor.
 //! Long lines soft-wrap within the strip width so the band can grow.
+//! In subagent view the strip becomes a read-only `← back` control.
 
 use comb::{Frame, Line, Modifier, Rect, Span, Style};
 
@@ -7,6 +8,7 @@ use crate::app::input::PROMPT_COLS;
 use crate::app::App;
 
 const PROMPT: &str = "→ ";
+const BACK: &str = "← back";
 
 /// Text columns after the prompt/indent for a strip of the given outer width.
 pub fn text_cols(band_width: u16) -> usize {
@@ -43,7 +45,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         } else if !app.pending_images.is_empty() {
             "Describe what to do with the attached image(s)"
         } else {
-            "Ask, build, unleash the swarm"
+            "Ask hive anything"
         };
         lines.push(Line::from(vec![
             Span::styled(PROMPT, prompt_style),
@@ -96,4 +98,41 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let x = (inner.x + x_off + vcol as u16).min(max_x);
     let y = (inner.y + vrow.saturating_sub(scroll) as u16).min(max_y);
     f.set_cursor(x, y);
+}
+
+/// Read-only strip shown while browsing a subagent thread.
+pub fn draw_back(f: &mut Frame, area: Rect, app: &mut App) {
+    let theme = &app.theme;
+    let bg = theme.strip;
+    f.buffer().paint(area, Style::default().bg(bg));
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 {
+        app.back_hit_row = None;
+        return;
+    }
+
+    let line = Line::from(vec![
+        Span::styled(
+            BACK,
+            Style::default()
+                .fg(theme.accent)
+                .bg(bg)
+                .add(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  · read only",
+            Style::default().fg(theme.faint).bg(bg),
+        ),
+    ]);
+    f.buffer()
+        .set_lines_on(inner, &[line], 0, Style::default().bg(bg));
+    app.back_hit_row = Some(inner.y);
+    // Hide the hardware cursor in this view.
+    f.set_cursor(inner.x, inner.y);
 }

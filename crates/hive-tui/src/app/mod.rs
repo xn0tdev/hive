@@ -3,17 +3,19 @@
 pub mod input;
 pub mod state;
 
-use hive_core::event::{AgentEvent, SubagentStatus};
+use comb::Rect;
+use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
 use hive_core::message::ImageSource;
 use hive_core::provider::Usage;
 
 use crate::commands;
+use crate::render::mascot::LogoBonk;
 use crate::render::spinner;
 use crate::theme::Theme;
 use crate::TuiInit;
 
 use input::InputState;
-use state::{Block, SwarmEntry, Thought, ToolCard, ToolStatus};
+use state::{Block, ChatView, SubagentCard, Thought, ToolCard, ToolStatus};
 
 pub struct App {
     pub(crate) blocks: Vec<Block>,
@@ -26,7 +28,6 @@ pub struct App {
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
-    pub(crate) swarm: Vec<SwarmEntry>,
     pub(crate) pending_images: Vec<ImageSource>,
     /// Selected row in the slash command menu.
     pub(crate) menu_index: usize,
@@ -37,9 +38,17 @@ pub struct App {
     /// Animation clock: frames derive from elapsed time, so the spinner and
     /// shimmer run at a constant speed no matter how often events arrive.
     pub(crate) anim_start: std::time::Instant,
-    /// Screen rows of thought headers from the last draw: (row, block index).
-    /// Rebuilt every frame; used to hit-test mouse clicks.
-    pub(crate) thought_hits: Vec<(u16, usize)>,
+    /// Screen rows of expandable headers from the last draw: (row, block index).
+    /// Rebuilt every frame; used to hit-test mouse clicks on thoughts/subagents.
+    pub(crate) click_hits: Vec<(u16, usize)>,
+    /// Landing-screen logo rect from the last draw (for click hit-testing).
+    pub(crate) logo_hit: Option<Rect>,
+    /// Active "bonk" ripple on the HIVE wordmark.
+    pub(crate) logo_bonk: Option<LogoBonk>,
+    /// Main transcript vs a read-only subagent chat.
+    pub(crate) view: ChatView,
+    /// Screen row of the `← back` control in subagent view (last draw).
+    pub(crate) back_hit_row: Option<u16>,
 }
 
 /// How long a flash message / the ctrl+c confirmation window lives.
@@ -59,16 +68,49 @@ impl App {
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
-            swarm: Vec::new(),
             pending_images: Vec::new(),
             menu_index: 0,
             flash_msg: None,
             ctrl_c_armed: None,
             anim_start: std::time::Instant::now(),
-            thought_hits: Vec::new(),
+            click_hits: Vec::new(),
+            logo_hit: None,
+            logo_bonk: None,
+            view: ChatView::Main,
+            back_hit_row: None,
         };
         app.blocks.push(Block::Welcome);
         app
+    }
+
+    /// True while viewing a subagent thread (read-only; no input).
+    pub fn in_subagent_view(&self) -> bool {
+        matches!(self.view, ChatView::Subagent(_))
+    }
+
+    /// The subagent card currently being viewed, if any.
+    pub fn viewed_subagent(&self) -> Option<&SubagentCard> {
+        match &self.view {
+            ChatView::Main => None,
+            ChatView::Subagent(id) => self.blocks.iter().find_map(|b| match b {
+                Block::Subagent(card) if card.id == *id => Some(card),
+                _ => None,
+            }),
+        }
+    }
+
+    /// Open the read-only chat view for a subagent card.
+    pub fn open_subagent_view(&mut self, id: String) {
+        self.view = ChatView::Subagent(id);
+        self.scroll_from_bottom = 0;
+        self.back_hit_row = None;
+    }
+
+    /// Return to the main agent transcript.
+    pub fn leave_subagent_view(&mut self) {
+        self.view = ChatView::Main;
+        self.scroll_from_bottom = 0;
+        self.back_hit_row = None;
     }
 
     pub fn spinner_char(&self) -> &'static str {
@@ -80,6 +122,22 @@ impl App {
     /// the frame is a pure function of elapsed time.
     pub fn tick(&mut self) {
         self.spinner = (self.anim_start.elapsed().as_millis() / 90) as usize;
+        if self.logo_bonk.as_ref().is_some_and(|b| !b.alive()) {
+            self.logo_bonk = None;
+        }
+    }
+
+    /// Start a logo bonk ripple at a screen cell (landing only).
+    pub fn bonk_logo_at(&mut self, col: u16, row: u16) -> bool {
+        let Some(logo) = self.logo_hit else {
+            return false;
+        };
+        let Some((lx, ly)) = crate::render::mascot::hit_cell(logo, col, row) else {
+            return false;
+        };
+        self.logo_bonk = Some(LogoBonk::fresh(lx, ly));
+        crate::sound::play_bonk();
+        true
     }
 
     /// True when nothing has happened yet (only the welcome block) and no turn
@@ -101,7 +159,7 @@ impl App {
     /// The flash text, if it hasn't expired yet.
     pub fn flash_text(&self) -> Option<&str> {
         match &self.flash_msg {
-            Some((msg, at)) if at.elapsed().as_millis() < FLASH_MS => Some(msg),
+            Some((msg, at)) if at.elapsed().as_millis() < FLASH_MS => Some(msg.as_str()),
             _ => None,
         }
     }
@@ -199,14 +257,15 @@ impl App {
     pub fn new_chat(&mut self) {
         self.blocks.clear();
         self.blocks.push(Block::Welcome);
-        self.swarm.clear();
         self.usage = Usage::default();
         self.scroll_from_bottom = 0;
         self.pending_images.clear();
         self.input.clear();
         self.reset_menu();
         self.running = false;
-        self.thought_hits.clear();
+        self.click_hits.clear();
+        self.view = ChatView::Main;
+        self.back_hit_row = None;
     }
 
     pub fn add_pending_image(&mut self, src: ImageSource) {
@@ -235,25 +294,39 @@ impl App {
                 args_preview,
             } => {
                 self.close_thought();
-                self.blocks.push(Block::Tool(ToolCard {
-                    id,
-                    name,
-                    args: args_preview,
-                    output: String::new(),
-                    status: ToolStatus::Running,
-                }))
+                // Subagent tools render as Subagent cards, not tool rows.
+                if !is_subagent_tool(&name) {
+                    self.blocks.push(Block::Tool(ToolCard {
+                        id,
+                        name,
+                        args: args_preview,
+                        output: String::new(),
+                        status: ToolStatus::Running,
+                        started: std::time::Instant::now(),
+                        elapsed_ms: None,
+                    }));
+                }
             }
             AgentEvent::ToolOutput { id, chunk } => self.append_tool_output(&id, &chunk),
             AgentEvent::ToolFinished { id, ok, .. } => self.finish_tool(&id, ok),
             AgentEvent::Usage(u) => self.usage = u,
-            AgentEvent::SubagentSpawned { id, label } => self.swarm.push(SwarmEntry {
-                id,
-                label,
-                status: SubagentStatus::Running,
-                detail: String::new(),
-            }),
+            AgentEvent::SubagentSpawned { id, label, prompt } => {
+                self.blocks.push(Block::Subagent(SubagentCard {
+                    id,
+                    label,
+                    status: SubagentStatus::Running,
+                    detail: String::new(),
+                    prompt,
+                    lines: Vec::new(),
+                    started: std::time::Instant::now(),
+                    elapsed_ms: None,
+                }));
+            }
             AgentEvent::SubagentStatus { id, status, detail } => {
-                self.update_swarm(&id, status, detail)
+                self.update_subagent(&id, status, detail);
+            }
+            AgentEvent::SubagentTranscript { id, line } => {
+                self.append_subagent_line(&id, line);
             }
             AgentEvent::ModelChanged(m) => self.model = m,
             AgentEvent::Notice(s) => self.blocks.push(Block::Notice(s)),
@@ -323,17 +396,26 @@ impl App {
         });
     }
 
-    /// Flip one thought (identified by its block index) — used by mouse clicks
-    /// on a thought header.
-    pub fn toggle_thought_at(&mut self, block_idx: usize) {
-        if let Some(Block::Reasoning(th)) = self.blocks.get_mut(block_idx) {
-            th.open = !th.open;
+    /// Activate an expandable header by index — thoughts toggle; subagents
+    /// open their dedicated read-only chat view.
+    pub fn activate_expandable_at(&mut self, block_idx: usize) {
+        match self.blocks.get(block_idx) {
+            Some(Block::Reasoning(_)) => {
+                if let Some(Block::Reasoning(th)) = self.blocks.get_mut(block_idx) {
+                    th.open = !th.open;
+                }
+            }
+            Some(Block::Subagent(card)) => {
+                let id = card.id.clone();
+                self.open_subagent_view(id);
+            }
+            _ => {}
         }
     }
 
-    /// The thought header (if any) drawn on this screen row in the last frame.
-    pub fn thought_at_row(&self, row: u16) -> Option<usize> {
-        self.thought_hits
+    /// The expandable header (if any) drawn on this screen row in the last frame.
+    pub fn expandable_at_row(&self, row: u16) -> Option<usize> {
+        self.click_hits
             .iter()
             .find(|(r, _)| *r == row)
             .map(|(_, idx)| *idx)
@@ -388,19 +470,88 @@ impl App {
             if let Block::Tool(card) = block {
                 if card.id == id {
                     card.status = if ok { ToolStatus::Ok } else { ToolStatus::Err };
+                    if card.elapsed_ms.is_none() {
+                        card.elapsed_ms = Some(card.started.elapsed().as_millis());
+                    }
                     return;
                 }
             }
         }
     }
 
-    fn update_swarm(&mut self, id: &str, status: SubagentStatus, detail: String) {
-        for entry in self.swarm.iter_mut() {
-            if entry.id == id {
-                entry.status = status;
-                entry.detail = detail;
+    fn update_subagent(&mut self, id: &str, status: SubagentStatus, detail: String) {
+        for block in self.blocks.iter_mut().rev() {
+            if let Block::Subagent(card) = block {
+                if card.id == id {
+                    card.status = status;
+                    if !detail.is_empty() {
+                        card.detail = detail;
+                    }
+                    if status != SubagentStatus::Running && card.elapsed_ms.is_none() {
+                        card.elapsed_ms = Some(card.started.elapsed().as_millis());
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn append_subagent_line(&mut self, id: &str, line: SubagentLine) {
+        for block in self.blocks.iter_mut().rev() {
+            if let Block::Subagent(card) = block {
+                if card.id != id {
+                    continue;
+                }
+                match line {
+                    SubagentLine::Thinking(t) => {
+                        if let Some(SubagentLine::Thinking(prev)) = card.lines.last_mut() {
+                            prev.push_str(&t);
+                        } else {
+                            card.lines.push(SubagentLine::Thinking(t));
+                        }
+                    }
+                    SubagentLine::Tool {
+                        name,
+                        detail,
+                        ok: Some(ok),
+                    } => {
+                        // Prefer updating the matching in-flight tool row.
+                        let open = card.lines.iter_mut().rev().find(|l| {
+                            matches!(
+                                l,
+                                SubagentLine::Tool { ok: None, name: n, .. } if *n == name
+                            )
+                        });
+                        if let Some(SubagentLine::Tool {
+                            detail: d,
+                            ok: running,
+                            ..
+                        }) = open
+                        {
+                            if !detail.is_empty() {
+                                *d = detail;
+                            }
+                            *running = Some(ok);
+                        } else {
+                            card.lines.push(SubagentLine::Tool {
+                                name,
+                                detail,
+                                ok: Some(ok),
+                            });
+                        }
+                    }
+                    other => card.lines.push(other),
+                }
                 return;
             }
         }
     }
+}
+
+/// Tools whose activity belongs in a Subagent transcript card, not a tool row.
+fn is_subagent_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "verify_project" | "spawn_subagent" | "spawn_swarm"
+    )
 }

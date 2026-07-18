@@ -1,11 +1,28 @@
 use crate::provider::Usage;
 
-/// Status of a subagent in the swarm panel.
+/// Status of a subagent in the swarm / transcript card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentStatus {
     Running,
     Done,
     Failed,
+}
+
+/// One line of a subagent's conversation, forwarded for the expanded UI.
+#[derive(Debug, Clone)]
+pub enum SubagentLine {
+    /// Assistant reasoning / thinking chunk (may be streamed).
+    Thinking(String),
+    /// Finalized assistant message.
+    Assistant(String),
+    /// A tool the subagent invoked.
+    Tool {
+        name: String,
+        detail: String,
+        /// `None` while running; `Some` when finished.
+        ok: Option<bool>,
+    },
+    Notice(String),
 }
 
 /// Everything the agent core wants to tell a frontend. The TUI is just one
@@ -42,11 +59,19 @@ pub enum AgentEvent {
     SubagentSpawned {
         id: String,
         label: String,
+        /// Task prompt handed off by the parent agent (shown in the expanded view).
+        prompt: String,
     },
     SubagentStatus {
         id: String,
         status: SubagentStatus,
+        /// Short status line for the collapsed card (not the full report).
         detail: String,
+    },
+    /// Incremental transcript from a running subagent (for click-to-expand).
+    SubagentTranscript {
+        id: String,
+        line: SubagentLine,
     },
     /// The active model changed (e.g. via `/model`).
     ModelChanged(String),

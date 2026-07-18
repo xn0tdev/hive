@@ -82,11 +82,29 @@ fn handle_key(
     let alt = key.mods.alt;
     let shift = key.mods.shift;
 
-    let menu_open = app.slash_prefix().is_some() && !app.menu_items().is_empty();
+    let subagent = app.in_subagent_view();
+    let menu_open =
+        !subagent && app.slash_prefix().is_some() && !app.menu_items().is_empty();
 
     // Any key other than ctrl+c cancels a pending quit confirmation.
     if !(ctrl && key.code == KeyCode::Char('c')) {
         app.disarm_quit();
+    }
+
+    // Read-only subagent view: scroll + leave; no typing / submit.
+    if subagent {
+        match key.code {
+            KeyCode::Char('q') if ctrl => return true,
+            KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+            KeyCode::Esc | KeyCode::Backspace => app.leave_subagent_view(),
+            KeyCode::Left => app.leave_subagent_view(),
+            KeyCode::PageUp => app.scroll_up(5),
+            KeyCode::PageDown => app.scroll_down(5),
+            KeyCode::Up => app.scroll_up(1),
+            KeyCode::Down => app.scroll_down(1),
+            _ => {}
+        }
+        return false;
     }
 
     match key.code {
@@ -162,14 +180,22 @@ fn handle_key(
     false
 }
 
-/// Wheel scrolls the transcript; a left click on a thought header toggles it.
+/// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
+/// chats, hits `← back`, or bonks the logo.
 fn handle_mouse(app: &mut App, m: Mouse) {
     match m.kind {
         MouseKind::ScrollUp => app.scroll_up(3),
         MouseKind::ScrollDown => app.scroll_down(3),
         MouseKind::Down(MouseButton::Left) => {
-            if let Some(idx) = app.thought_at_row(m.row) {
-                app.toggle_thought_at(idx);
+            if app.is_empty_chat() && app.bonk_logo_at(m.col, m.row) {
+                return;
+            }
+            if app.in_subagent_view() && app.back_hit_row == Some(m.row) {
+                app.leave_subagent_view();
+                return;
+            }
+            if let Some(idx) = app.expandable_at_row(m.row) {
+                app.activate_expandable_at(idx);
             }
         }
         _ => {}

@@ -1,7 +1,7 @@
 //! Lightweight markdown → comb lines. Supports fenced code, headings, bullets,
 //! GFM tables, horizontal rules, and inline `code` / **bold** / *italic*.
 
-use comb::{Line, Modifier, Span, Style};
+use comb::{highlight, Line, Modifier, Span, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
@@ -337,9 +337,10 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
                 } else if piece.is_empty() {
                     spans.push(Span::styled(" ".repeat(*w), body));
                 } else if row_h == 1 {
-                    // Single-line cell: keep inline `code` / emphasis.
+                    // Single-line cell: inline emphasis, but no code-chip
+                    // backgrounds — they look like crooked row highlights.
                     let raw = row.get(ci).map(String::as_str).unwrap_or("");
-                    let mut cell_spans = inline(raw, theme);
+                    let mut cell_spans = inline_flat(raw, theme);
                     let pad = w.saturating_sub(spans_width(&cell_spans));
                     if pad > 0 {
                         cell_spans.push(Span::styled(" ".repeat(pad), body));
@@ -454,36 +455,60 @@ fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
 }
 
 fn flush_code_block(lines: &mut Vec<Line>, body: &[String], label: &str, theme: &Theme) {
-    let st = Style::default().fg(theme.code_fg).bg(theme.code_bg);
-    let faint = Style::default().fg(theme.faint).bg(theme.code_bg);
+    if body.is_empty() {
+        return;
+    }
+
     let block_w = body
         .iter()
         .map(|l| display_width(l))
         .max()
         .unwrap_or(0)
-        .max(display_width(label) + 4)
         .max(8);
-
-    let mut header = format!("┌─ {label} ");
-    while display_width(&header) < block_w + 2 {
-        header.push('─');
+    let pad_st = Style::default().fg(theme.code_fg).bg(theme.code_bg);
+    let ht = code_highlight_theme(theme);
+    let lang = highlight::lang_from_info(label);
+    let source = body.join("\n");
+    let mut highlighted = highlight::highlight(&source, lang, &ht);
+    // `str::lines` drops a trailing empty row that the fence body still has.
+    while highlighted.len() < body.len() {
+        highlighted.push(Line::from(Span::styled(String::new(), ht.text)));
     }
-    lines.push(Line::from(Span::styled(header, faint)));
 
-    for raw in body {
-        let mut text = format!("  {raw}");
-        let pad = (block_w + 2).saturating_sub(display_width(&text));
-        if pad > 0 {
-            text.push_str(&" ".repeat(pad));
+    for line in highlighted {
+        let mut spans = vec![Span::styled("  ", pad_st)];
+        let mut w = 2usize;
+        for s in line.spans {
+            if s.content.is_empty() {
+                continue;
+            }
+            w += display_width(&s.content);
+            spans.push(s);
         }
-        lines.push(Line::from(Span::styled(text, st)));
+        let pad = (block_w + 2).saturating_sub(w);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), pad_st));
+        }
+        lines.push(Line::from(spans));
     }
+}
 
-    let mut footer = String::from("└─");
-    while display_width(&footer) < block_w + 2 {
-        footer.push('─');
+/// Token colours from the UI palette, with `code_bg` under every span so the
+/// block reads as one soft rectangle (no box-drawing chrome).
+fn code_highlight_theme(theme: &Theme) -> highlight::HighlightTheme {
+    let bg = theme.code_bg;
+    let mk = |fg| Style::default().fg(fg).bg(bg);
+    highlight::HighlightTheme {
+        text: mk(theme.code_fg),
+        keyword: mk(theme.accent),
+        string: mk(theme.warn),
+        comment: mk(theme.faint),
+        number: mk(theme.ok),
+        type_name: mk(theme.tool),
+        function: mk(theme.heading),
+        punctuation: mk(theme.dim),
+        line_number: mk(theme.faint),
     }
-    lines.push(Line::from(Span::styled(footer, faint)));
 }
 
 /// Plain lines for live streaming (no markdown yet).
@@ -524,9 +549,22 @@ fn find_double(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
+/// Inline markdown without code backgrounds (for table cells).
+fn inline_flat(text: &str, theme: &Theme) -> Vec<Span> {
+    inline_with(text, theme, false)
+}
+
 fn inline(text: &str, theme: &Theme) -> Vec<Span> {
+    inline_with(text, theme, true)
+}
+
+fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
     let base = Style::default().fg(theme.fg);
-    let code = Style::default().fg(theme.tool).bg(theme.code_bg);
+    let code = if code_bg {
+        Style::default().fg(theme.tool).bg(theme.code_bg)
+    } else {
+        Style::default().fg(theme.tool)
+    };
     let bold = base.add(Modifier::BOLD);
     let italic = base.add(Modifier::ITALIC);
 
@@ -688,7 +726,21 @@ mod tests {
         let out = render(md, &Theme::gray(), 40);
         let t = text(&out);
         assert!(t.contains("fn main"));
-        assert!(t.contains("┌─"));
+        assert!(!t.contains('┌'), "no box chrome: {t}");
+        assert!(!t.contains('└'), "no box chrome: {t}");
+        let body = out
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("fn")))
+            .expect("rust body");
+        assert!(
+            body.spans.len() > 2,
+            "expected syntax-coloured spans, got {:?}",
+            body.spans.len()
+        );
+        assert!(body
+            .spans
+            .iter()
+            .all(|s| s.style.bg == Some(Theme::gray().code_bg)));
     }
 
     #[test]

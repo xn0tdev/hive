@@ -340,6 +340,7 @@ fn preview_args(name: &str, arguments: &str) -> String {
         "web_search" => s("query"),
         "read_skill" => s("name"),
         "spawn_subagent" | "spawn_swarm" => s("task"),
+        "verify_project" => s("focus").or_else(|| Some("project check".into())),
         "web_get_contents" => v
             .get("urls")
             .and_then(|u| u.as_array())

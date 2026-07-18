@@ -53,11 +53,11 @@ Do the task end to end, then finish with a concise result that answers exactly w
 Your final message is your entire return value.\n\n",
         );
     } else {
-        p.push_str("## Delegation\n");
+        p.push_str("## Project verification\n");
         p.push_str(
-            "For large or parallelizable work, spawn subagents with `spawn_subagent` (one focused task) \
-or `spawn_swarm` (many tasks at once). Pick the model role per task: `fast` for commits/merges/simple ops, \
-`smart` for backend/deep reasoning, `default` for frontend.\n\n",
+            "Use `verify_project` when you want an independent cargo check / light review \
+of the workspace. It launches one dedicated checker subagent and returns a short report. \
+Do not invent other spawn/swarm tools — multi-agent swarm is unavailable.\n\n",
         );
     }
 

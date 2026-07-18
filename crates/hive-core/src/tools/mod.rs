@@ -19,6 +19,9 @@ mod web;
 pub fn all_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = inventory::iter::<ToolRegistration>()
         .map(|r| (r.make)())
+        // Multi-agent swarm stays off; only `verify_project` is offered for
+        // dedicated project checking. Keep spawn_* impls for later.
+        .filter(|t| !matches!(t.name(), "spawn_subagent" | "spawn_swarm"))
         .collect();
     tools.sort_by(|a, b| a.name().cmp(b.name()));
     tools

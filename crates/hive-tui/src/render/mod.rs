@@ -1,21 +1,23 @@
 //! Rendering: turning `App` state into a frame.
 //!
-//! Two modes:
+//! Modes:
 //! - Empty chat → a centered landing: an ASCII "HIVE" wordmark + a narrower,
 //!   centered input, all vertically centered, with the model/cwd status
 //!   left-aligned right under the input.
-//! - Active chat → the flowing bottom-anchored layout (transcript, swarm,
-//!   working spinner, input strip, slash menu, footer).
+//! - Active chat → the flowing bottom-anchored layout (transcript with inline
+//!   subagent cards, working spinner, input strip, slash menu, footer).
+//! - Subagent view → same layout, but the transcript shows that agent's thread
+//!   and the input strip is replaced by a read-only `← back` control.
 
 pub mod markdown;
 pub mod mascot;
 pub mod spinner;
+pub mod tools;
 pub mod wrap;
 
 mod footer;
 mod input_box;
 mod menu;
-mod swarm;
 mod transcript;
 
 use comb::{Frame, Line, Rect, Span, Style};
@@ -25,7 +27,7 @@ use crate::app::App;
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     if app.is_empty_chat() {
-        app.thought_hits.clear();
+        app.click_hits.clear();
         draw_landing(f, area, app);
     } else {
         draw_active(f, area, app);
@@ -52,13 +54,13 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
     let group_h = mascot::HEIGHT + gap + 1 /*version*/ + gap + input_h + 2 /*status*/;
     let mut y = area.y + area.height.saturating_sub(group_h) / 2;
 
-    // ASCII "HIVE", centered as one block so the letters stay aligned.
+    // Block "HIVE", centered as one block so the letters stay aligned.
     let art_x = area.x + area.width.saturating_sub(mascot::WIDTH) / 2;
-    f.buffer().set_lines(
-        Rect::new(art_x, y, mascot::WIDTH, mascot::HEIGHT),
-        &mascot::wordmark(theme),
-        0,
-    );
+    let logo = Rect::new(art_x, y, mascot::WIDTH, mascot::HEIGHT);
+    app.logo_hit = Some(logo);
+    let bonk = app.logo_bonk.clone();
+    f.buffer()
+        .set_lines(logo, &mascot::wordmark(theme, bonk.as_ref()), 0);
     y += mascot::HEIGHT + gap;
 
     // Version, centered under the wordmark.
@@ -105,37 +107,44 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// The normal, bottom-anchored conversation layout.
 fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
-    let swarm_h = swarm::height(app);
-    // blank + shimmering spinner + blank while running; nothing when idle
-    let working_h: u16 = if app.running { 3 } else { 0 };
-    let menu_h = menu::height(app);
+    let subagent = app.in_subagent_view();
+    // blank + shimmering spinner + blank while running; nothing when idle /
+    // inside a read-only subagent thread.
+    let working_h: u16 = if app.running && !subagent { 3 } else { 0 };
+    let menu_h = if subagent { 0 } else { menu::height(app) };
 
     // Everything — transcript included — lives in a band a touch narrower than
     // the terminal, centered, so the chat doesn't sprawl across the screen.
     let inner_w = area.width.saturating_sub(6).max(20).min(area.width);
-    let input_h = input_height(app, inner_w);
+    let input_h = if subagent {
+        3 // pad + ← back + pad
+    } else {
+        input_height(app, inner_w)
+    };
     let ix = area.x + (area.width - inner_w) / 2;
 
     // Manual vertical layout, bottom-anchored: the footer sits on the last two
-    // rows, then the input, working, and swarm blocks stack upward, and the
-    // transcript fills whatever is left. The slash menu is NOT part of this — it
+    // rows, then the input and working indicator stack upward, and the
+    // transcript fills whatever is left. Subagent status lives inline in the
+    // transcript (like thoughts/tools). The slash menu is NOT part of this — it
     // floats above the input as an overlay, so opening it never shifts anything.
     let footer_y = area.bottom().saturating_sub(2);
     let input_y = footer_y.saturating_sub(input_h);
     let working_y = input_y.saturating_sub(working_h);
-    let swarm_y = working_y.saturating_sub(swarm_h);
-    let transcript = Rect::new(area.x, area.y, area.width, swarm_y.saturating_sub(area.y));
+    let transcript = Rect::new(area.x, area.y, area.width, working_y.saturating_sub(area.y));
     let band = |y: u16, h: u16| Rect::new(ix, y, inner_w, h);
     let band_inner = |y: u16, h: u16| Rect::new(ix + 1, y, inner_w.saturating_sub(2), h);
 
     transcript::draw(f.buffer(), band(transcript.y, transcript.height), app);
-    if swarm_h > 0 {
-        swarm::draw(f.buffer(), band_inner(swarm_y, swarm_h), app);
-    }
-    if app.running {
+    if working_h > 0 {
         transcript::draw_working(f.buffer(), band_inner(working_y, working_h), app);
     }
-    input_box::draw(f, band(input_y, input_h), app);
+    if subagent {
+        input_box::draw_back(f, band(input_y, input_h), app);
+    } else {
+        app.back_hit_row = None;
+        input_box::draw(f, band(input_y, input_h), app);
+    }
     footer::draw(f.buffer(), band_inner(footer_y, 2), app);
 
     // Menu overlay, drawn last so it layers over the transcript, its bottom

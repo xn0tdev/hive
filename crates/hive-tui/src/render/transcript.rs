@@ -3,8 +3,11 @@
 
 use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
-use crate::app::state::{Block as UiBlock, ToolCard, ToolStatus};
+use hive_core::event::{SubagentLine, SubagentStatus};
+
+use crate::app::state::{Block as UiBlock, ChatView, SubagentCard, ToolCard, ToolStatus};
 use crate::app::App;
+use crate::render::tools::{format_tool_secs, subagent_card_lines, tool_lines};
 use crate::render::{markdown, wrap};
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
@@ -27,12 +30,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         area
     };
 
-    // Remember which screen rows hold thought headers so a mouse click can be
-    // mapped back to its block.
-    app.thought_hits.clear();
+    // Remember which screen rows hold expandable headers (thoughts / subagents)
+    // so a mouse click can be mapped back to its block.
+    app.click_hits.clear();
     for (line_idx, block_idx) in heads {
         if line_idx >= scroll && line_idx < scroll + target.height as usize {
-            app.thought_hits
+            app.click_hits
                 .push((target.y + (line_idx - scroll) as u16, block_idx));
         }
     }
@@ -90,9 +93,16 @@ pub fn lines(app: &App, width: usize) -> Vec<Line> {
     build(app, width).0
 }
 
-/// Like `lines`, but also reports which line index holds each thought header
-/// (with its block index) so mouse clicks can be hit-tested.
+/// Like `lines`, but also reports which line index holds each expandable
+/// header (thought / subagent) with its block index for mouse hit-testing.
 fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
+    if matches!(app.view, ChatView::Subagent(_)) {
+        if let Some(card) = app.viewed_subagent() {
+            return (subagent_chat_lines(card, app, width), Vec::new());
+        }
+        // Stale id (cleared chat) — fall through to main.
+    }
+
     let theme = &app.theme;
     let mut out: Vec<Line> = Vec::new();
     let mut heads: Vec<(usize, usize)> = Vec::new();
@@ -145,6 +155,17 @@ fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
                 }
                 out.push(Line::from(""));
             }
+            UiBlock::Subagent(card) => {
+                let show_hint = !app
+                    .blocks
+                    .iter()
+                    .skip(i + 1)
+                    .any(|b| matches!(b, UiBlock::Subagent(_)));
+                // Title sits after the top pad row of the soft strip.
+                heads.push((out.len() + 1, i));
+                out.extend(subagent_card_lines(card, app, width, show_hint));
+                out.push(Line::from(""));
+            }
             UiBlock::Tool(card) => {
                 out.extend(tool_lines(card, app, width));
                 // Keep consecutive tools tight; add air after the last one.
@@ -178,6 +199,107 @@ fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
     }
 
     (out, heads)
+}
+
+/// Dedicated read-only chat for a subagent: task as a user strip, then its
+/// thoughts / tools / assistant messages — same visual language as the main chat.
+fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line> {
+    let theme = &app.theme;
+    let mut out: Vec<Line> = Vec::new();
+
+    let title = if card.label.trim().is_empty() {
+        "Checking project"
+    } else {
+        card.label.as_str()
+    };
+    let (icon, icon_fg) = match card.status {
+        SubagentStatus::Running => (app.spinner_char().to_string(), theme.accent),
+        SubagentStatus::Done => ("✓".to_string(), theme.ok),
+        SubagentStatus::Failed => ("✗".to_string(), theme.err),
+    };
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{icon} "), Style::default().fg(icon_fg)),
+        Span::styled(
+            title.to_string(),
+            Style::default().fg(theme.fg).add(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {}", format_tool_secs(card.secs())),
+            Style::default().fg(theme.dim),
+        ),
+    ]));
+    out.push(Line::from(vec![
+        Span::raw("    "),
+        Span::styled(
+            card.status_text().to_string(),
+            Style::default().fg(theme.dim),
+        ),
+    ]));
+    out.push(Line::from(""));
+
+    if !card.prompt.trim().is_empty() {
+        out.extend(user_lines(&card.prompt, app, width));
+        out.push(Line::from(""));
+    }
+
+    for line in &card.lines {
+        match line {
+            SubagentLine::Thinking(t) if !t.trim().is_empty() => {
+                out.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        "∴ Thinking",
+                        Style::default().fg(theme.fg).add(Modifier::BOLD),
+                    ),
+                ]));
+                let style = Style::default().fg(theme.faint).add(Modifier::ITALIC);
+                let raw: Vec<Line> = t
+                    .lines()
+                    .map(|l| Line::from(Span::styled(l.to_string(), style)))
+                    .collect();
+                for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
+                    l.spans.insert(0, Span::raw("    "));
+                    out.push(l);
+                }
+                out.push(Line::from(""));
+            }
+            SubagentLine::Assistant(t) if !t.trim().is_empty() => {
+                let content_w = width.saturating_sub(2);
+                let body = markdown::render(t, theme, content_w);
+                out.extend(indent(wrap::wrap_lines(body, content_w)));
+                out.push(Line::from(""));
+            }
+            SubagentLine::Tool { name, detail, ok } => {
+                let status = match ok {
+                    None => ToolStatus::Running,
+                    Some(true) => ToolStatus::Ok,
+                    Some(false) => ToolStatus::Err,
+                };
+                let card = ToolCard {
+                    id: String::new(),
+                    name: name.clone(),
+                    args: detail.clone(),
+                    output: String::new(),
+                    status,
+                    started: std::time::Instant::now(),
+                    elapsed_ms: Some(0),
+                };
+                out.extend(tool_lines(&card, app, width));
+                out.push(Line::from(""));
+            }
+            SubagentLine::Notice(t) => {
+                out.push(Line::from(vec![
+                    Span::styled("  · ", Style::default().fg(theme.faint)),
+                    Span::styled(t.clone(), Style::default().fg(theme.dim)),
+                ]));
+                out.push(Line::from(""));
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 /// Thought header: bold shimmering "Thinking" while active, then a clear
@@ -263,10 +385,7 @@ fn indent(lines: Vec<Line>) -> Vec<Line> {
     lines
         .into_iter()
         .map(|mut l| {
-            // If the line carries a background (code / strip), keep the indent
-            // on that same bg so we don't punch a transparent hole on the left.
-            let bg = l.spans.iter().find_map(|s| s.style.bg);
-            let pad = match bg {
+            let pad = match indent_fill_bg(&l) {
                 Some(bg) => Span::styled("  ", Style::default().bg(bg)),
                 None => Span::raw("  "),
             };
@@ -274,6 +393,47 @@ fn indent(lines: Vec<Line>) -> Vec<Line> {
             l
         })
         .collect()
+}
+
+/// Background for the 2-col assistant gutter, if any.
+///
+/// Full-line code fences / table chrome keep a continuous band into the gutter.
+/// Inline `code` chips must not — especially after a wrap, when the next row
+/// *starts* with a chip (first-span inheritance painted a gray gutter blob).
+fn indent_fill_bg(line: &Line) -> Option<Color> {
+    let plain: String = line.spans.iter().map(|s| s.content.as_str()).collect();
+    let table_chrome = plain.starts_with('┌')
+        || plain.starts_with('└')
+        || plain.starts_with('├')
+        || plain.starts_with('│');
+    // Fence body: left-padded `  {tokens…}` with `code_bg` on every span
+    // (syntax highlight → many spans). Inline chips use a single pad space.
+    let fence_body = is_code_fence_body(line, &plain);
+    if !table_chrome && !fence_body {
+        return None;
+    }
+    line.spans
+        .iter()
+        .find(|s| !s.content.is_empty())
+        .and_then(|s| s.style.bg)
+}
+
+fn is_code_fence_body(line: &Line, plain: &str) -> bool {
+    if !plain.starts_with("  ") {
+        return false;
+    }
+    let mut bg: Option<Color> = None;
+    for s in &line.spans {
+        if s.content.is_empty() {
+            continue;
+        }
+        match (bg, s.style.bg) {
+            (None, Some(c)) => bg = Some(c),
+            (Some(expected), Some(c)) if c == expected => {}
+            _ => return false,
+        }
+    }
+    bg.is_some()
 }
 
 fn push_caret(lines: &mut Vec<Line>, color: Color) {
@@ -286,109 +446,10 @@ fn push_caret(lines: &mut Vec<Line>, color: Color) {
     }
 }
 
-/// One compact line per tool; live output tail only while running or on error.
-fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
-    let theme = &app.theme;
-    let (icon, color) = match card.status {
-        ToolStatus::Running => (app.spinner_char().to_string(), theme.accent),
-        ToolStatus::Ok => ("✔".to_string(), theme.ok),
-        ToolStatus::Err => ("✘".to_string(), theme.err),
-    };
-
-    let mut header = vec![
-        Span::styled(format!("  {icon} "), Style::default().fg(color)),
-        Span::styled(
-            card.name.clone(),
-            Style::default().fg(theme.dim).add(Modifier::BOLD),
-        ),
-    ];
-    if !card.args.is_empty() {
-        header.push(Span::styled(
-            format!("  {}", card.args),
-            Style::default().fg(theme.faint),
-        ));
-    }
-    let mut out = wrap::wrap_lines(vec![Line::from(header)], width);
-
-    // Code edits render a compact green/red diff block, whatever the status.
-    let is_edit = matches!(card.name.as_str(), "edit_file" | "write_file");
-    if is_edit && !card.output.trim().is_empty() {
-        out.extend(diff_lines(&card.output, app, width));
-        return out;
-    }
-
-    // Other tools: a short tail of live output while running or on error.
-    let show_tail = match card.status {
-        ToolStatus::Running => 6,
-        ToolStatus::Err => 3,
-        ToolStatus::Ok => 0,
-    };
-    if show_tail > 0 && !card.output.trim().is_empty() {
-        let tail: Vec<&str> = {
-            let mut v: Vec<&str> = card.output.lines().collect();
-            if v.len() > show_tail {
-                v = v.split_off(v.len() - show_tail);
-            }
-            v
-        };
-        let raw: Vec<Line> = tail
-            .into_iter()
-            .map(|l| {
-                Line::from(Span::styled(
-                    format!("    {l}"),
-                    Style::default().fg(theme.faint),
-                ))
-            })
-            .collect();
-        out.extend(wrap::wrap_lines(raw, width));
-    }
-
-    out
-}
-
-/// Render a diff (lines prefixed `+`/`-`) as an indented block where each row's
-/// background hugs the content width — a green add / red delete band, never the
-/// full terminal width.
-fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line> {
-    let theme = &app.theme;
-    let indent = 4usize;
-    let avail = width.saturating_sub(indent + 1).max(8);
-    let rows: Vec<&str> = diff.lines().filter(|l| !l.trim().is_empty()).collect();
-
-    // Block width tracks the longest row, but is capped to the space we have.
-    let block_w = rows
-        .iter()
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(0)
-        .clamp(1, avail);
-
-    rows.into_iter()
-        .map(|row| {
-            let (fg, bg) = if row.starts_with("+ ") {
-                (theme.add_fg, theme.add_bg)
-            } else if row.starts_with("- ") {
-                (theme.del_fg, theme.del_bg)
-            } else {
-                (theme.faint, theme.code_bg)
-            };
-            let mut text: String = row.chars().take(block_w).collect();
-            let pad = block_w.saturating_sub(text.chars().count());
-            if pad > 0 {
-                text.push_str(&" ".repeat(pad));
-            }
-            Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled(text, Style::default().fg(fg).bg(bg)),
-            ])
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::diff_lines;
     use crate::app::App;
+    use crate::render::tools::tool_card::diff_lines;
     use crate::TuiInit;
 
     fn app() -> App {
@@ -451,14 +512,230 @@ mod tests {
         let before = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
 
         // Collapsed: the header row is registered for hit-testing, text hidden.
-        let (row, _) = *a.thought_hits.first().expect("header row recorded");
+        let (row, _) = *a.click_hits.first().expect("header row recorded");
         assert!(!before.text().contains("secret plan"));
 
         // A click on that row opens exactly that thought.
-        let idx = a.thought_at_row(row).expect("click hits the header");
-        a.toggle_thought_at(idx);
+        let idx = a.expandable_at_row(row).expect("click hits the header");
+        a.activate_expandable_at(idx);
         let after = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
         assert!(after.text().contains("secret plan"));
+    }
+
+    #[test]
+    fn subagent_renders_inline_without_border() {
+        use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking project".into(),
+            prompt: "Run cargo check and report.".into(),
+        });
+        a.spinner = 0;
+
+        let t = tool_text(&a, 72);
+        assert!(t.contains("Checking project"), "{t}");
+        assert!(t.contains("cargo check · review"), "{t}");
+        assert!(!t.contains('╭') && !t.contains('╯'), "no border chrome: {t}");
+
+        a.apply(AgentEvent::SubagentStatus {
+            id: "v1".into(),
+            status: SubagentStatus::Done,
+            detail: "done".into(),
+        });
+        a.apply(AgentEvent::SubagentTranscript {
+            id: "v1".into(),
+            line: SubagentLine::Assistant("## Verification Report\nAll good.".into()),
+        });
+
+        let collapsed = tool_text(&a, 72);
+        assert!(collapsed.contains('✓'), "{collapsed}");
+        assert!(collapsed.contains("done"), "{collapsed}");
+        assert!(
+            !collapsed.contains("Verification Report"),
+            "report stays in dedicated view: {collapsed}"
+        );
+        assert!(collapsed.contains("click to open"), "{collapsed}");
+
+        // Click switches into the read-only subagent chat view.
+        let idx = a
+            .blocks
+            .iter()
+            .position(|b| matches!(b, crate::app::state::Block::Subagent(_)))
+            .expect("subagent block");
+        a.activate_expandable_at(idx);
+        assert!(a.in_subagent_view());
+        let open = tool_text(&a, 72);
+        assert!(open.contains("Run cargo check"), "{open}");
+        assert!(open.contains("Verification Report"), "{open}");
+
+        a.leave_subagent_view();
+        assert!(!a.in_subagent_view());
+        let back = tool_text(&a, 72);
+        assert!(
+            !back.contains("Verification Report"),
+            "main transcript again: {back}"
+        );
+    }
+
+    #[test]
+    fn tools_have_no_strip_background() {
+        use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
+
+        // Main-agent tools: no strip bg.
+        let mut a = app();
+        a.apply(AgentEvent::ToolStarted {
+            id: "r1".into(),
+            name: "read_file".into(),
+            args_preview: "src/main.rs".into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "r1".into(),
+            name: "read_file".into(),
+            ok: true,
+            summary: "ok".into(),
+        });
+        let lines = super::lines(&a, 72);
+        let header = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Reading")))
+            .expect("Reading header");
+        assert!(
+            header.spans.iter().all(|s| s.style.bg.is_none()),
+            "regular tools must not have strip bg"
+        );
+
+        // Tools inside a subagent thread: also no strip bg.
+        let mut a = app();
+        a.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking project".into(),
+            prompt: "check".into(),
+        });
+        a.apply(AgentEvent::SubagentTranscript {
+            id: "v1".into(),
+            line: SubagentLine::Tool {
+                name: "run_shell".into(),
+                detail: "cargo check".into(),
+                ok: Some(true),
+            },
+        });
+        a.apply(AgentEvent::SubagentStatus {
+            id: "v1".into(),
+            status: SubagentStatus::Done,
+            detail: "done".into(),
+        });
+        a.open_subagent_view("v1".into());
+
+        let lines = super::lines(&a, 72);
+        let tool = lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("cargo check") || s.content.contains('$'))
+            })
+            .expect("tool line");
+        assert!(
+            tool.spans.iter().all(|s| s.style.bg.is_none()),
+            "tools in subagent view must not have strip bg"
+        );
+    }
+
+    #[test]
+    fn subagent_card_has_soft_background_and_pads() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking project".into(),
+            prompt: "check".into(),
+        });
+        let lines = super::lines(&a, 72);
+        let title_i = lines
+            .iter()
+            .position(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("Checking project"))
+            })
+            .expect("subagent title");
+        assert!(
+            lines[title_i]
+                .spans
+                .iter()
+                .any(|s| s.style.bg == Some(a.theme.strip)),
+            "subagent card keeps soft strip bg"
+        );
+        assert!(
+            title_i > 0
+                && lines[title_i - 1]
+                    .spans
+                    .iter()
+                    .any(|s| s.style.bg == Some(a.theme.strip)),
+            "top pad row shares strip bg"
+        );
+        assert!(
+            lines
+                .get(title_i + 2)
+                .is_some_and(|l| l.spans.iter().any(|s| s.style.bg == Some(a.theme.strip))),
+            "bottom pad row shares strip bg"
+        );
+    }
+
+    #[test]
+    fn verify_project_tool_card_suppressed() {
+        use crate::app::state::Block;
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::ToolStarted {
+            id: "t1".into(),
+            name: "verify_project".into(),
+            args_preview: "project check".into(),
+        });
+        assert!(
+            !a.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Tool(c) if c.name == "verify_project")),
+            "verify_project must not appear as a transcript tool card"
+        );
+        a.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking project".into(),
+            prompt: "check".into(),
+        });
+        assert!(
+            a.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Subagent(_))),
+            "subagent should appear inline in the transcript"
+        );
+    }
+
+    #[test]
+    fn indent_skips_bg_for_wrapped_inline_code() {
+        use crate::render::markdown;
+
+        let theme = crate::theme::Theme::gray();
+        let md = "Want me to auto-fix the trivial ones (`useless_format`, `manual_contains`, `unnecessary_unwrap`)?";
+        let body = markdown::render(md, &theme, 58);
+        let wrapped = crate::render::wrap::wrap_lines(body, 58);
+        let indented = super::indent(wrapped);
+        // Continuation rows that start with a chip must keep a plain gutter —
+        // inheriting code_bg from the first span was the crooked gray pad.
+        for line in &indented {
+            let text: String = line.spans.iter().map(|s| s.content.as_str()).collect();
+            if text.contains("manual_contains") || text.contains("unnecessary_unwrap") {
+                assert!(
+                    line.spans.first().is_some_and(|s| s.style.bg.is_none()),
+                    "gutter must stay clear on chip continuation: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -476,5 +753,84 @@ mod tests {
         let w = lines[0].spans[1].content.chars().count();
         assert!(lines.iter().all(|l| l.spans[1].content.chars().count() == w));
         assert!(w < 60); // not the full terminal width
+    }
+
+    fn tool_text(a: &App, width: usize) -> String {
+        super::lines(a, width)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn tool_duration_stays_on_shell_header() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ToolStarted {
+            id: "t1".into(),
+            name: "run_shell".into(),
+            args_preview: "cargo check --workspace 2>&1".into(),
+        });
+        a.apply(AgentEvent::ToolOutput {
+            id: "t1".into(),
+            chunk: "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.91s\n"
+                .into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "t1".into(),
+            name: "run_shell".into(),
+            ok: true,
+            summary: "exit 0".into(),
+        });
+
+        let t = tool_text(&a, 72);
+        // Duration belongs on the `$ …` header, not as a column-0 orphan.
+        assert!(t.contains("$ cargo check"), "shell header: {t}");
+        assert!(t.contains("·"), "duration separator: {t}");
+        let header = t
+            .lines()
+            .find(|l| l.contains("$ cargo check"))
+            .unwrap_or("");
+        assert!(
+            header.contains('s'),
+            "duration on shell header line: {t}"
+        );
+        // Successful tools collapse the body — cargo's own "in 1.91s" stays out.
+        assert!(
+            !t.contains("Finished"),
+            "ok shell should not dump output body: {t}"
+        );
+    }
+
+    #[test]
+    fn file_tools_use_reading_verb() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ToolStarted {
+            id: "r1".into(),
+            name: "read_file".into(),
+            args_preview: "crates/hive-tui/src/render/transcript.rs".into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "r1".into(),
+            name: "read_file".into(),
+            ok: true,
+            summary: "ok".into(),
+        });
+
+        let t = tool_text(&a, 80);
+        assert!(t.contains("Reading crates/hive-tui"), "verb header: {t}");
+        assert!(!t.contains("read_file"), "no raw tool name: {t}");
+        assert!(!t.contains("✓"), "no status icon on tool rows: {t}");
     }
 }

@@ -26,7 +26,9 @@ mod vision_impl;
 
 pub use config::{AppConfig, ModelRole, Secrets};
 pub use error::{CoreError, Result};
-pub use event::{AgentEvent, EventReceiver, EventSender, Renderer, SubagentStatus};
+pub use event::{
+    AgentEvent, EventReceiver, EventSender, Renderer, SubagentLine, SubagentStatus,
+};
 pub use message::{ContentPart, ImageSource, Message, Role, ToolCall};
 pub use provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
 pub use skill::{no_skills, NoSkills, SkillMeta, SkillSource};

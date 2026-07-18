@@ -4,6 +4,7 @@ mod app;
 mod commands;
 mod render;
 mod run;
+mod sound;
 mod theme;
 
 use hive_core::message::ImageSource;
