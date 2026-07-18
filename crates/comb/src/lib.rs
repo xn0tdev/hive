@@ -27,9 +27,11 @@
 pub mod core;
 pub mod draw;
 pub mod term;
+pub mod widgets;
 
 // The `effects` module is re-exported by name so `comb::effects::…` keeps working.
 pub use crate::draw::effects;
+pub use crate::widgets::{List, Menu, Palette, ScrollView};
 
 pub use crate::core::buffer::{Buffer, Cell};
 pub use crate::core::geom::{Pos, Rect, Size};
