@@ -161,17 +161,28 @@ fn handle_key(
         _ => {}
     }
 
-    // Blurred: no caret, ignore typing / submit / cursor motion. Arrows scroll.
+    // Blurred: arrows scroll the transcript; printable typing focuses the
+    // composer and falls through so the keystroke is applied. Subagent/plan
+    // views already returned above and keep their own key bindings.
     if !app.input_focused {
         match key.code {
-            KeyCode::Up => app.scroll_up(1),
-            KeyCode::Down => app.scroll_down(1),
+            KeyCode::Up => {
+                app.scroll_up(1);
+                return false;
+            }
+            KeyCode::Down => {
+                app.scroll_down(1);
+                return false;
+            }
             KeyCode::Esc if app.running => {
                 interrupt.store(true, Ordering::Relaxed);
+                return false;
             }
-            _ => {}
+            KeyCode::Char(_) if !ctrl => {
+                app.focus_input();
+            }
+            _ => return false,
         }
-        return false;
     }
 
     match key.code {
@@ -525,4 +536,99 @@ fn media_type(path: &str) -> String {
         _ => "image/png",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comb::{Key, KeyCode, KeyMods};
+    use hive_core::event::{AgentEvent, SubagentStatus};
+
+    fn test_app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+        })
+    }
+
+    fn key(code: KeyCode) -> Key {
+        Key {
+            code,
+            mods: KeyMods::NONE,
+        }
+    }
+
+    #[test]
+    fn typing_while_blurred_focuses_and_inserts() {
+        let mut app = test_app();
+        app.blur_input();
+        assert!(!app.input_focused);
+        assert!(app.input.is_empty());
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Char('h')),
+            &tx,
+            &interrupt
+        ));
+        assert!(app.input_focused);
+        assert_eq!(app.input.value, "h");
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Char('i')),
+            &tx,
+            &interrupt
+        ));
+        assert_eq!(app.input.value, "hi");
+    }
+
+    #[test]
+    fn arrows_while_blurred_scroll_without_focusing() {
+        let mut app = test_app();
+        app.blur_input();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(!app.input_focused);
+        assert!(app.input.is_empty());
+        assert_eq!(app.scroll_from_bottom, 1);
+    }
+
+    #[test]
+    fn typing_in_subagent_view_does_not_fill_main_input() {
+        let mut app = test_app();
+        app.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking".into(),
+            prompt: "go".into(),
+        });
+        app.apply(AgentEvent::SubagentStatus {
+            id: "v1".into(),
+            status: SubagentStatus::Running,
+            detail: "working".into(),
+        });
+        app.open_subagent_view("v1".into());
+        assert!(!app.input_focused);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Char('x')),
+            &tx,
+            &interrupt
+        ));
+        assert!(app.in_subagent_view());
+        assert!(!app.input_focused);
+        assert!(app.input.is_empty());
+    }
 }
