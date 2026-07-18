@@ -1,0 +1,14 @@
+[package]
+name = "comb"
+description = "A tiny native terminal-UI engine — a comb of cells: surfaces, layers, effects."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
