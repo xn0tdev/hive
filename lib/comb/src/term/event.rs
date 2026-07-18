@@ -219,12 +219,8 @@ fn parse_csi(buf: &mut Vec<u8>) -> Option<Event> {
         b'D' => Some(key(KeyCode::Left, mods_from_csi(&params, 1))),
         b'H' => Some(key(KeyCode::Home, mods_from_csi(&params, 1))),
         b'F' => Some(key(KeyCode::End, mods_from_csi(&params, 1))),
-        // Kitty / fixterms: CSI <code> ; <mods> u  (Enter = 13)
-        b'u' => {
-            let code = *params.first().unwrap_or(&0);
-            let mods = mods_from_param(params.get(1).copied());
-            keycode_from_number(code).map(|c| key(c, mods))
-        }
+        // Kitty / fixterms: CSI <code> ; <mods[:event]> u
+        b'u' => parse_csi_u(&buf[2..end]),
         b'~' => parse_csi_tilde(&params),
         _ => None,
     };
@@ -233,8 +229,23 @@ fn parse_csi(buf: &mut Vec<u8>) -> Option<Event> {
     event
 }
 
+/// Kitty keyboard protocol key event. Ignores key-release (`*:3`) so letters
+/// aren't inserted twice when event types are reported.
+fn parse_csi_u(raw: &[u8]) -> Option<Event> {
+    let fields = parse_param_fields(raw);
+    let code = *fields.first()?.first()?;
+    let mods_field = fields.get(1);
+    let mods = mods_from_param(mods_field.and_then(|f| f.first()).copied());
+    let event_type = mods_field.and_then(|f| f.get(1)).copied().unwrap_or(1);
+    // 1 = press, 2 = repeat, 3 = release
+    if event_type == 3 {
+        return None;
+    }
+    keycode_from_number(code).map(|c| key(c, mods))
+}
+
 /// `CSI … ~` — paging keys, xterm modifyOtherKeys (`27;mods;key~`).
-fn parse_csi_tilde(params: &[u16]) -> Option<Event> {
+fn parse_csi_tilde(params: &[u32]) -> Option<Event> {
     // xterm modifyOtherKeys: CSI 27 ; <mods> ; <key> ~
     if params.first() == Some(&27) && params.len() >= 3 {
         let mods = mods_from_param(Some(params[1]));
@@ -255,20 +266,20 @@ fn parse_csi_tilde(params: &[u16]) -> Option<Event> {
     Some(key(code, mods))
 }
 
-fn keycode_from_number(n: u16) -> Option<KeyCode> {
+fn keycode_from_number(n: u32) -> Option<KeyCode> {
     match n {
         9 => Some(KeyCode::Tab),
         13 => Some(KeyCode::Enter),
         27 => Some(KeyCode::Esc),
         127 => Some(KeyCode::Backspace),
-        // Printable ASCII as Char (modifyOtherKeys for letters).
-        32..=126 => Some(KeyCode::Char(n as u8 as char)),
+        // Printable unicode — ASCII, Cyrillic, etc. (kitty sends the codepoint).
+        c if (32..0x110000).contains(&c) => char::from_u32(c).map(KeyCode::Char),
         _ => None,
     }
 }
 
 /// xterm modifier param: 1 = none; bits of (param-1) are shift/alt/ctrl.
-fn mods_from_param(p: Option<u16>) -> KeyMods {
+fn mods_from_param(p: Option<u32>) -> KeyMods {
     let m = p.unwrap_or(1).saturating_sub(1);
     KeyMods {
         shift: m & 1 != 0,
@@ -279,7 +290,7 @@ fn mods_from_param(p: Option<u16>) -> KeyMods {
 
 /// Modifier is usually the second CSI parameter (`CSI 1;2A` = Shift+Up).
 /// `mod_idx` is which param holds the base key number when present.
-fn mods_from_csi(params: &[u16], _base_idx: usize) -> KeyMods {
+fn mods_from_csi(params: &[u32], _base_idx: usize) -> KeyMods {
     if params.len() >= 2 {
         mods_from_param(Some(params[1]))
     } else {
@@ -287,21 +298,25 @@ fn mods_from_csi(params: &[u16], _base_idx: usize) -> KeyMods {
     }
 }
 
-fn parse_params(raw: &[u8]) -> Vec<u16> {
+fn parse_params(raw: &[u8]) -> Vec<u32> {
+    parse_param_fields(raw)
+        .into_iter()
+        .map(|f| f.into_iter().next().unwrap_or(0))
+        .collect()
+}
+
+/// Split CSI params on `;`, then each field on `:` (kitty sub-params).
+fn parse_param_fields(raw: &[u8]) -> Vec<Vec<u32>> {
     if raw.is_empty() {
         return Vec::new();
     }
-    // Kitty / fixterms use colon sub-params (`modifiers:event-type`). Only the
-    // leading number is the field value — `2:1`.parse() would fail and drop shift.
     std::str::from_utf8(raw)
         .unwrap_or("")
         .split(';')
         .map(|p| {
             p.split(':')
-                .next()
-                .unwrap_or("")
-                .parse()
-                .unwrap_or(0)
+                .map(|s| s.parse().unwrap_or(0))
+                .collect()
         })
         .collect()
 }
@@ -417,6 +432,25 @@ mod tests {
         // Kitty with event-type sub-param must keep the shift bit.
         let mut b = b"\x1b[13;2:1u".to_vec();
         assert_eq!(parse(&mut b), Some(key(KeyCode::Enter, KeyMods::SHIFT)));
+    }
+
+    #[test]
+    fn kitty_release_is_ignored() {
+        // press then release for 'd' — only one Char event.
+        let mut b = b"\x1b[100;1:1u\x1b[100;1:3u".to_vec();
+        assert_eq!(parse(&mut b), Some(key(KeyCode::Char('d'), KeyMods::NONE)));
+        assert_eq!(parse(&mut b), None);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn kitty_cyrillic_and_utf8() {
+        // 'а' U+0430 = 1072
+        let mut b = b"\x1b[1072u".to_vec();
+        assert_eq!(parse(&mut b), Some(key(KeyCode::Char('а'), KeyMods::NONE)));
+
+        let mut b = "б".as_bytes().to_vec();
+        assert_eq!(parse(&mut b), Some(key(KeyCode::Char('б'), KeyMods::NONE)));
     }
 
     #[test]

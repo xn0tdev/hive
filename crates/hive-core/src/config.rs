@@ -27,7 +27,10 @@ impl ModelRole {
 #[serde(default)]
 pub struct ProviderConfig {
     pub base_url: String,
+    /// Env var name checked first (overrides [`Self::api_key`] when set).
     pub api_key_env: String,
+    /// Optional key from `config.toml`. Prefer env for CI; file for local use.
+    pub api_key: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -35,6 +38,7 @@ impl Default for ProviderConfig {
         ProviderConfig {
             base_url: "https://api.fireworks.ai/inference/v1".to_string(),
             api_key_env: "FIREWORKS_API_KEY".to_string(),
+            api_key: None,
         }
     }
 }
@@ -82,6 +86,8 @@ impl Default for VisionConfig {
 #[serde(default)]
 pub struct ExaConfig {
     pub api_key_env: String,
+    /// Optional key from `config.toml` (env wins when set).
+    pub api_key: Option<String>,
     pub base_url: String,
 }
 
@@ -89,6 +95,7 @@ impl Default for ExaConfig {
     fn default() -> Self {
         ExaConfig {
             api_key_env: "EXA_API_KEY".to_string(),
+            api_key: None,
             base_url: "https://api.exa.ai".to_string(),
         }
     }

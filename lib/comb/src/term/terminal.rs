@@ -143,10 +143,11 @@ impl Terminal {
         };
 
         // alt screen · SGR mouse · modifyOtherKeys level 2 · kitty keyboard
-        // protocol (disambiguate + report all keys) · clear · hide cursor
+        // disambiguate only (flag 1). Flag 8 (report all keys) + event types
+        // made every letter a CSI-u press/release pair → doubled input, and
+        // broke UTF-8 Cyrillic. Clear · hide cursor.
         term.write_raw(
-            // flags 1|2|8: disambiguate, event types, report all keys as CSI u
-            "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>4;2m\x1b[>11u\x1b[2J\x1b[H\x1b[?25l",
+            "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>4;2m\x1b[>1u\x1b[2J\x1b[H\x1b[?25l",
         )?;
         term.cursor_visible = false;
         Ok(term)
@@ -240,7 +241,7 @@ impl Terminal {
 
     /// Wait up to `timeout` for the next input event. `Ok(None)` on timeout.
     pub fn read_event(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
-        if let Some(ev) = event::parse(&mut self.inbuf) {
+        if let Some(ev) = self.poll_parsed() {
             return Ok(Some(ev));
         }
 
@@ -266,7 +267,23 @@ impl Terminal {
         if n > 0 {
             self.inbuf.extend_from_slice(&tmp[..n as usize]);
         }
-        Ok(event::parse(&mut self.inbuf))
+        Ok(self.poll_parsed())
+    }
+
+    /// Parse buffered input, skipping no-op events (kitty key-release, etc.).
+    fn poll_parsed(&mut self) -> Option<Event> {
+        loop {
+            let before = self.inbuf.len();
+            if let Some(ev) = event::parse(&mut self.inbuf) {
+                return Some(ev);
+            }
+            // `None` + consumed bytes → ignored event; keep going.
+            if self.inbuf.len() < before {
+                continue;
+            }
+            // Incomplete sequence or empty buffer.
+            return None;
+        }
     }
 
     fn write_raw(&mut self, s: &str) -> io::Result<()> {

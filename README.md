@@ -41,8 +41,14 @@ crates/
 Requires a Rust toolchain.
 
 ```bash
-export FIREWORKS_API_KEY=...
 cargo run -p hive
 ```
 
-Optional config: `~/.config/hive/config.toml`.
+Config lives at `~/.config/hive/config.toml` (created on first run). Put your key there:
+
+```toml
+[provider]
+api_key = "fw_..."
+```
+
+Or export `FIREWORKS_API_KEY` instead — env always wins when set.
