@@ -12,13 +12,19 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use hive_core::event::EventReceiver;
 use hive_core::message::ImageSource;
+use hive_core::AgentMode;
 
 use crate::app::App;
 use crate::render;
 use crate::{InputCommand, TuiInit};
 
 const HELP: &str =
-    "commands: /model <id-or-role> · /image <path> · /copy · /new · /clear · /cost · /quit — enter send, shift+enter newline, esc stops, ctrl+t thoughts, double ctrl+c quits";
+    "commands: /model <id-or-role> · /image <path> · /copy · /new · /clear · /cost · /quit — tab plan/build, enter send, shift+enter newline, esc stops, ctrl+t thoughts, double ctrl+c quits";
+
+/// Poll interval while something is animating (spinner / shimmer).
+const ANIM_TICK: Duration = Duration::from_millis(100);
+/// Idle poll — long enough to skip needless redraws, short enough for input.
+const IDLE_TICK: Duration = Duration::from_millis(250);
 
 pub fn run(
     init: TuiInit,
@@ -46,27 +52,47 @@ fn run_loop(
     input_tx: &UnboundedSender<InputCommand>,
     interrupt: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    let tick = Duration::from_millis(90);
+    let mut dirty = true;
+    let mut last_spinner = usize::MAX;
     loop {
+        let mut content_dirty = false;
         while let Ok(ev) = events.try_recv() {
-            app.apply(ev);
+            if app.apply(ev) {
+                content_dirty = true;
+            }
         }
 
-        terminal.draw(|f| render::draw(f, app))?;
+        app.tick();
+        let animating = app.needs_animation();
+        let spinner_moved = animating && app.spinner != last_spinner;
 
-        if let Some(ev) = terminal.read_event(tick)? {
+        if dirty || content_dirty || spinner_moved {
+            terminal.draw(|f| render::draw(f, app))?;
+            last_spinner = app.spinner;
+            dirty = false;
+        }
+
+        let wait = if animating { ANIM_TICK } else { IDLE_TICK };
+        if let Some(ev) = terminal.read_event(wait)? {
             match ev {
                 Event::Key(key) => {
                     if handle_key(app, key, input_tx, interrupt) {
                         break;
                     }
+                    dirty = true;
                 }
-                Event::Mouse(m) => handle_mouse(app, m),
-                Event::Resize(_, _) => {}
+                Event::Mouse(m) => {
+                    if handle_mouse(app, m, input_tx) {
+                        dirty = true;
+                    }
+                }
+                Event::Resize(_, _) => {
+                    // Size is applied inside `Terminal::draw` (clear + full
+                    // repaint). Flag dirty so idle sessions never skip it.
+                    dirty = true;
+                }
             }
         }
-
-        app.tick();
     }
     Ok(())
 }
@@ -82,17 +108,22 @@ fn handle_key(
     let alt = key.mods.alt;
     let shift = key.mods.shift;
 
-    let subagent = app.in_subagent_view();
-    let menu_open =
-        !subagent && app.slash_prefix().is_some() && !app.menu_items().is_empty();
+    let special = app.in_special_view();
+    let menu_open = !special && app.slash_prefix().is_some() && !app.menu_items().is_empty();
 
     // Any key other than ctrl+c cancels a pending quit confirmation.
     if !(ctrl && key.code == KeyCode::Char('c')) {
         app.disarm_quit();
     }
 
+    // Plan preview: section select / amend / Build / back.
+    if app.in_plan_view() {
+        return handle_plan_key(app, key, input_tx, interrupt);
+    }
+
     // Read-only subagent view: scroll + leave; no typing / submit.
-    if subagent {
+    // Keys are handled at the app level — there is no focused text input.
+    if app.in_subagent_view() {
         match key.code {
             KeyCode::Char('q') if ctrl => return true,
             KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
@@ -107,12 +138,47 @@ fn handle_key(
         return false;
     }
 
+    // Global chords work whether or not the composer is focused.
     match key.code {
         KeyCode::Char('q') if ctrl => return true,
         KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
-        KeyCode::Char('y') if ctrl => copy_last_answer(app),
-        KeyCode::Char('t') if ctrl => app.toggle_thoughts(),
+        KeyCode::Char('y') if ctrl => {
+            copy_last_answer(app);
+            return false;
+        }
+        KeyCode::Char('t') if ctrl => {
+            app.toggle_thoughts();
+            return false;
+        }
+        KeyCode::PageUp => {
+            app.scroll_up(5);
+            return false;
+        }
+        KeyCode::PageDown => {
+            app.scroll_down(5);
+            return false;
+        }
+        _ => {}
+    }
+
+    // Blurred: no caret, ignore typing / submit / cursor motion. Arrows scroll.
+    if !app.input_focused {
+        match key.code {
+            KeyCode::Up => app.scroll_up(1),
+            KeyCode::Down => app.scroll_down(1),
+            KeyCode::Esc if app.running => {
+                interrupt.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
         KeyCode::Tab if menu_open => complete_selected(app),
+        KeyCode::Tab if !menu_open => {
+            app.toggle_agent_mode();
+        }
         KeyCode::Enter if menu_open => {
             // Commands with an argument get completed; the rest run at once.
             if let Some(cmd) = app.menu_selected() {
@@ -150,8 +216,6 @@ fn handle_key(
         KeyCode::Right => app.input.right(),
         KeyCode::Home => app.input.home(),
         KeyCode::End => app.input.end(),
-        KeyCode::PageUp => app.scroll_up(5),
-        KeyCode::PageDown => app.scroll_down(5),
         KeyCode::Up if menu_open => app.menu_up(),
         KeyCode::Down if menu_open => app.menu_down(),
         // Multiline: arrows move inside the input; at the edges they scroll chat.
@@ -173,6 +237,8 @@ fn handle_key(
             } else if !app.input.is_empty() {
                 let _ = app.input.take();
                 app.reset_menu();
+            } else {
+                app.blur_input();
             }
         }
         _ => {}
@@ -181,39 +247,184 @@ fn handle_key(
 }
 
 /// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
-/// chats, hits `← back`, or bonks the logo.
-fn handle_mouse(app: &mut App, m: Mouse) {
+/// chats, hits `← back` / Build, or bonks the logo.
+/// Returns `true` when state changed and a redraw is needed.
+fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
     match m.kind {
-        MouseKind::ScrollUp => app.scroll_up(3),
-        MouseKind::ScrollDown => app.scroll_down(3),
+        MouseKind::ScrollUp => {
+            app.scroll_up(3);
+            true
+        }
+        MouseKind::ScrollDown => {
+            app.scroll_down(3);
+            true
+        }
         MouseKind::Down(MouseButton::Left) => {
             if app.is_empty_chat() && app.bonk_logo_at(m.col, m.row) {
-                return;
+                app.blur_input();
+                return true;
             }
-            if app.in_subagent_view() && app.back_hit_row == Some(m.row) {
-                app.leave_subagent_view();
-                return;
+            if let Some(hit) = app.sidebar_toggle_hit {
+                if hit.contains(m.col, m.row) {
+                    app.toggle_sidebar();
+                    app.blur_input();
+                    return true;
+                }
+            }
+            if app.in_plan_view() {
+                if let Some(hit) = app.build_hit {
+                    if hit.contains(m.col, m.row) {
+                        start_build_from_plan(app, input_tx);
+                        return true;
+                    }
+                }
+                if let Some(hit) = app.back_hit {
+                    if hit.contains(m.col, m.row) {
+                        app.leave_special_view();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if app.in_subagent_view() {
+                if let Some(hit) = app.back_hit {
+                    if hit.contains(m.col, m.row) {
+                        app.leave_subagent_view();
+                        return true;
+                    }
+                }
+                // No composer in subagent view — ignore leftover focus clicks.
+                return false;
             }
             if let Some(idx) = app.expandable_at_row(m.row) {
                 app.activate_expandable_at(idx);
+                app.blur_input();
+                return true;
             }
+            if app.input_contains(m.col, m.row) {
+                if !app.input_focused {
+                    app.focus_input();
+                    return true;
+                }
+                return false;
+            }
+            // Empty transcript / chrome / elsewhere → drop composer focus.
+            if app.input_focused {
+                app.blur_input();
+                return true;
+            }
+            false
         }
+        // Motion / drag / release must not thrash the redraw loop.
+        _ => false,
+    }
+}
+
+fn handle_plan_key(
+    app: &mut App,
+    key: Key,
+    input_tx: &UnboundedSender<InputCommand>,
+    interrupt: &Arc<AtomicBool>,
+) -> bool {
+    let ctrl = key.mods.ctrl;
+
+    match key.code {
+        KeyCode::Char('q') if ctrl => return true,
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
         _ => {}
     }
+
+    if app.plan_view.amending && app.input_focused {
+        match key.code {
+            KeyCode::Enter if !key.mods.shift && !key.mods.alt && !key.mods.ctrl => {
+                let notes = app.input.take();
+                if notes.trim().is_empty() {
+                    return false;
+                }
+                let msg = app.plan_amend_message(notes.trim());
+                app.plan_view.selected.clear();
+                app.plan_view.amending = false;
+                app.input_focused = false;
+                app.leave_special_view();
+                app.agent_mode = AgentMode::Plan;
+                app.push_user(msg.clone());
+                let _ = input_tx.send(InputCommand::User {
+                    text: msg,
+                    images: Vec::new(),
+                    mode: AgentMode::Plan,
+                });
+                return false;
+            }
+            KeyCode::Esc => {
+                if !app.input.is_empty() {
+                    let _ = app.input.take();
+                } else {
+                    app.plan_view.selected.clear();
+                    app.plan_view.amending = false;
+                    app.input_focused = false;
+                }
+                return false;
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                app.input.insert(ch);
+                return false;
+            }
+            KeyCode::Backspace => {
+                app.input.backspace();
+                return false;
+            }
+            KeyCode::Left => app.input.left(),
+            KeyCode::Right => app.input.right(),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
+            app.leave_special_view();
+        }
+        KeyCode::Char('b') | KeyCode::Char('B') => {
+            start_build_from_plan(app, input_tx);
+        }
+        KeyCode::Char(' ') => app.plan_toggle_select(),
+        KeyCode::Up => app.plan_cursor_up(),
+        KeyCode::Down => app.plan_cursor_down(),
+        KeyCode::PageUp => app.scroll_up(5),
+        KeyCode::PageDown => app.scroll_down(5),
+        _ => {
+            let _ = interrupt;
+        }
+    }
+    false
+}
+
+fn start_build_from_plan(app: &mut App, input_tx: &UnboundedSender<InputCommand>) {
+    app.agent_mode = AgentMode::Build;
+    app.leave_special_view();
+    let text =
+        "Implement the plan in `.hive/Plan.md`. Follow its sections in order and keep going until the work is done."
+            .to_string();
+    app.push_user(text.clone());
+    let _ = input_tx.send(InputCommand::User {
+        text,
+        images: Vec::new(),
+        mode: AgentMode::Build,
+    });
 }
 
 /// Copy the last finished answer to the system clipboard via OSC 52 (works in
 /// most modern terminals). Feedback goes to the footer, not the chat.
 fn copy_last_answer(app: &mut App) {
     let Some(text) = app.last_answer().map(|s| s.to_string()) else {
-        app.flash("nothing to copy yet");
+        app.flash("Nothing to copy");
         return;
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut out = io::stdout();
     let _ = write!(out, "\x1b]52;c;{b64}\x07");
     let _ = out.flush();
-    app.flash("answer copied to clipboard");
+    app.flash("Copied");
 }
 
 /// Replace the input with the selected command (plus a space if it wants an
@@ -250,7 +461,8 @@ fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
     };
     app.push_user(display);
     let images = app.take_pending_images();
-    let _ = input_tx.send(InputCommand::User { text, images });
+    let mode = app.agent_mode;
+    let _ = input_tx.send(InputCommand::User { text, images, mode });
     false
 }
 
@@ -265,7 +477,7 @@ fn handle_slash(app: &mut App, cmd: &str, input_tx: &UnboundedSender<InputComman
             // Full new chat → centered Home landing (no leftover Notice blocks).
             app.new_chat();
             let _ = input_tx.send(InputCommand::Clear);
-            app.flash("new chat");
+            app.flash("New chat");
         }
         "model" => {
             if arg.is_empty() {

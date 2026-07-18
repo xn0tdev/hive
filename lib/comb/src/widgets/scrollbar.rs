@@ -58,7 +58,9 @@ impl ScrollMetrics {
         let thumb_top = if max_offset == 0 {
             0
         } else {
-            (offset.min(max_offset) * span).checked_div(max_offset).unwrap_or(0)
+            (offset.min(max_offset) * span)
+                .checked_div(max_offset)
+                .unwrap_or(0)
         };
         ScrollMetrics {
             thumb_len,
@@ -72,7 +74,9 @@ impl ScrollMetrics {
         if self.max_offset == 0 || span == 0 {
             0
         } else {
-            (thumb_top.min(span) * self.max_offset).checked_div(span).unwrap_or(0)
+            (thumb_top.min(span) * self.max_offset)
+                .checked_div(span)
+                .unwrap_or(0)
         }
     }
 }
@@ -109,15 +113,32 @@ impl Scrollbar {
             return outer;
         }
         let w = self.style.width.min(outer.width);
-        Rect::new(outer.x, outer.y, outer.width.saturating_sub(w), outer.height)
+        Rect::new(
+            outer.x,
+            outer.y,
+            outer.width.saturating_sub(w),
+            outer.height,
+        )
     }
 
-    pub fn metrics(&self, total: usize, viewport: usize, offset: usize, area: Rect) -> ScrollMetrics {
+    pub fn metrics(
+        &self,
+        total: usize,
+        viewport: usize,
+        offset: usize,
+        area: Rect,
+    ) -> ScrollMetrics {
         ScrollMetrics::compute(total, viewport, offset, area.height as usize)
     }
 
     /// Inclusive screen-row range of the thumb, if any.
-    pub fn thumb_rows(&self, area: Rect, total: usize, viewport: usize, offset: usize) -> Option<(u16, u16)> {
+    pub fn thumb_rows(
+        &self,
+        area: Rect,
+        total: usize,
+        viewport: usize,
+        offset: usize,
+    ) -> Option<(u16, u16)> {
         let m = self.metrics(total, viewport, offset, area);
         if m.max_offset == 0 {
             return None;
@@ -127,7 +148,15 @@ impl Scrollbar {
         Some((y0, y1))
     }
 
-    pub fn hit(&self, area: Rect, total: usize, viewport: usize, offset: usize, col: u16, row: u16) -> ScrollHit {
+    pub fn hit(
+        &self,
+        area: Rect,
+        total: usize,
+        viewport: usize,
+        offset: usize,
+        col: u16,
+        row: u16,
+    ) -> ScrollHit {
         if !area.contains(col, row) || total <= viewport {
             return ScrollHit::None;
         }
@@ -176,6 +205,7 @@ impl Scrollbar {
 
     /// Handle mouse input over the scrollbar `area`. Updates `offset` in place.
     /// Returns `true` if the event was consumed.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_mouse(
         &mut self,
         area: Rect,
@@ -207,7 +237,8 @@ impl Scrollbar {
                     ScrollHit::Track => {
                         let rel = row as isize - area.y as isize;
                         let thumb_top = (rel - m.thumb_len as isize / 2)
-                            .clamp(0, (track_h - m.thumb_len) as isize) as usize;
+                            .clamp(0, (track_h - m.thumb_len) as isize)
+                            as usize;
                         *offset = m.offset_for_thumb_top(thumb_top, track_h);
                         true
                     }
@@ -215,8 +246,8 @@ impl Scrollbar {
                 }
             }
             MouseKind::Drag => {
-                if self.drag.is_some() {
-                    let rel = row as isize - area.y as isize - self.drag.unwrap();
+                if let Some(drag) = self.drag {
+                    let rel = row as isize - area.y as isize - drag;
                     let thumb_top = rel.clamp(0, (track_h - m.thumb_len) as isize) as usize;
                     *offset = m.offset_for_thumb_top(thumb_top, track_h);
                     true
@@ -284,7 +315,15 @@ mod tests {
         let area = Rect::new(10, 0, 1, 10);
         let mut bar = Scrollbar::default();
         let mut off = 0usize;
-        bar.on_mouse(area, 50, 10, &mut off, MouseKind::Down(MouseButton::Left), 10, 5);
+        bar.on_mouse(
+            area,
+            50,
+            10,
+            &mut off,
+            MouseKind::Down(MouseButton::Left),
+            10,
+            5,
+        );
         assert!(off > 0);
     }
 }

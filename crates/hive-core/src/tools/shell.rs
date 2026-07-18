@@ -100,16 +100,19 @@ impl Tool for RunShell {
         };
 
         let status = match timeout {
-            Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), drain_and_wait).await
-            {
-                Ok(st) => st,
-                Err(_) => {
-                    // timed out; the future is dropped which releases `child`, but
-                    // the process may still run — best-effort kill via pkill is not
-                    // reliable, so report the timeout clearly.
-                    return ToolResult::error(format!("command timed out after {secs}s\n{collected}"));
+            Some(secs) => {
+                match tokio::time::timeout(Duration::from_secs(secs), drain_and_wait).await {
+                    Ok(st) => st,
+                    Err(_) => {
+                        // timed out; the future is dropped which releases `child`, but
+                        // the process may still run — best-effort kill via pkill is not
+                        // reliable, so report the timeout clearly.
+                        return ToolResult::error(format!(
+                            "command timed out after {secs}s\n{collected}"
+                        ));
+                    }
                 }
-            },
+            }
             None => drain_and_wait.await,
         };
 

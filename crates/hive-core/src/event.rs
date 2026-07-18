@@ -68,13 +68,28 @@ pub enum AgentEvent {
         /// Short status line for the collapsed card (not the full report).
         detail: String,
     },
+    /// Cumulative token usage for a subagent (forwarded from its agent loop).
+    SubagentUsage {
+        id: String,
+        usage: Usage,
+    },
     /// Incremental transcript from a running subagent (for click-to-expand).
     SubagentTranscript {
         id: String,
         line: SubagentLine,
     },
+    /// `.hive/Plan.md` was created or updated (PLAN mode / plan amend).
+    PlanUpdated {
+        summary: String,
+        body: String,
+    },
     /// The active model changed (e.g. via `/model`).
-    ModelChanged(String),
+    ModelChanged {
+        /// Provider model id (sent to the API).
+        id: String,
+        /// Pretty label for the TUI.
+        display: String,
+    },
     /// Informational notice (e.g. "Exa disabled: no key").
     Notice(String),
     Error(String),

@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(tabs.index_at(area, 12, 10), Some(1)); // code
         assert_eq!(tabs.index_at(area, 19, 10), Some(2)); // metrics
         assert_eq!(tabs.index_at(area, 29, 10), Some(3)); // about
-        // Underline row also hits.
+                                                          // Underline row also hits.
         assert_eq!(tabs.index_at(area, 12, 11), Some(1));
     }
 }

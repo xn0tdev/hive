@@ -86,7 +86,10 @@ fn format_results(v: &Value) -> String {
     }
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {
-        let title = r.get("title").and_then(|t| t.as_str()).unwrap_or("(untitled)");
+        let title = r
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("(untitled)");
         let url = r.get("url").and_then(|u| u.as_str()).unwrap_or("");
         out.push_str(&format!("{}. {title}\n   {url}\n", i + 1));
         if let Some(hl) = r.get("highlights").and_then(|h| h.as_array()) {

@@ -2,9 +2,15 @@
 //! Two buffers (front = on screen, back = next frame) are diffed so the terminal
 //! only receives the cells that actually changed.
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::core::geom::{Rect, Size};
 use crate::core::style::Style;
 use crate::core::text::Line;
+
+/// Marker in the cell to the right of a double-width glyph. Skipped when
+/// flushing ANSI so the terminal does not advance an extra column.
+pub const WIDE_CONT: char = '\u{FFFE}';
 
 /// One character cell. `'\0'` marks a *transparent* cell — it is skipped when a
 /// surface is composited, letting lower layers show through.
@@ -97,6 +103,31 @@ impl Buffer {
         }
     }
 
+    /// Write one grapheme cell, honouring East-Asian / emoji display width.
+    /// Returns columns advanced (0, 1, or 2).
+    fn put_glyph(&mut self, x: u16, y: u16, ch: char, style: Style, limit: u16) -> u16 {
+        if x >= limit {
+            return 0;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w == 0 {
+            // Combining / zero-width: keep layout stable; skip.
+            return 0;
+        }
+        if w >= 2 {
+            // Need two cells; if only one remains, fall back to a space.
+            if x + 1 >= limit {
+                self.set(x, y, ' ', style);
+                return 1;
+            }
+            self.set(x, y, ch, style);
+            self.set(x + 1, y, WIDE_CONT, style);
+            return 2;
+        }
+        self.set(x, y, ch, style);
+        1
+    }
+
     /// Write `s` starting at `(x, y)`, clipping at the buffer edge. Returns the
     /// column just past the last glyph written.
     pub fn set_str(&mut self, x: u16, y: u16, s: &str, style: Style) -> u16 {
@@ -105,8 +136,14 @@ impl Buffer {
             if cx >= self.width {
                 break;
             }
-            self.set(cx, y, ch, style);
-            cx += 1;
+            let adv = self.put_glyph(cx, y, ch, style, self.width);
+            if adv == 0 && UnicodeWidthChar::width(ch).unwrap_or(0) == 0 {
+                continue;
+            }
+            if adv == 0 {
+                break;
+            }
+            cx = cx.saturating_add(adv);
         }
         cx
     }
@@ -119,7 +156,8 @@ impl Buffer {
 
     /// Like [`set_line`], but every span is patched with `base` (typically a
     /// panel background) so fg-only highlight styles don't wipe the row bg.
-    /// Pads the remainder of the row with spaces in `base` when it has a bg.
+    /// Always clears the remainder of the row so scroll / short lines cannot
+    /// leave stale glyphs behind.
     pub fn set_line_on(&mut self, x: u16, y: u16, line: &Line, max_width: u16, base: Style) {
         let mut cx = x;
         let limit = x.saturating_add(max_width).min(self.width);
@@ -127,17 +165,26 @@ impl Buffer {
             let st = span.style.patch(base);
             for ch in span.content.chars() {
                 if cx >= limit {
-                    return;
+                    // Still clear the rest of the row below.
+                    break;
                 }
-                self.set(cx, y, ch, st);
-                cx += 1;
+                let adv = self.put_glyph(cx, y, ch, st, limit);
+                if adv == 0 {
+                    if UnicodeWidthChar::width(ch).unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    break;
+                }
+                cx = cx.saturating_add(adv);
+            }
+            if cx >= limit {
+                break;
             }
         }
-        if base.bg.is_some() {
-            while cx < limit {
-                self.set(cx, y, ' ', base);
-                cx += 1;
-            }
+        // Clear vacated cells — required for scroll artifacts and width changes.
+        while cx < limit {
+            self.set(cx, y, ' ', base);
+            cx += 1;
         }
     }
 
@@ -148,6 +195,7 @@ impl Buffer {
     }
 
     /// Like [`set_lines`], patching every cell with `base` (e.g. panel bg).
+    /// Empty rows in the viewport are always cleared.
     pub fn set_lines_on(&mut self, area: Rect, lines: &[Line], scroll: usize, base: Style) {
         for row in 0..area.height {
             let idx = scroll + row as usize;
@@ -155,9 +203,7 @@ impl Buffer {
             match lines.get(idx) {
                 Some(line) => self.set_line_on(area.x, y, line, area.width, base),
                 None => {
-                    if base.bg.is_some() {
-                        self.paint(Rect::new(area.x, y, area.width, 1), base);
-                    }
+                    self.paint(Rect::new(area.x, y, area.width, 1), base);
                 }
             }
         }
@@ -215,14 +261,14 @@ impl Buffer {
         out
     }
 
-    /// The whole buffer as text, rows joined by `\n` (transparent cells become
-    /// spaces). Handy for snapshot-style assertions in tests.
+    /// The whole buffer as text, rows joined by `\n` (transparent / wide-cont
+    /// cells become spaces). Handy for snapshot-style assertions in tests.
     pub fn text(&self) -> String {
         let mut s = String::with_capacity((self.width as usize + 1) * self.height as usize);
         for y in 0..self.height {
             for x in 0..self.width {
                 let ch = self.cells[y as usize * self.width as usize + x as usize].ch;
-                s.push(if ch == '\0' { ' ' } else { ch });
+                s.push(if ch == '\0' || ch == WIDE_CONT { ' ' } else { ch });
             }
             if y + 1 < self.height {
                 s.push('\n');
@@ -254,5 +300,37 @@ mod tests {
         let d = b.diff(&a);
         assert_eq!(d.len(), 1);
         assert_eq!((d[0].0, d[0].1, d[0].2.ch), (1, 0, 'x'));
+    }
+
+    #[test]
+    fn set_line_clears_remainder_of_row() {
+        let mut b = Buffer::blank(Size::new(8, 1));
+        b.set_str(0, 0, "abcdefgh", Style::new());
+        b.set_line(0, 0, &Line::from("hi"), 8);
+        let row: String = (0..8).map(|x| b.get(x, 0).unwrap().ch).collect();
+        assert_eq!(row, "hi      ");
+    }
+
+    #[test]
+    fn set_lines_clears_empty_viewport_rows() {
+        let mut b = Buffer::blank(Size::new(4, 3));
+        b.set_str(0, 0, "aaaa", Style::new());
+        b.set_str(0, 1, "bbbb", Style::new());
+        b.set_str(0, 2, "cccc", Style::new());
+        let lines = vec![Line::from("x")];
+        b.set_lines(Rect::new(0, 0, 4, 3), &lines, 0);
+        assert_eq!(b.get(0, 0).unwrap().ch, 'x');
+        assert_eq!(b.get(1, 0).unwrap().ch, ' ');
+        assert_eq!(b.get(0, 1).unwrap().ch, ' ');
+        assert_eq!(b.get(0, 2).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn wide_glyph_reserves_two_cells() {
+        let mut b = Buffer::blank(Size::new(4, 1));
+        b.set_str(0, 0, "あ", Style::new());
+        assert_eq!(b.get(0, 0).unwrap().ch, 'あ');
+        assert_eq!(b.get(1, 0).unwrap().ch, WIDE_CONT);
+        assert_eq!(b.get(2, 0).unwrap().ch, ' ');
     }
 }

@@ -20,10 +20,7 @@ pub fn wrap_lines(lines: Vec<Line>, width: usize) -> Vec<Line> {
             || plain.starts_with('┴')
             || (!plain.is_empty()
                 && plain.chars().all(|c| {
-                    matches!(
-                        c,
-                        '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
-                    )
+                    matches!(c, '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
                 }));
         let is_code_fence = is_code_fence_line(&line, &plain);
         if is_tableish || is_code_fence {
@@ -238,10 +235,7 @@ mod tests {
             .bg(code_bg);
         let base = Style::default().fg(Color::Rgb(0xd4, 0xd4, 0xd4));
         Line::from(vec![
-            Span::styled(
-                "Want me to auto-fix the trivial ones (".to_string(),
-                base,
-            ),
+            Span::styled("Want me to auto-fix the trivial ones (".to_string(), base),
             Span::styled(" useless_format ".to_string(), code),
             Span::styled(", ".to_string(), base),
             Span::styled(" manual_contains ".to_string(), code),
@@ -258,8 +252,7 @@ mod tests {
     #[test]
     fn continuation_keeps_leading_indent() {
         let line = Line::from(Span::raw(
-            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.91s"
-                .to_string(),
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.91s".to_string(),
         ));
         let wrapped = wrap_lines(vec![line], 64);
         let texts = plain(&wrapped);

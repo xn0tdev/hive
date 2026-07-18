@@ -43,22 +43,80 @@ impl Default for ProviderConfig {
     }
 }
 
+/// One model slot: provider `id` plus optional pretty `name` for the UI.
+///
+/// TOML accepts either a bare string (id only) or a table:
+/// ```toml
+/// default = "accounts/…/kimi-k2p6-fast"
+/// # or
+/// default = { id = "accounts/…/kimi-k2p6-fast", name = "Kimi Fast" }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ModelRef {
+    Id(String),
+    Named {
+        id: String,
+        #[serde(default, alias = "display_name", alias = "label")]
+        name: Option<String>,
+    },
+}
+
+impl ModelRef {
+    pub fn id(&self) -> &str {
+        match self {
+            ModelRef::Id(id) => id,
+            ModelRef::Named { id, .. } => id,
+        }
+    }
+
+    /// Pretty label for the TUI; falls back to the last path segment of `id`.
+    pub fn display_name(&self) -> &str {
+        match self {
+            ModelRef::Named { name: Some(n), .. } if !n.trim().is_empty() => n.trim(),
+            _ => short_model_id(self.id()),
+        }
+    }
+}
+
+impl Default for ModelRef {
+    fn default() -> Self {
+        ModelRef::Id(String::new())
+    }
+}
+
+fn short_model_id(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
-    pub default: String,
-    pub smart: String,
-    pub fast: String,
-    pub vision: String,
+    pub default: ModelRef,
+    pub smart: ModelRef,
+    pub fast: ModelRef,
+    pub vision: ModelRef,
 }
 
 impl Default for ModelsConfig {
     fn default() -> Self {
         ModelsConfig {
-            default: "accounts/fireworks/routers/kimi-k2p6-fast".to_string(),
-            smart: "accounts/fireworks/models/glm-5p2".to_string(),
-            fast: "accounts/fireworks/models/deepseek-v4-flash".to_string(),
-            vision: "accounts/fireworks/models/kimi-k2p6".to_string(),
+            default: ModelRef::Named {
+                id: "accounts/fireworks/routers/kimi-k2p6-fast".into(),
+                name: Some("Kimi Fast".into()),
+            },
+            smart: ModelRef::Named {
+                id: "accounts/fireworks/models/glm-5p2".into(),
+                name: Some("GLM 5.2".into()),
+            },
+            fast: ModelRef::Named {
+                id: "accounts/fireworks/models/deepseek-v4-flash".into(),
+                name: Some("DeepSeek Flash".into()),
+            },
+            vision: ModelRef::Named {
+                id: "accounts/fireworks/models/kimi-k2p6".into(),
+                name: Some("Kimi".into()),
+            },
         }
     }
 }
@@ -152,8 +210,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Resolve the concrete model id for a role.
-    pub fn model(&self, role: ModelRole) -> &str {
+    fn model_ref(&self, role: ModelRole) -> &ModelRef {
         match role {
             ModelRole::Default => &self.models.default,
             ModelRole::Smart => &self.models.smart,
@@ -162,7 +219,51 @@ impl AppConfig {
         }
     }
 
+    /// Resolve the concrete provider model id for a role.
+    pub fn model(&self, role: ModelRole) -> &str {
+        self.model_ref(role).id()
+    }
+
+    /// Pretty display name for a role (UI).
+    pub fn model_display(&self, role: ModelRole) -> &str {
+        self.model_ref(role).display_name()
+    }
+
+    /// Look up a display name for a concrete id (role match or short id).
+    pub fn display_for_model_id(&self, id: &str) -> String {
+        for role in [
+            ModelRole::Default,
+            ModelRole::Smart,
+            ModelRole::Fast,
+            ModelRole::Vision,
+        ] {
+            let r = self.model_ref(role);
+            if r.id() == id {
+                return r.display_name().to_string();
+            }
+        }
+        short_model_id(id).to_string()
+    }
+
     pub fn is_vision_capable(&self, model: &str) -> bool {
         self.vision.capable.iter().any(|m| m == model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_ref_display_falls_back_to_short_id() {
+        let bare = ModelRef::Id("accounts/fireworks/models/foo".into());
+        assert_eq!(bare.id(), "accounts/fireworks/models/foo");
+        assert_eq!(bare.display_name(), "foo");
+
+        let named = ModelRef::Named {
+            id: "accounts/fireworks/models/bar".into(),
+            name: Some("Bar".into()),
+        };
+        assert_eq!(named.display_name(), "Bar");
     }
 }

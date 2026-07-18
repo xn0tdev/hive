@@ -3,7 +3,10 @@
 use crate::core::text::{Line, Span};
 use crate::draw::highlight::HighlightTheme;
 
-const KEYWORDS: &[&str] = &["if", "then", "else", "fi", "for", "do", "done", "in", "case", "esac", "function", "return", "export", "local"];
+const KEYWORDS: &[&str] = &[
+    "if", "then", "else", "fi", "for", "do", "done", "in", "case", "esac", "function", "return",
+    "export", "local",
+];
 
 pub fn highlight(source: &str, theme: &HighlightTheme) -> Vec<Line> {
     source.lines().map(|l| highlight_line(l, theme)).collect()
@@ -35,7 +38,10 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
                 }
                 i += 1;
             }
-            out.push(Span::styled(chars[start..i].iter().collect::<String>(), theme.string));
+            out.push(Span::styled(
+                chars[start..i].iter().collect::<String>(),
+                theme.string,
+            ));
             continue;
         }
         if chars[i] == '$' {
@@ -53,7 +59,10 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
                     i += 1;
                 }
             }
-            out.push(Span::styled(chars[start..i].iter().collect::<String>(), theme.type_name));
+            out.push(Span::styled(
+                chars[start..i].iter().collect::<String>(),
+                theme.type_name,
+            ));
             continue;
         }
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {

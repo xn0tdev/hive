@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use comb::effects::{shimmer, sparkline, SPINNERS};
 use comb::highlight::Lang;
+use comb::widgets::List;
 use comb::{
     CodeBlock, Color, DiffView, Event, KeyCode, Line, Menu, MouseButton, MouseKind, MouseMode,
     Palette, Rect, ScrollView, ScrollbarStyle, Span, Style, Tabs, Terminal, TextInput, Toasts,
     Window,
 };
-use comb::widgets::List;
 
 const SAMPLE_RUST: &str = r#"use comb::{CodeBlock, Lang};
 
@@ -95,16 +95,20 @@ fn main() -> std::io::Result<()> {
         thumb: Style::new().fg(rgb(0x86, 0x86, 0x86)),
     };
     let ctx_pal = Palette {
-        normal: Style::new().fg(rgb(0xc4, 0xc4, 0xc4)).bg(rgb(0x2a, 0x2a, 0x2a)),
+        normal: Style::new()
+            .fg(rgb(0xc4, 0xc4, 0xc4))
+            .bg(rgb(0x2a, 0x2a, 0x2a)),
         panel: Style::new().bg(rgb(0x2a, 0x2a, 0x2a)),
         ..pal
     };
 
     let mut menu = List::new(
-        ["New", "Open", "Save", "Copy", "Paste", "Find", "Settings", "Quit"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        [
+            "New", "Open", "Save", "Copy", "Paste", "Find", "Settings", "Quit",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
     );
     let mut log = ScrollView::new(
         (1..=40)
@@ -120,8 +124,12 @@ fn main() -> std::io::Result<()> {
     log.scrollbar.style = ScrollbarStyle {
         track_glyph: '░',
         thumb_glyph: '▐',
-        track: Style::new().fg(rgb(0x40, 0x40, 0x40)).bg(rgb(0x22, 0x22, 0x22)),
-        thumb: Style::new().fg(rgb(0x72, 0x72, 0x72)).bg(rgb(0x22, 0x22, 0x22)),
+        track: Style::new()
+            .fg(rgb(0x40, 0x40, 0x40))
+            .bg(rgb(0x22, 0x22, 0x22)),
+        thumb: Style::new()
+            .fg(rgb(0x72, 0x72, 0x72))
+            .bg(rgb(0x22, 0x22, 0x22)),
         thumb_active: Style::new()
             .fg(rgb(0xcc, 0xcc, 0xcc))
             .bg(rgb(0x22, 0x22, 0x22))
@@ -140,19 +148,20 @@ fn main() -> std::io::Result<()> {
         track_glyph: '▕',
         thumb_glyph: '█',
         width: 1,
-        track: Style::new().fg(rgb(0x35, 0x35, 0x35)).bg(rgb(0x22, 0x22, 0x22)),
-        thumb: Style::new().fg(rgb(0x88, 0x88, 0x88)).bg(rgb(0x22, 0x22, 0x22)),
-        thumb_active: Style::new().fg(rgb(0xee, 0xee, 0xee)).bg(rgb(0x22, 0x22, 0x22)),
+        track: Style::new()
+            .fg(rgb(0x35, 0x35, 0x35))
+            .bg(rgb(0x22, 0x22, 0x22)),
+        thumb: Style::new()
+            .fg(rgb(0x88, 0x88, 0x88))
+            .bg(rgb(0x22, 0x22, 0x22)),
+        thumb_active: Style::new()
+            .fg(rgb(0xee, 0xee, 0xee))
+            .bg(rgb(0x22, 0x22, 0x22)),
     };
     let mut diff = DiffView::new(SAMPLE_RUST_OLD, SAMPLE_RUST);
     diff.scrollbar.style = code.scrollbar.style;
 
-    let mut mode_tabs = Tabs::new(
-        ["Code", "Diff"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    );
+    let mut mode_tabs = Tabs::new(["Code", "Diff"].iter().map(|s| s.to_string()).collect());
     let mut editor_mode = EditorMode::Code;
 
     let mut win_menu = Window::new("menu", 2, 3, 28, 10);
@@ -189,12 +198,7 @@ fn main() -> std::io::Result<()> {
         let input_area = Rect::new(2, input_y, size.width.saturating_sub(4).min(52), input_h);
         let workspace = Rect::new(0, 2, size.width, input_y.saturating_sub(2));
 
-        for w in [
-            &mut win_menu,
-            &mut win_log,
-            &mut win_spin,
-            &mut win_editor,
-        ] {
+        for w in [&mut win_menu, &mut win_log, &mut win_spin, &mut win_editor] {
             w.clamp_to(workspace);
         }
 
@@ -433,7 +437,8 @@ fn main() -> std::io::Result<()> {
                                 WinId::Spin => &mut win_spin,
                                 WinId::Editor => &mut win_editor,
                             };
-                            if win.is_dragging() && win.handle_mouse(m.kind, m.col, m.row, workspace)
+                            if win.is_dragging()
+                                && win.handle_mouse(m.kind, m.col, m.row, workspace)
                             {
                                 break;
                             }

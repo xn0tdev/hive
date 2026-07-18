@@ -72,9 +72,9 @@ pub fn wordmark(theme: &Theme, bonk: Option<&LogoBonk>) -> Vec<Line> {
                         return Span::raw(" ");
                     }
                     let color = match bonk.filter(|b| b.alive()) {
-                        Some(b) => {
-                            cell_bonk_color(col as u16, row as u16, b, radius, fading, elapsed, theme)
-                        }
+                        Some(b) => cell_bonk_color(
+                            col as u16, row as u16, b, radius, fading, elapsed, theme,
+                        ),
                         None => theme.fg,
                     };
                     Span::styled(

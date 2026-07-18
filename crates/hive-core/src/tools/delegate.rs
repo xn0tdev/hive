@@ -1,6 +1,7 @@
 //! Delegation tools: hand work to subagents through the injected
-//! `SubagentSpawner`. Swarm fan-out stays registered but filtered out of
-//! `all_tools()`; the live surface is a single `verify_project` checker.
+//! `SubagentSpawner`. The main agent authors each subagent's prompt;
+//! `verify_project` is a ready checker role, `spawn_subagent` is general.
+//! Fan-out `spawn_swarm` stays registered but filtered out of `all_tools()`.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -14,17 +15,16 @@ use super::str_arg;
 
 const VERIFY_LABEL: &str = "Checking project";
 
-const VERIFY_PROMPT: &str = "\
-You are a project verification subagent. Check that this workspace is in good shape.
-
-Do the following end-to-end:
-1. Run `cargo check` in the working directory (add `-p <crate>` only if the task clearly scopes one crate).
-2. If check fails, diagnose the top errors; do not make broad refactors.
-3. Optionally run a focused `cargo test` only when it is quick and clearly relevant.
-4. Finish with a concise report: what you ran, pass/fail, and the most important issues (if any).
-
-Prefer reporting over editing. Only apply a tiny fix if it unblocks the check and is obviously correct.
+/// Short role preamble for the ready checker; the main agent authors the task.
+const VERIFY_ROLE: &str = "\
+You are a project verification subagent. Prefer reporting over editing. \
+Only apply a tiny fix if it unblocks a check and is obviously correct. \
 Your final message is the entire return value.";
+
+/// Combine the ready-checker role with the orchestrator-authored brief.
+pub(crate) fn build_verify_prompt(task: &str) -> String {
+    format!("{VERIFY_ROLE}\n\n## Your task\n{}", task.trim())
+}
 
 /// Spawn the dedicated project-verification subagent (cargo check / review).
 pub struct VerifyProject;
@@ -36,21 +36,26 @@ impl Tool for VerifyProject {
     }
 
     fn description(&self) -> &str {
-        "Spawn the project verification subagent. It runs cargo check (and a light review) \
-and returns a concise pass/fail report. Use when you want an independent build/lint check \
-of the workspace. Takes no arguments."
+        "Spawn the ready project-verification subagent (fast model). You write the full \
+prompt/brief yourself — what to check, which crates, and what to report. The subagent \
+runs independently and returns a concise report. Use when you want an independent \
+build/lint/review pass."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "focus": {
+                "prompt": {
                     "type": "string",
-                    "description": "Optional hint (crate name, area, or concern) appended to the checker brief."
+                    "description": "Self-contained brief you author for the checker (what to run, scope, what to report)."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Alias for prompt."
                 }
             },
-            "required": []
+            "required": ["prompt"]
         })
     }
 
@@ -66,16 +71,20 @@ of the workspace. Takes no arguments."
             ));
         }
 
-        let mut prompt = VERIFY_PROMPT.to_string();
-        if let Some(focus) = str_arg(&args, "focus").filter(|s| !s.trim().is_empty()) {
-            prompt.push_str("\n\nFocus / extra context from the main agent:\n");
-            prompt.push_str(focus);
-        }
+        let Some(task) = str_arg(&args, "prompt")
+            .or_else(|| str_arg(&args, "task"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return ToolResult::error(
+                "missing 'prompt' — write a self-contained brief for the checker subagent",
+            );
+        };
 
         let st = SubagentTask {
             id: format!("verify_{}", uuid::Uuid::new_v4().simple()),
             label: VERIFY_LABEL.to_string(),
-            prompt,
+            prompt: build_verify_prompt(task),
             model_role: ModelRole::Fast,
             depth: ctx.depth + 1,
         };
@@ -98,6 +107,7 @@ impl Tool for SpawnSubagent {
 
     fn description(&self) -> &str {
         "Spawn one subagent to complete a focused task end-to-end and return its result. \
+You write the full task prompt yourself with all needed context. \
 Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (frontend), vision (images)."
     }
 
@@ -105,7 +115,8 @@ Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (fr
         json!({
             "type": "object",
             "properties": {
-                "task": {"type": "string", "description": "A self-contained task description with all needed context."},
+                "task": {"type": "string", "description": "A self-contained task description with all needed context — you author this prompt."},
+                "prompt": {"type": "string", "description": "Alias for task."},
                 "model_role": {"type": "string", "description": "default | smart | fast | vision"}
             },
             "required": ["task"]
@@ -113,8 +124,14 @@ Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (fr
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(task) = str_arg(&args, "task") else {
-            return ToolResult::error("missing 'task'");
+        let Some(task) = str_arg(&args, "task")
+            .or_else(|| str_arg(&args, "prompt"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return ToolResult::error(
+                "missing 'task' — write a self-contained prompt for the subagent",
+            );
         };
         let max_depth = ctx.config.swarm.max_depth;
         if ctx.depth >= max_depth {
@@ -193,6 +210,7 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
             } else {
                 let p = item
                     .get("task")
+                    .or_else(|| item.get("prompt"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -246,3 +264,22 @@ fn truncate_label(s: &str, max: usize) -> String {
 inventory::submit! { ToolRegistration { make: || Arc::new(VerifyProject) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(SpawnSubagent) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(SpawnSwarm) as Arc<dyn Tool> } }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_prompt_includes_orchestrator_brief() {
+        let p = build_verify_prompt("Run cargo check -p hive-core and report failures.");
+        assert!(p.contains("project verification subagent"));
+        assert!(p.contains("## Your task"));
+        assert!(p.contains("Run cargo check -p hive-core"));
+    }
+
+    #[test]
+    fn verify_prompt_trims_task() {
+        let p = build_verify_prompt("  check hive-tui  ");
+        assert!(p.ends_with("check hive-tui"));
+    }
+}

@@ -75,8 +75,12 @@ impl Window {
         if workspace.is_empty() {
             return;
         }
-        self.width = self.width.clamp(self.min_w, workspace.width.max(self.min_w));
-        self.height = self.height.clamp(self.min_h, workspace.height.max(self.min_h));
+        self.width = self
+            .width
+            .clamp(self.min_w, workspace.width.max(self.min_w));
+        self.height = self
+            .height
+            .clamp(self.min_h, workspace.height.max(self.min_h));
         let max_x = workspace.right().saturating_sub(self.width);
         let max_y = workspace.bottom().saturating_sub(self.height);
         self.x = self.x.clamp(workspace.x, max_x.max(workspace.x));
@@ -116,13 +120,7 @@ impl Window {
 
     /// Handle move / resize. Returns `true` if the event was consumed.
     /// `workspace` clamps the window while dragging.
-    pub fn handle_mouse(
-        &mut self,
-        kind: MouseKind,
-        col: u16,
-        row: u16,
-        workspace: Rect,
-    ) -> bool {
+    pub fn handle_mouse(&mut self, kind: MouseKind, col: u16, row: u16, workspace: Rect) -> bool {
         let area = self.area();
         match kind {
             MouseKind::Up => {
@@ -142,19 +140,15 @@ impl Window {
                     Some(DragKind::Resize(edge)) => {
                         match edge {
                             ResizeEdge::Bottom | ResizeEdge::BottomRight => {
-                                self.height = row
-                                    .saturating_sub(self.y)
-                                    .saturating_add(1)
-                                    .max(self.min_h);
+                                self.height =
+                                    row.saturating_sub(self.y).saturating_add(1).max(self.min_h);
                             }
                             ResizeEdge::Right => {}
                         }
                         match edge {
                             ResizeEdge::Right | ResizeEdge::BottomRight => {
-                                self.width = col
-                                    .saturating_sub(self.x)
-                                    .saturating_add(1)
-                                    .max(self.min_w);
+                                self.width =
+                                    col.saturating_sub(self.x).saturating_add(1).max(self.min_w);
                             }
                             ResizeEdge::Bottom => {}
                         }

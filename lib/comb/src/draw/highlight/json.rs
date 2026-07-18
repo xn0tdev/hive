@@ -24,7 +24,10 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
             while i < chars.len() && chars[i].is_whitespace() {
                 i += 1;
             }
-            out.push(Span::styled(chars[start..i].iter().collect::<String>(), theme.text));
+            out.push(Span::styled(
+                chars[start..i].iter().collect::<String>(),
+                theme.text,
+            ));
             continue;
         }
         if chars[i] == '"' {
@@ -42,7 +45,7 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            let st = if start > 0 && chars[..start].iter().any(|c| *c == ':') {
+            let st = if start > 0 && chars[..start].contains(&':') {
                 theme.string
             } else {
                 theme.type_name
@@ -50,7 +53,10 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
             out.push(Span::styled(s, st));
             continue;
         }
-        if chars[i..].starts_with(&['t', 'r', 'u', 'e']) || chars[i..].starts_with(&['f', 'a', 'l', 's', 'e']) || chars[i..].starts_with(&['n', 'u', 'l', 'l']) {
+        if chars[i..].starts_with(&['t', 'r', 'u', 'e'])
+            || chars[i..].starts_with(&['f', 'a', 'l', 's', 'e'])
+            || chars[i..].starts_with(&['n', 'u', 'l', 'l'])
+        {
             let word = if chars[i..].starts_with(&['f', 'a', 'l', 's', 'e']) {
                 "false"
             } else if chars[i..].starts_with(&['n', 'u', 'l', 'l']) {
@@ -65,10 +71,18 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
         if chars[i].is_ascii_digit() || chars[i] == '-' {
             let start = i;
             i += 1;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '-' || chars[i] == '+') {
+            while i < chars.len()
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == '.'
+                    || chars[i] == '-'
+                    || chars[i] == '+')
+            {
                 i += 1;
             }
-            out.push(Span::styled(chars[start..i].iter().collect::<String>(), theme.number));
+            out.push(Span::styled(
+                chars[start..i].iter().collect::<String>(),
+                theme.number,
+            ));
             continue;
         }
         if "{}[]:,".contains(chars[i]) {

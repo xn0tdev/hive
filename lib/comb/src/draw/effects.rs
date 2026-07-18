@@ -65,16 +65,48 @@ impl Spinner {
 /// A gallery of ready-made spinners — every frame is one cell wide, no emoji, so
 /// they line up perfectly in the grid.
 pub const SPINNERS: &[Spinner] = &[
-    Spinner { name: "braille", frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] },
-    Spinner { name: "dots", frames: &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"] },
-    Spinner { name: "line", frames: &["|", "/", "-", "\\"] },
-    Spinner { name: "arc", frames: &["◜", "◠", "◝", "◞", "◡", "◟"] },
-    Spinner { name: "circle", frames: &["◐", "◓", "◑", "◒"] },
-    Spinner { name: "triangle", frames: &["◢", "◣", "◤", "◥"] },
-    Spinner { name: "quadrant", frames: &["▖", "▘", "▝", "▗"] },
-    Spinner { name: "bar", frames: &["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█", "▉", "▊", "▌", "▍", "▎"] },
-    Spinner { name: "star", frames: &["✶", "✸", "✹", "✺", "✹", "✷"] },
-    Spinner { name: "bounce", frames: &["⠁", "⠂", "⠄", "⠂"] },
+    Spinner {
+        name: "braille",
+        frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    },
+    Spinner {
+        name: "dots",
+        frames: &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
+    },
+    Spinner {
+        name: "line",
+        frames: &["|", "/", "-", "\\"],
+    },
+    Spinner {
+        name: "arc",
+        frames: &["◜", "◠", "◝", "◞", "◡", "◟"],
+    },
+    Spinner {
+        name: "circle",
+        frames: &["◐", "◓", "◑", "◒"],
+    },
+    Spinner {
+        name: "triangle",
+        frames: &["◢", "◣", "◤", "◥"],
+    },
+    Spinner {
+        name: "quadrant",
+        frames: &["▖", "▘", "▝", "▗"],
+    },
+    Spinner {
+        name: "bar",
+        frames: &[
+            "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█", "▉", "▊", "▌", "▍", "▎",
+        ],
+    },
+    Spinner {
+        name: "star",
+        frames: &["✶", "✸", "✹", "✺", "✹", "✷"],
+    },
+    Spinner {
+        name: "bounce",
+        frames: &["⠁", "⠂", "⠄", "⠂"],
+    },
 ];
 
 /// Render a fractional progress bar of `width` cells using eighth-block glyphs

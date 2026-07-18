@@ -198,6 +198,7 @@ impl InputState {
     }
 
     /// (visual row, column within that row) for the cursor.
+    #[allow(clippy::manual_checked_ops)]
     pub fn cursor_visual(&self, width: usize) -> (usize, usize) {
         let (hard, col) = self.cursor_line_col();
         let w = width;

@@ -99,7 +99,12 @@ impl TextInput {
 
         if self.value.is_empty() {
             buf.set_str(text_x, text_y, &self.placeholder, ghost);
-            pad_row(buf, row, text_x + self.placeholder.chars().count() as u16, strip);
+            pad_row(
+                buf,
+                row,
+                text_x + self.placeholder.chars().count() as u16,
+                strip,
+            );
             return Some((text_x, text_y));
         }
 

@@ -160,6 +160,8 @@ pub fn build_request(req: &ChatRequest) -> WireRequest {
         stream: true,
         temperature: req.temperature,
         max_tokens: req.max_tokens,
-        stream_options: StreamOptions { include_usage: true },
+        stream_options: StreamOptions {
+            include_usage: true,
+        },
     }
 }

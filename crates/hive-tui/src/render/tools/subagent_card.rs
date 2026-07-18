@@ -1,11 +1,12 @@
 //! Subagent card in the main transcript — soft `strip` band with pad rows.
 
-use comb::{Color, Line, Modifier, Span, Style};
+use comb::{Line, Modifier, Span, Style};
 
 use hive_core::event::SubagentStatus;
 
 use crate::app::state::SubagentCard;
 use crate::app::App;
+use crate::render::tools::strip::{soft_bg_line, soft_bg_pad};
 use crate::render::tools::tool_card::format_tool_secs;
 
 /// Flat subagent card in the main transcript: title + duration, status under.
@@ -67,26 +68,4 @@ pub(crate) fn subagent_card_lines(
         status_line,
         soft_bg_pad(bg, width),
     ]
-}
-
-/// Paint a soft strip under a card line, padding to `width`.
-fn soft_bg_line(line: Line, bg: Color, width: usize) -> Line {
-    let mut used = 0usize;
-    let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    for s in line.spans {
-        used += s.content.chars().count();
-        spans.push(Span::styled(s.content, s.style.bg(bg)));
-    }
-    if width > used {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(bg),
-        ));
-    }
-    Line::from(spans)
-}
-
-/// Blank full-width row in the same soft strip colour (vertical breathing room).
-fn soft_bg_pad(bg: Color, width: usize) -> Line {
-    soft_bg_line(Line::from(""), bg, width)
 }

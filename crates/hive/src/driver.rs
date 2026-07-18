@@ -19,17 +19,20 @@ pub async fn run(
 ) {
     while let Some(cmd) = input_rx.recv().await {
         match cmd {
-            InputCommand::User { text, images } => {
+            InputCommand::User { text, images, mode } => {
                 interrupt.store(false, Ordering::Relaxed);
                 agent
-                    .run_turn(UserInput { text, images }, interrupt.clone())
+                    .run_turn(UserInput { text, images, mode }, interrupt.clone())
                     .await;
             }
             InputCommand::SetModel(s) => {
-                let model = resolve_model(&cfg, &s);
-                agent.set_model(model.clone());
-                let _ = events.send(AgentEvent::ModelChanged(model.clone()));
-                let _ = events.send(AgentEvent::Notice(format!("Model set to {model}")));
+                let (id, display) = resolve_model(&cfg, &s);
+                agent.set_model(id.clone());
+                let _ = events.send(AgentEvent::ModelChanged {
+                    id: id.clone(),
+                    display: display.clone(),
+                });
+                let _ = events.send(AgentEvent::Notice(format!("Model set to {display}")));
             }
             InputCommand::Clear => {
                 agent.reset();
@@ -38,9 +41,16 @@ pub async fn run(
     }
 }
 
-fn resolve_model(cfg: &AppConfig, s: &str) -> String {
+fn resolve_model(cfg: &AppConfig, s: &str) -> (String, String) {
     match ModelRole::parse(s) {
-        Some(role) => cfg.model(role).to_string(),
-        None => s.to_string(),
+        Some(role) => (
+            cfg.model(role).to_string(),
+            cfg.model_display(role).to_string(),
+        ),
+        None => {
+            let id = s.to_string();
+            let display = cfg.display_for_model_id(&id);
+            (id, display)
+        }
     }
 }

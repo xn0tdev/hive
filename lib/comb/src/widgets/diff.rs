@@ -147,11 +147,8 @@ pub fn unified_diff(old: &str, new: &str, theme: &DiffTheme) -> Vec<Line> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
     let mut out = Vec::new();
-    out.push(line(
-        format!("--- a/source.rs"),
-        theme.meta,
-    ));
-    out.push(line(format!("+++ b/source.rs"), theme.meta));
+    out.push(line("--- a/source.rs".to_string(), theme.meta));
+    out.push(line("+++ b/source.rs".to_string(), theme.meta));
     out.push(line(
         format!("@@ -1,{} +1,{} @@", a.len(), b.len()),
         theme.header,

@@ -1,5 +1,5 @@
-//! Builds and draws the scrolling conversation transcript and the "Working"
-//! indicator. The greeting lives only on the landing screen, not here.
+//! Builds and draws the scrolling conversation transcript. The greeting lives
+//! only on the landing screen; the turn working cubes live in the footer.
 
 use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
@@ -7,28 +7,30 @@ use hive_core::event::{SubagentLine, SubagentStatus};
 
 use crate::app::state::{Block as UiBlock, ChatView, SubagentCard, ToolCard, ToolStatus};
 use crate::app::App;
-use crate::render::tools::{format_tool_secs, subagent_card_lines, tool_lines};
+use crate::render::tools::{format_tool_secs, plan_card_lines, subagent_card_lines, tool_lines};
 use crate::render::{markdown, wrap};
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
+    if area.is_empty() {
+        app.click_hits.clear();
+        return;
+    }
+    // Clear the whole transcript band (including the top spacer row) so
+    // scroll / shorter lines never leave stale glyphs in vacated cells.
+    buf.paint(area, Style::default());
+
     let width = area.width.max(1) as usize;
     let (all, heads) = build(app, width);
     let total = all.len();
-    let viewport = area.height as usize;
+    // Top-down with one blank row of breathing room under the top edge.
+    let target = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let viewport = target.height as usize;
     let max_scroll = total.saturating_sub(viewport);
     let scroll = max_scroll.saturating_sub(app.scroll_from_bottom);
-
-    // Bottom-anchor: a short conversation hugs the input instead of floating
-    // at the top with a screenful of emptiness in between.
-    let target = if total < viewport {
-        Rect {
-            y: area.y + (viewport - total) as u16,
-            height: total as u16,
-            ..area
-        }
-    } else {
-        area
-    };
 
     // Remember which screen rows hold expandable headers (thoughts / subagents)
     // so a mouse click can be mapped back to its block.
@@ -41,24 +43,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
 
     buf.set_lines(target, &all, scroll);
-}
-
-/// The spinner block shown above the input while a turn is running.
-pub fn draw_working(buf: &mut Buffer, area: Rect, app: &App) {
-    let theme = &app.theme;
-    let mut spans = vec![Span::styled(
-        format!("{} ", app.spinner_char()),
-        Style::default().fg(theme.accent),
-    )];
-    spans.extend(shimmer("Working", app.spinner));
-    // A blank line above and below so the indicator breathes.
-    let lines = vec![Line::default(), Line::from(spans), Line::default()];
-    buf.set_lines(area, &lines, 0);
-}
-
-/// Per-character grayscale shimmer for the "Working" indicator.
-fn shimmer(text: &str, tick: usize) -> Vec<Span> {
-    shimmer_range(text, tick, 0x70, 0xf2)
 }
 
 /// Brighter shimmer for the live Thinking header — readable at a glance.
@@ -79,9 +63,7 @@ fn shimmer_range(text: &str, tick: usize, lo: i32, hi: i32) -> Vec<Span> {
             let v = (lo as f32 + (hi - lo) as f32 * t) as u8;
             Span::styled(
                 c.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(v, v, v))
-                    .add(Modifier::BOLD),
+                Style::default().fg(Color::Rgb(v, v, v)).add(Modifier::BOLD),
             )
         })
         .collect()
@@ -89,62 +71,97 @@ fn shimmer_range(text: &str, tick: usize, lo: i32, hi: i32) -> Vec<Span> {
 
 /// Build the full, pre-wrapped set of transcript lines (test helper).
 #[cfg(test)]
-pub fn lines(app: &App, width: usize) -> Vec<Line> {
+pub fn lines(app: &mut App, width: usize) -> Vec<Line> {
     build(app, width).0
 }
 
 /// Like `lines`, but also reports which line index holds each expandable
 /// header (thought / subagent) with its block index for mouse hit-testing.
-fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
+fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
     if matches!(app.view, ChatView::Subagent(_)) {
-        if let Some(card) = app.viewed_subagent() {
-            return (subagent_chat_lines(card, app, width), Vec::new());
+        // Clone the card snapshot so we can still use `app` mutably for caches.
+        if let Some(card) = app.viewed_subagent().cloned() {
+            return (subagent_chat_lines(&card, app, width), Vec::new());
         }
         // Stale id (cleared chat) — fall through to main.
     }
+    if matches!(app.view, ChatView::Plan) {
+        return (plan_preview_lines(app, width), Vec::new());
+    }
 
-    let theme = &app.theme;
     let mut out: Vec<Line> = Vec::new();
     let mut heads: Vec<(usize, usize)> = Vec::new();
+    let n = app.blocks.len();
 
-    for (i, block) in app.blocks.iter().enumerate() {
-        let next = app.blocks.get(i + 1);
-        match block {
+    for i in 0..n {
+        let next_is_tool = matches!(app.blocks.get(i + 1), Some(UiBlock::Tool(_)));
+        let next_is_notice = matches!(app.blocks.get(i + 1), Some(UiBlock::Notice(_)));
+        let has_later_thought = app
+            .blocks
+            .iter()
+            .skip(i + 1)
+            .any(|b| matches!(b, UiBlock::Reasoning(_)));
+        let has_later_subagent = app
+            .blocks
+            .iter()
+            .skip(i + 1)
+            .any(|b| matches!(b, UiBlock::Subagent(_)));
+        let has_later_plan = app
+            .blocks
+            .iter()
+            .skip(i + 1)
+            .any(|b| matches!(b, UiBlock::Plan(_)));
+
+        match &app.blocks[i] {
             // The greeting only lives on the landing screen (the ASCII wordmark);
             // in the active chat we show nothing but the conversation.
             UiBlock::Welcome => {}
             UiBlock::User(text) => {
-                out.extend(user_lines(text, app, width));
+                let text = text.clone();
+                out.extend(user_lines(&text, app, width));
                 out.push(Line::from(""));
             }
             UiBlock::Assistant { text, streaming } => {
                 let content_w = width.saturating_sub(2);
-                let body = if *streaming {
-                    markdown::plain(text, theme)
+                let streaming = *streaming;
+                let text = text.clone();
+                let theme = app.theme.clone();
+                let mut wrapped = if streaming {
+                    let body = markdown::plain(&text, &theme);
+                    indent(wrap::wrap_lines(body, content_w))
                 } else {
-                    markdown::render(text, theme, content_w)
+                    app.md_cache.lines(&text, content_w, || {
+                        let body = markdown::render(&text, &theme, content_w);
+                        indent(wrap::wrap_lines(body, content_w))
+                    })
                 };
-                let mut wrapped = indent(wrap::wrap_lines(body, content_w));
-                if *streaming {
+                if streaming {
                     push_caret(&mut wrapped, theme.accent);
                 }
                 out.extend(wrapped);
                 out.push(Line::from(""));
             }
             UiBlock::Reasoning(th) => {
-                let is_last_thought = !app
-                    .blocks
-                    .iter()
-                    .skip(i + 1)
-                    .any(|b| matches!(b, UiBlock::Reasoning(_)));
+                // Hint only on older thoughts; the latest one stays clean.
+                let show_hint = has_later_thought;
+                let open = th.open;
+                let body = if open && !th.text.trim().is_empty() {
+                    Some(th.text.clone())
+                } else {
+                    None
+                };
+                // Snapshot fields used by the header so we don't hold a blocks borrow.
+                let th_snap = crate::app::state::Thought {
+                    text: th.text.clone(),
+                    started: th.started,
+                    elapsed_ms: th.elapsed_ms,
+                    open: th.open,
+                };
                 heads.push((out.len(), i));
-                out.push(thought_header(th, app, is_last_thought));
-                if th.open && !th.text.trim().is_empty() {
-                    let style = Style::default()
-                        .fg(theme.faint)
-                        .add(Modifier::ITALIC);
-                    let raw: Vec<Line> = th
-                        .text
+                out.push(thought_header(&th_snap, app, show_hint));
+                if let Some(text) = body {
+                    let style = Style::default().fg(app.theme.faint).add(Modifier::ITALIC);
+                    let raw: Vec<Line> = text
                         .split('\n')
                         .map(|l| Line::from(Span::styled(l.to_string(), style)))
                         .collect();
@@ -156,40 +173,56 @@ fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
                 out.push(Line::from(""));
             }
             UiBlock::Subagent(card) => {
-                let show_hint = !app
-                    .blocks
-                    .iter()
-                    .skip(i + 1)
-                    .any(|b| matches!(b, UiBlock::Subagent(_)));
+                let show_hint = !has_later_subagent;
+                let card = card.clone();
                 // Title sits after the top pad row of the soft strip.
                 heads.push((out.len() + 1, i));
-                out.extend(subagent_card_lines(card, app, width, show_hint));
+                out.extend(subagent_card_lines(&card, app, width, show_hint));
+                out.push(Line::from(""));
+            }
+            UiBlock::Plan(card) => {
+                let show_hint = !has_later_plan;
+                let card = card.clone();
+                heads.push((out.len() + 1, i));
+                out.extend(plan_card_lines(&card, app, width, show_hint));
                 out.push(Line::from(""));
             }
             UiBlock::Tool(card) => {
-                out.extend(tool_lines(card, app, width));
+                // tool_lines only needs a few fields; clone the small card.
+                let card = ToolCard {
+                    id: card.id.clone(),
+                    name: card.name.clone(),
+                    args: card.args.clone(),
+                    output: card.output.clone(),
+                    status: card.status,
+                    started: card.started,
+                    elapsed_ms: card.elapsed_ms,
+                };
+                out.extend(tool_lines(&card, app, width));
                 // Keep consecutive tools tight; add air after the last one.
-                if !matches!(next, Some(UiBlock::Tool(_))) {
+                if !next_is_tool {
                     out.push(Line::from(""));
                 }
             }
             UiBlock::Notice(s) => {
+                let s = s.clone();
                 out.extend(wrap::wrap_lines(
                     vec![Line::from(vec![
-                        Span::styled("  · ", Style::default().fg(theme.faint)),
-                        Span::styled(s.clone(), Style::default().fg(theme.dim)),
+                        Span::styled("  · ", Style::default().fg(app.theme.faint)),
+                        Span::styled(s, Style::default().fg(app.theme.dim)),
                     ])],
                     width,
                 ));
-                if !matches!(next, Some(UiBlock::Notice(_))) {
+                if !next_is_notice {
                     out.push(Line::from(""));
                 }
             }
             UiBlock::Error(s) => {
+                let s = s.clone();
                 out.extend(wrap::wrap_lines(
                     vec![Line::from(vec![
-                        Span::styled("  ✗ ", Style::default().fg(theme.err)),
-                        Span::styled(s.clone(), Style::default().fg(theme.err)),
+                        Span::styled("  ✗ ", Style::default().fg(app.theme.err)),
+                        Span::styled(s, Style::default().fg(app.theme.err)),
                     ])],
                     width,
                 ));
@@ -201,10 +234,62 @@ fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
     (out, heads)
 }
 
+/// Markdown preview of Plan.md with section cursor / selection highlights.
+fn plan_preview_lines(app: &mut App, width: usize) -> Vec<Line> {
+    let theme = app.theme.clone();
+    let body = app
+        .plan_card()
+        .map(|c| c.body.clone())
+        .unwrap_or_else(|| "_No plan yet._".into());
+    let content_w = width.saturating_sub(2);
+    let mut rendered = app.md_cache.lines(&body, content_w, || {
+        let body_md = markdown::render(&body, &theme, content_w);
+        indent(wrap::wrap_lines(body_md, content_w))
+    });
+
+    // Highlight selected / cursor sections by painting matching source lines.
+    // Map is approximate: paint status header + hint under the title.
+    let mut out = Vec::new();
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "Plan.md".to_string(),
+            Style::default().fg(theme.fg).add(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  space select · ↑↓ · b build".to_string(),
+            Style::default().fg(theme.faint),
+        ),
+    ]));
+    out.push(Line::from(""));
+
+    // Section list for clear selection UI (source of truth for cursor).
+    if !app.plan_view.sections.is_empty() {
+        for (i, sec) in app.plan_view.sections.iter().enumerate() {
+            let on_cursor = i == app.plan_view.cursor;
+            let selected = app.plan_view.selected.contains(&i);
+            let mark = if selected { "●" } else { "○" };
+            let mut style = Style::default().fg(if selected { theme.plan } else { theme.dim });
+            if on_cursor {
+                style = style.bg(theme.strip).fg(theme.fg).add(Modifier::BOLD);
+            }
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{mark} "), style),
+                Span::styled(sec.title.clone(), style),
+            ]));
+        }
+        out.push(Line::from(""));
+    }
+
+    out.append(&mut rendered);
+    out
+}
+
 /// Dedicated read-only chat for a subagent: task as a user strip, then its
 /// thoughts / tools / assistant messages — same visual language as the main chat.
-fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line> {
-    let theme = &app.theme;
+fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<Line> {
+    let theme = app.theme.clone();
     let mut out: Vec<Line> = Vec::new();
 
     let title = if card.label.trim().is_empty() {
@@ -266,8 +351,13 @@ fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line
             }
             SubagentLine::Assistant(t) if !t.trim().is_empty() => {
                 let content_w = width.saturating_sub(2);
-                let body = markdown::render(t, theme, content_w);
-                out.extend(indent(wrap::wrap_lines(body, content_w)));
+                let t = t.clone();
+                let theme = theme.clone();
+                let wrapped = app.md_cache.lines(&t, content_w, || {
+                    let body = markdown::render(&t, &theme, content_w);
+                    indent(wrap::wrap_lines(body, content_w))
+                });
+                out.extend(wrapped);
                 out.push(Line::from(""));
             }
             SubagentLine::Tool { name, detail, ok } => {
@@ -276,7 +366,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line
                     Some(true) => ToolStatus::Ok,
                     Some(false) => ToolStatus::Err,
                 };
-                let card = ToolCard {
+                let tool = ToolCard {
                     id: String::new(),
                     name: name.clone(),
                     args: detail.clone(),
@@ -285,7 +375,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line
                     started: std::time::Instant::now(),
                     elapsed_ms: Some(0),
                 };
-                out.extend(tool_lines(&card, app, width));
+                out.extend(tool_lines(&tool, app, width));
                 out.push(Line::from(""));
             }
             SubagentLine::Notice(t) => {
@@ -304,11 +394,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &App, width: usize) -> Vec<Line
 
 /// Thought header: bold shimmering "Thinking" while active, then a clear
 /// "Thought for Ns" summary. Click (or ctrl+t) to expand/collapse the body.
-fn thought_header(
-    th: &crate::app::state::Thought,
-    app: &App,
-    show_hint: bool,
-) -> Line {
+fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -> Line {
     let theme = &app.theme;
     let active = th.elapsed_ms.is_none() && app.running;
 
@@ -369,7 +455,7 @@ fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
         let mut spans = vec![Span::styled("  ", body)];
         // Re-tint the content spans onto the strip background.
         for s in line.spans {
-            used += s.content.chars().count();
+            used += s.width();
             spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
         if width > used {
@@ -455,6 +541,7 @@ mod tests {
     fn app() -> App {
         App::new(TuiInit {
             model: "m".into(),
+            model_display: "m".into(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
@@ -481,21 +568,54 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let t = text(&super::lines(&a, 80));
+        let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("Thinking"));
         assert!(!t.contains("ponder"));
 
         // Model moves on → thought closes with a duration; still collapsed.
+        // Latest thought omits the click hint (older ones keep it).
         a.apply(AgentEvent::AssistantTextDelta("answer".into()));
-        let t = text(&super::lines(&a, 80));
+        let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("Thought for"));
         assert!(t.contains("tokens"));
         assert!(!t.contains("ponder"));
+        assert!(!t.contains("click to show"), "{t}");
+        assert!(!t.contains("click to hide"), "{t}");
 
         // ctrl+t reveals the full text.
         a.toggle_thoughts();
-        let t = text(&super::lines(&a, 80));
+        let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("ponder"));
+        assert!(!t.contains("click to hide"), "{t}");
+    }
+
+    #[test]
+    fn older_thought_keeps_click_hint() {
+        use hive_core::event::AgentEvent;
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("first thought".into()));
+        a.apply(AgentEvent::AssistantTextDelta("mid".into()));
+        a.apply(AgentEvent::ReasoningDelta("second thought".into()));
+        a.apply(AgentEvent::AssistantTextDelta("done".into()));
+        a.apply(AgentEvent::TurnFinished);
+
+        let t = super::lines(&mut a, 80)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Exactly one hint — on the older thought, not the latest.
+        assert_eq!(
+            t.matches("click to show").count(),
+            1,
+            "older thought keeps hint: {t}"
+        );
     }
 
     #[test]
@@ -535,10 +655,13 @@ mod tests {
         });
         a.spinner = 0;
 
-        let t = tool_text(&a, 72);
+        let t = tool_text(&mut a, 72);
         assert!(t.contains("Checking project"), "{t}");
         assert!(t.contains("cargo check · review"), "{t}");
-        assert!(!t.contains('╭') && !t.contains('╯'), "no border chrome: {t}");
+        assert!(
+            !t.contains('╭') && !t.contains('╯'),
+            "no border chrome: {t}"
+        );
 
         a.apply(AgentEvent::SubagentStatus {
             id: "v1".into(),
@@ -550,7 +673,7 @@ mod tests {
             line: SubagentLine::Assistant("## Verification Report\nAll good.".into()),
         });
 
-        let collapsed = tool_text(&a, 72);
+        let collapsed = tool_text(&mut a, 72);
         assert!(collapsed.contains('✓'), "{collapsed}");
         assert!(collapsed.contains("done"), "{collapsed}");
         assert!(
@@ -567,13 +690,13 @@ mod tests {
             .expect("subagent block");
         a.activate_expandable_at(idx);
         assert!(a.in_subagent_view());
-        let open = tool_text(&a, 72);
+        let open = tool_text(&mut a, 72);
         assert!(open.contains("Run cargo check"), "{open}");
         assert!(open.contains("Verification Report"), "{open}");
 
         a.leave_subagent_view();
         assert!(!a.in_subagent_view());
-        let back = tool_text(&a, 72);
+        let back = tool_text(&mut a, 72);
         assert!(
             !back.contains("Verification Report"),
             "main transcript again: {back}"
@@ -597,7 +720,7 @@ mod tests {
             ok: true,
             summary: "ok".into(),
         });
-        let lines = super::lines(&a, 72);
+        let lines = super::lines(&mut a, 72);
         let header = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("Reading")))
@@ -629,7 +752,7 @@ mod tests {
         });
         a.open_subagent_view("v1".into());
 
-        let lines = super::lines(&a, 72);
+        let lines = super::lines(&mut a, 72);
         let tool = lines
             .iter()
             .find(|l| {
@@ -654,7 +777,7 @@ mod tests {
             label: "Checking project".into(),
             prompt: "check".into(),
         });
-        let lines = super::lines(&a, 72);
+        let lines = super::lines(&mut a, 72);
         let title_i = lines
             .iter()
             .position(|l| {
@@ -709,9 +832,7 @@ mod tests {
             prompt: "check".into(),
         });
         assert!(
-            a.blocks
-                .iter()
-                .any(|b| matches!(b, Block::Subagent(_))),
+            a.blocks.iter().any(|b| matches!(b, Block::Subagent(_))),
             "subagent should appear inline in the transcript"
         );
     }
@@ -751,11 +872,13 @@ mod tests {
         assert_eq!(lines[1].spans[1].style.bg, Some(a.theme.add_bg));
         // All blocks share one width (a neat rectangle), sized to content.
         let w = lines[0].spans[1].content.chars().count();
-        assert!(lines.iter().all(|l| l.spans[1].content.chars().count() == w));
+        assert!(lines
+            .iter()
+            .all(|l| l.spans[1].content.chars().count() == w));
         assert!(w < 60); // not the full terminal width
     }
 
-    fn tool_text(a: &App, width: usize) -> String {
+    fn tool_text(a: &mut App, width: usize) -> String {
         super::lines(a, width)
             .iter()
             .map(|l| {
@@ -791,7 +914,7 @@ mod tests {
             summary: "exit 0".into(),
         });
 
-        let t = tool_text(&a, 72);
+        let t = tool_text(&mut a, 72);
         // Duration belongs on the `$ …` header, not as a column-0 orphan.
         assert!(t.contains("$ cargo check"), "shell header: {t}");
         assert!(t.contains("·"), "duration separator: {t}");
@@ -799,10 +922,7 @@ mod tests {
             .lines()
             .find(|l| l.contains("$ cargo check"))
             .unwrap_or("");
-        assert!(
-            header.contains('s'),
-            "duration on shell header line: {t}"
-        );
+        assert!(header.contains('s'), "duration on shell header line: {t}");
         // Successful tools collapse the body — cargo's own "in 1.91s" stays out.
         assert!(
             !t.contains("Finished"),
@@ -828,9 +948,35 @@ mod tests {
             summary: "ok".into(),
         });
 
-        let t = tool_text(&a, 80);
+        let t = tool_text(&mut a, 80);
         assert!(t.contains("Reading crates/hive-tui"), "verb header: {t}");
         assert!(!t.contains("read_file"), "no raw tool name: {t}");
         assert!(!t.contains("✓"), "no status icon on tool rows: {t}");
+    }
+
+    #[test]
+    fn plan_card_opens_preview() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "Ship it".into(),
+            body: "# Plan\n\n## Ship it\n\nDo the thing.\n".into(),
+        });
+        let t = tool_text(&mut a, 72);
+        assert!(t.contains("Plan.md"), "{t}");
+        assert!(t.contains("Ship it"), "{t}");
+
+        let idx = a
+            .blocks
+            .iter()
+            .position(|b| matches!(b, crate::app::state::Block::Plan(_)))
+            .expect("plan block");
+        a.activate_expandable_at(idx);
+        assert!(a.in_plan_view());
+        assert!(!a.plan_view.sections.is_empty());
+        let preview = tool_text(&mut a, 72);
+        assert!(preview.contains("space select"), "{preview}");
+        assert!(preview.contains("Ship it"), "{preview}");
     }
 }

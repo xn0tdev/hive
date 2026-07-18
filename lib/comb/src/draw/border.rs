@@ -24,10 +24,38 @@ struct Glyphs {
 
 fn glyphs(b: Border) -> Glyphs {
     match b {
-        Border::Plain => Glyphs { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' },
-        Border::Rounded => Glyphs { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' },
-        Border::Double => Glyphs { tl: '╔', tr: '╗', bl: '╚', br: '╝', h: '═', v: '║' },
-        Border::Thick => Glyphs { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' },
+        Border::Plain => Glyphs {
+            tl: '┌',
+            tr: '┐',
+            bl: '└',
+            br: '┘',
+            h: '─',
+            v: '│',
+        },
+        Border::Rounded => Glyphs {
+            tl: '╭',
+            tr: '╮',
+            bl: '╰',
+            br: '╯',
+            h: '─',
+            v: '│',
+        },
+        Border::Double => Glyphs {
+            tl: '╔',
+            tr: '╗',
+            bl: '╚',
+            br: '╝',
+            h: '═',
+            v: '║',
+        },
+        Border::Thick => Glyphs {
+            tl: '┏',
+            tr: '┓',
+            bl: '┗',
+            br: '┛',
+            h: '━',
+            v: '┃',
+        },
     }
 }
 

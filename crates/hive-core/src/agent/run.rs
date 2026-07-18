@@ -14,6 +14,9 @@ use crate::spawner::SubagentSpawner;
 use crate::tool::{Tool, ToolContext, ToolResult};
 use crate::vision::VisionDescriber;
 
+use super::mode::{
+    plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
+};
 use super::prompt::build_system_prompt;
 use super::session::Session;
 
@@ -21,6 +24,7 @@ use super::session::Session;
 pub struct UserInput {
     pub text: String,
     pub images: Vec<ImageSource>,
+    pub mode: AgentMode,
 }
 
 impl From<String> for UserInput {
@@ -28,6 +32,7 @@ impl From<String> for UserInput {
         UserInput {
             text,
             images: Vec::new(),
+            mode: AgentMode::Build,
         }
     }
 }
@@ -60,7 +65,8 @@ impl AgentBuilder {
         spawner: Arc<dyn SubagentSpawner>,
     ) -> Agent {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let system = build_system_prompt(&cwd, self.skills.as_ref(), depth > 0);
+        let mode = AgentMode::Build;
+        let system = build_system_prompt(&cwd, self.skills.as_ref(), depth > 0, mode);
         Agent {
             provider: self.provider.clone(),
             tool_specs: tool_specs(&self.tools),
@@ -74,6 +80,7 @@ impl AgentBuilder {
             model,
             depth,
             cwd,
+            mode,
             max_steps: 50,
             vision_cache: HashMap::new(),
         }
@@ -106,6 +113,7 @@ pub struct Agent {
     model: String,
     depth: usize,
     cwd: PathBuf,
+    mode: AgentMode,
     max_steps: usize,
     vision_cache: HashMap<String, String>,
 }
@@ -117,6 +125,33 @@ impl Agent {
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+    }
+
+    /// Apply BUILD/PLAN for the next turn and refresh the system prompt.
+    pub fn set_mode(&mut self, mode: AgentMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        if self.depth == 0 {
+            let system = build_system_prompt(&self.cwd, self.skills.as_ref(), false, mode);
+            self.session.set_system(system);
+        }
+    }
+
+    fn active_tool_specs(&self) -> Vec<ToolSpec> {
+        if self.depth > 0 || self.mode == AgentMode::Build {
+            return self.tool_specs.clone();
+        }
+        self.tools
+            .iter()
+            .filter(|t| plan_mode_tool_allowed(t.name()))
+            .map(|t| ToolSpec {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            })
+            .collect()
     }
 
     pub fn usage(&self) -> Usage {
@@ -136,6 +171,9 @@ impl Agent {
     /// (immediately, no confirmation), and repeat until the model stops calling
     /// tools. Returns the final assistant text.
     pub async fn run_turn(&mut self, input: UserInput, interrupt: Arc<AtomicBool>) -> String {
+        if self.depth == 0 {
+            self.set_mode(input.mode);
+        }
         self.emit(AgentEvent::TurnStarted);
 
         // Assemble the user message (text + any images).
@@ -162,7 +200,7 @@ impl Agent {
             let req = ChatRequest {
                 model: self.model.clone(),
                 messages,
-                tools: self.tool_specs.clone(),
+                tools: self.active_tool_specs(),
                 temperature: Some(0.3),
                 max_tokens: None,
             };
@@ -226,7 +264,8 @@ impl Agent {
     /// text. Used by subagents.
     pub async fn run_headless(&mut self, prompt: impl Into<String>) -> String {
         let interrupt = Arc::new(AtomicBool::new(false));
-        self.run_turn(UserInput::from(prompt.into()), interrupt).await
+        self.run_turn(UserInput::from(prompt.into()), interrupt)
+            .await
     }
 
     async fn run_tool(&mut self, id: &str, name: &str, arguments: &str) {
@@ -236,23 +275,20 @@ impl Agent {
             args_preview: preview_args(name, arguments),
         });
 
-        let tool = self.tools.iter().find(|t| t.name() == name).cloned();
-        let result = match tool {
-            Some(t) => {
-                let args: serde_json::Value =
-                    serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-                let ctx = ToolContext {
-                    cwd: self.cwd.clone(),
-                    events: self.events.clone(),
-                    spawner: self.spawner.clone(),
-                    skills: self.skills.clone(),
-                    config: self.config.clone(),
-                    depth: self.depth,
-                    call_id: id.to_string(),
-                };
-                t.execute(args, &ctx).await
+        let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let result = if self.depth == 0 && self.mode == AgentMode::Plan {
+            if let Err(msg) = plan_mode_check(name, path.as_deref(), &self.cwd) {
+                ToolResult::error(msg)
+            } else {
+                self.execute_tool(name, args, id).await
             }
-            None => ToolResult::error(format!("unknown tool: {name}")),
+        } else {
+            self.execute_tool(name, args, id).await
         };
 
         self.emit(AgentEvent::ToolFinished {
@@ -261,6 +297,14 @@ impl Agent {
             ok: !result.is_error,
             summary: first_line(&result.content, 120),
         });
+
+        if !result.is_error && matches!(name, "write_file" | "edit_file") {
+            if let Some(path) = path.as_deref() {
+                if path == PLAN_REL_PATH || super::mode::is_plan_path(&self.cwd, path) {
+                    self.emit_plan_updated().await;
+                }
+            }
+        }
 
         self.session
             .push(Message::tool_result(id, name, result.content));
@@ -274,6 +318,32 @@ impl Agent {
             }
             self.session.push(Message::user_parts(parts));
         }
+    }
+
+    async fn execute_tool(&self, name: &str, args: serde_json::Value, id: &str) -> ToolResult {
+        let tool = self.tools.iter().find(|t| t.name() == name).cloned();
+        match tool {
+            Some(t) => {
+                let ctx = ToolContext {
+                    cwd: self.cwd.clone(),
+                    events: self.events.clone(),
+                    spawner: self.spawner.clone(),
+                    skills: self.skills.clone(),
+                    config: self.config.clone(),
+                    depth: self.depth,
+                    call_id: id.to_string(),
+                };
+                t.execute(args, &ctx).await
+            }
+            None => ToolResult::error(format!("unknown tool: {name}")),
+        }
+    }
+
+    async fn emit_plan_updated(&self) {
+        let path = plan_path(&self.cwd);
+        let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        let summary = plan_summary(&body);
+        self.emit(AgentEvent::PlanUpdated { summary, body });
     }
 
     /// Produce the message list to send. If the active model can't see images,
@@ -339,8 +409,10 @@ fn preview_args(name: &str, arguments: &str) -> String {
         "run_shell" => s("command"),
         "web_search" => s("query"),
         "read_skill" => s("name"),
-        "spawn_subagent" | "spawn_swarm" => s("task"),
-        "verify_project" => s("focus").or_else(|| Some("project check".into())),
+        "spawn_subagent" | "spawn_swarm" => s("task").or_else(|| s("prompt")),
+        "verify_project" => s("prompt")
+            .or_else(|| s("task"))
+            .or_else(|| Some("project check".into())),
         "web_get_contents" => v
             .get("urls")
             .and_then(|u| u.as_array())

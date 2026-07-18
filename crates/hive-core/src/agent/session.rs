@@ -33,6 +33,17 @@ impl Session {
         self.usage = Usage::default();
     }
 
+    /// Replace the pinned system prompt (e.g. when BUILD/PLAN mode changes).
+    pub fn set_system(&mut self, system: impl Into<String>) {
+        let system = system.into();
+        self.system = system.clone();
+        if let Some(first) = self.messages.first_mut() {
+            *first = Message::system(system);
+        } else {
+            self.messages.insert(0, Message::system(system));
+        }
+    }
+
     /// Text of the most recent assistant message, if any.
     pub fn last_assistant_text(&self) -> Option<String> {
         self.messages

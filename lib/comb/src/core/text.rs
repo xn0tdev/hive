@@ -1,5 +1,7 @@
 //! Styled text: a [`Span`] is a run of one style, a [`Line`] is a row of spans.
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::core::style::Style;
 
 #[derive(Clone, Debug, Default)]
@@ -24,7 +26,7 @@ impl Span {
     }
 
     pub fn width(&self) -> usize {
-        self.content.chars().count()
+        UnicodeWidthStr::width(self.content.as_str())
     }
 }
 

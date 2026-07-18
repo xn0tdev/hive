@@ -4,10 +4,11 @@
 
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::core::buffer::Buffer;
+use crate::core::buffer::{Buffer, WIDE_CONT};
 use crate::core::geom::{Rect, Size};
 use crate::core::style::{Color, Modifier, Style};
 use crate::draw::surface::Compositor;
@@ -15,6 +16,40 @@ use crate::term::event::{self, Event};
 
 const STDIN: i32 = libc::STDIN_FILENO;
 const STDOUT: i32 = libc::STDOUT_FILENO;
+
+/// Set by the SIGWINCH handler; drained into [`Event::Resize`].
+static WINCHED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigwinch(_: libc::c_int) {
+    WINCHED.store(true, Ordering::Relaxed);
+}
+
+fn install_sigwinch() {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigwinch as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        // No SA_RESTART: poll must wake on resize so idle UIs redraw promptly.
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
+    }
+}
+
+/// When the tty size no longer matches `last`, return the new `(cols, rows)`.
+/// Consumes a pending SIGWINCH flag. Does not update stored size — [`draw`]
+/// owns that (and the full clear).
+fn take_resize(last: Size) -> Option<(u16, u16)> {
+    let winched = WINCHED.swap(false, Ordering::Relaxed);
+    let now = query_size();
+    if now.width > 0 && now != last {
+        Some((now.width, now.height))
+    } else if winched {
+        // Signal fired but ioctl still agrees with `last` — ignore.
+        None
+    } else {
+        None
+    }
+}
 
 /// How much mouse activity the terminal reports.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,8 +87,14 @@ pub fn restore() {
 /// Render a single frame into an in-memory [`Buffer`] without a real terminal —
 /// the closure gets the same [`Frame`] it would on screen. Used by tests.
 pub fn render<F: FnOnce(&mut Frame)>(size: Size, f: F) -> Buffer {
+    render_with_cursor(size, f).0
+}
+
+/// Like [`render`], but also returns the hardware cursor position requested for
+/// the frame (`None` means the cursor should stay hidden).
+pub fn render_with_cursor<F: FnOnce(&mut Frame)>(size: Size, f: F) -> (Buffer, Option<(u16, u16)>) {
     let mut back = Buffer::blank(size);
-    {
+    let cursor = {
         let mut frame = Frame {
             root: &mut back,
             comp: Compositor::new(),
@@ -61,9 +102,9 @@ pub fn render<F: FnOnce(&mut Frame)>(size: Size, f: F) -> Buffer {
             size,
         };
         f(&mut frame);
-        let _ = frame.finish();
-    }
-    back
+        frame.finish()
+    };
+    (back, cursor)
 }
 
 /// What you draw into for one frame: a root buffer plus any overlay layers,
@@ -142,6 +183,9 @@ impl Terminal {
             out: io::stdout(),
         };
 
+        install_sigwinch();
+        WINCHED.store(false, Ordering::Relaxed);
+
         // alt screen · SGR mouse · modifyOtherKeys level 2 · kitty keyboard
         // disambiguate only (flag 1). Flag 8 (report all keys) + event types
         // made every letter a CSI-u press/release pair → doubled input, and
@@ -172,11 +216,16 @@ impl Terminal {
     /// Build a frame, then flush the minimal diff to the terminal.
     pub fn draw<F: FnOnce(&mut Frame)>(&mut self, f: F) -> io::Result<()> {
         // Adapt to a resized window: reset our record of the screen and clear.
+        // Always re-query — SIGWINCH may have been coalesced while drawing.
         let size = query_size();
         if size != self.size {
             self.size = size;
+            // Force a full repaint: blank front makes every cell "changed".
             self.front = Buffer::blank(size);
-            self.write_raw("\x1b[2J")?;
+            // Erase alt-screen contents + home the cursor (2J) and scrollback
+            // ghosts some terminals keep after a grow (3J).
+            self.write_raw("\x1b[H\x1b[2J\x1b[3J")?;
+            WINCHED.store(false, Ordering::Relaxed);
         }
 
         let mut back = Buffer::blank(self.size);
@@ -203,6 +252,15 @@ impl Terminal {
         let mut pen: Option<(u16, u16)> = None; // where the terminal cursor sits
 
         for (x, y, cell) in back.diff(&self.front) {
+            // Second cell of a double-width glyph — terminal already advanced.
+            if cell.ch == WIDE_CONT {
+                pen = if x + 1 < self.size.width {
+                    Some((x + 1, y))
+                } else {
+                    None
+                };
+                continue;
+            }
             if pen != Some((x, y)) {
                 s.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
             }
@@ -210,11 +268,15 @@ impl Terminal {
                 s.push_str(&sgr(cell.style));
                 last_style = Some(cell.style);
             }
-            s.push(if cell.ch == '\0' { ' ' } else { cell.ch });
-            pen = if x + 1 < self.size.width {
-                Some((x + 1, y))
+            let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
+            s.push(ch);
+            // Wide glyphs advance the hardware cursor by two columns.
+            let adv = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            let next = x.saturating_add(adv);
+            pen = if next < self.size.width {
+                Some((next, y))
             } else {
-                None // wrapped: force a fresh move next time
+                None // wrapped / EOL: force a fresh move next time
             };
         }
         if last_style.is_some() {
@@ -241,6 +303,10 @@ impl Terminal {
 
     /// Wait up to `timeout` for the next input event. `Ok(None)` on timeout.
     pub fn read_event(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        // Never starve a pending resize behind buffered keys.
+        if let Some((w, h)) = take_resize(self.size) {
+            return Ok(Some(Event::Resize(w, h)));
+        }
         if let Some(ev) = self.poll_parsed() {
             return Ok(Some(ev));
         }
@@ -253,19 +319,42 @@ impl Terminal {
         };
         let r = unsafe { libc::poll(&mut pfd, 1, ms) };
         if r < 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            // SIGWINCH interrupts poll — surface it as Resize, not a hard error.
+            if err.kind() == io::ErrorKind::Interrupted {
+                if let Some((w, h)) = take_resize(self.size) {
+                    return Ok(Some(Event::Resize(w, h)));
+                }
+                return Ok(None);
+            }
+            return Err(err);
         }
         if r == 0 {
+            // Idle tick: still notice resizes if SIGWINCH was missed.
+            if let Some((w, h)) = take_resize(self.size) {
+                return Ok(Some(Event::Resize(w, h)));
+            }
             return Ok(None);
         }
 
         let mut tmp = [0u8; 512];
         let n = unsafe { libc::read(STDIN, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
         if n < 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                if let Some((w, h)) = take_resize(self.size) {
+                    return Ok(Some(Event::Resize(w, h)));
+                }
+                return Ok(None);
+            }
+            return Err(err);
         }
         if n > 0 {
             self.inbuf.extend_from_slice(&tmp[..n as usize]);
+        }
+        // Resize wins over a key that arrived in the same wake — layout first.
+        if let Some((w, h)) = take_resize(self.size) {
+            return Ok(Some(Event::Resize(w, h)));
         }
         Ok(self.poll_parsed())
     }

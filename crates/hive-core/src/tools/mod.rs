@@ -19,9 +19,9 @@ mod web;
 pub fn all_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = inventory::iter::<ToolRegistration>()
         .map(|r| (r.make)())
-        // Multi-agent swarm stays off; only `verify_project` is offered for
-        // dedicated project checking. Keep spawn_* impls for later.
-        .filter(|t| !matches!(t.name(), "spawn_subagent" | "spawn_swarm"))
+        // Fan-out swarm stays off; single-subagent launch (`spawn_subagent`,
+        // `verify_project`) is available so the main agent can author prompts.
+        .filter(|t| t.name() != "spawn_swarm")
         .collect();
     tools.sort_by(|a, b| a.name().cmp(b.name()));
     tools
@@ -55,4 +55,18 @@ pub(crate) fn u64_arg(args: &Value, key: &str) -> Option<u64> {
 
 pub(crate) fn bool_arg(args: &Value, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_tools_offers_single_subagent_launch() {
+        let tools = all_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"verify_project"));
+        assert!(names.contains(&"spawn_subagent"));
+        assert!(!names.contains(&"spawn_swarm"));
+    }
 }

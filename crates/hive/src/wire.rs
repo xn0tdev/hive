@@ -51,8 +51,10 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         cfg.secrets.provider_api_key.clone(),
     ));
     let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
-    let vision: Arc<dyn VisionDescriber> =
-        Arc::new(DescribeVision::new(provider.clone(), cfg.models.vision.clone()));
+    let vision: Arc<dyn VisionDescriber> = Arc::new(DescribeVision::new(
+        provider.clone(),
+        cfg.models.vision.id().to_string(),
+    ));
     let tools = all_tools();
 
     let builder = AgentBuilder {
@@ -70,11 +72,13 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         cfg.swarm.max_depth,
     );
 
-    let default_model = cfg.models.default.clone();
+    let default_model = cfg.models.default.id().to_string();
+    let default_display = cfg.models.default.display_name().to_string();
     let agent = builder.build(event_tx.clone(), default_model.clone(), 0, spawner);
 
     let tui_init = TuiInit {
         model: default_model,
+        model_display: default_display,
         cwd: cwd.display().to_string(),
         theme: cfg.ui.theme.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),

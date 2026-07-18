@@ -274,11 +274,7 @@ impl Tool for ListDir {
             match rd.next_entry().await {
                 Ok(Some(entry)) => {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let is_dir = entry
-                        .file_type()
-                        .await
-                        .map(|t| t.is_dir())
-                        .unwrap_or(false);
+                    let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
                     if is_dir {
                         dirs.push(format!("{name}/"));
                     } else {

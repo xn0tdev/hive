@@ -52,7 +52,12 @@ impl Menu {
         }
         let (w, h) = (area.width, area.height);
         let lay = f.layer(area, z);
-        lay.block(Rect::new(0, 0, w, h), self.border, pal.border, Some(pal.panel));
+        lay.block(
+            Rect::new(0, 0, w, h),
+            self.border,
+            pal.border,
+            Some(pal.panel),
+        );
         let inner = Rect::new(1, 1, w.saturating_sub(2), h.saturating_sub(2));
         self.list.render(lay, inner, pal);
     }

@@ -140,10 +140,15 @@ fn tool_verb(name: &str, running: bool) -> (&'static str, bool) {
         "grep" => (if running { "Grepping" } else { "Grepped" }, false),
         "web_search" => (if running { "Searching" } else { "Searched" }, false),
         "web_get_contents" => (if running { "Fetching" } else { "Fetched" }, false),
-        "read_skill" => (if running { "Loading skill" } else { "Loaded skill" }, false),
-        "spawn_subagent" | "spawn_swarm" => {
-            (if running { "Spawning" } else { "Spawned" }, false)
-        }
+        "read_skill" => (
+            if running {
+                "Loading skill"
+            } else {
+                "Loaded skill"
+            },
+            false,
+        ),
+        "spawn_subagent" | "spawn_swarm" => (if running { "Spawning" } else { "Spawned" }, false),
         "verify_project" => (if running { "Checking" } else { "Checked" }, false),
         _ => (if running { "Running" } else { "Ran" }, false),
     }

@@ -18,6 +18,10 @@ pub struct Theme {
     pub ok: Color,
     pub err: Color,
     pub warn: Color,
+    /// PLAN mode chip background (warm / orange).
+    pub plan: Color,
+    /// BUILD mode chip background (cool / blue).
+    pub build: Color,
     /// Subtle background strip for the input bar and user messages.
     pub strip: Color,
     pub code_fg: Color,
@@ -44,6 +48,8 @@ impl Theme {
             ok: rgb(0x98, 0xc3, 0x79),  // muted green, status only
             err: rgb(0xd1, 0x7b, 0x88), // muted red, status only
             warn: rgb(0xc9, 0xb4, 0x7f),
+            plan: rgb(0xc4, 0x8a, 0x3a),
+            build: rgb(0x5a, 0x8f, 0xb0),
             strip: rgb(0x26, 0x26, 0x26),
             code_fg: rgb(0xbd, 0xbd, 0xbd),
             code_bg: rgb(0x1c, 0x1c, 0x1c),

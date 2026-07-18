@@ -26,10 +26,12 @@ api_key_env = "FIREWORKS_API_KEY"
 # api_key = "fw_..."
 
 [models]
-default = "accounts/fireworks/routers/kimi-k2p6-fast"  # main (vision-capable)
-smart   = "accounts/fireworks/models/glm-5p2"          # backend / deep reasoning
-fast    = "accounts/fireworks/models/deepseek-v4-flash" # commits / merges / simple
-vision  = "accounts/fireworks/models/kimi-k2p6"         # describes images for non-vision models
+# Bare string = provider id (display = last path segment).
+# Or table: id for the API, name for the TUI footer.
+default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast" }
+smart   = { id = "accounts/fireworks/models/glm-5p2", name = "GLM 5.2" }
+fast    = { id = "accounts/fireworks/models/deepseek-v4-flash", name = "DeepSeek Flash" }
+vision  = { id = "accounts/fireworks/models/kimi-k2p6", name = "Kimi" }
 
 [vision]
 # Models that natively accept images. Everything else uses the vision fallback.
@@ -80,11 +82,8 @@ pub fn load() -> Result<Arc<AppConfig>> {
         AppConfig::default()
     };
 
-    let provider_key = resolve_secret(
-        &cfg.provider.api_key_env,
-        cfg.provider.api_key.as_deref(),
-    )
-    .ok_or_else(|| {
+    let provider_key = resolve_secret(&cfg.provider.api_key_env, cfg.provider.api_key.as_deref())
+        .ok_or_else(|| {
         anyhow!(
             "no provider API key. Set it in {}:\n\
              \n\
@@ -118,7 +117,10 @@ mod tests {
             resolve_secret("HIVE_TEST_UNSET_ENV_VAR_XYZ", Some("  file-key  ")),
             Some("file-key".into())
         );
-        assert_eq!(resolve_secret("HIVE_TEST_UNSET_ENV_VAR_XYZ", Some("")), None);
+        assert_eq!(
+            resolve_secret("HIVE_TEST_UNSET_ENV_VAR_XYZ", Some("")),
+            None
+        );
         assert_eq!(resolve_secret("HIVE_TEST_UNSET_ENV_VAR_XYZ", None), None);
     }
 }

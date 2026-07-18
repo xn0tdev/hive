@@ -44,4 +44,4 @@ pub use crate::core::text::{Line, Span};
 pub use crate::draw::border::Border;
 pub use crate::draw::surface::{Compositor, Surface};
 pub use crate::term::event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
-pub use crate::term::terminal::{render, restore, Frame, MouseMode, Terminal};
+pub use crate::term::terminal::{render, render_with_cursor, restore, Frame, MouseMode, Terminal};

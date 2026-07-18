@@ -313,11 +313,7 @@ fn parse_param_fields(raw: &[u8]) -> Vec<Vec<u32>> {
     std::str::from_utf8(raw)
         .unwrap_or("")
         .split(';')
-        .map(|p| {
-            p.split(':')
-                .map(|s| s.parse().unwrap_or(0))
-                .collect()
-        })
+        .map(|p| p.split(':').map(|s| s.parse().unwrap_or(0)).collect())
         .collect()
 }
 

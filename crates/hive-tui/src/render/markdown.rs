@@ -358,10 +358,7 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
         }
 
         if is_header {
-            lines.push(Line::from(Span::styled(
-                "─".repeat(table_w.max(3)),
-                rule,
-            )));
+            lines.push(Line::from(Span::styled("─".repeat(table_w.max(3)), rule)));
         }
     }
 }
@@ -682,7 +679,13 @@ mod tests {
         assert!(rows.len() >= 3, "header + body rows: {rows:?}");
         let pos0 = col_positions(&rows[0]);
         for r in &rows[1..] {
-            assert_eq!(col_positions(r), pos0, "misaligned:\n  {}\n  {}", rows[0], r);
+            assert_eq!(
+                col_positions(r),
+                pos0,
+                "misaligned:\n  {}\n  {}",
+                rows[0],
+                r
+            );
         }
         // Rule under header spans full table width (not just first col).
         let plain = text(&out);
@@ -753,11 +756,19 @@ mod tests {
         let out = render(md, &Theme::gray(), 36);
         let plain = text(&out);
         let rows: Vec<_> = plain.lines().filter(|l| l.contains('│')).collect();
-        assert!(rows.len() >= 3, "wrapped body should span multiple lines: {rows:?}");
+        assert!(
+            rows.len() >= 3,
+            "wrapped body should span multiple lines: {rows:?}"
+        );
         let pos = col_positions(rows[0]);
         for r in &rows {
             assert_eq!(col_positions(r), pos);
-            assert!(display_width(r) <= 36, "row too wide: {} ({})", r, display_width(r));
+            assert!(
+                display_width(r) <= 36,
+                "row too wide: {} ({})",
+                r,
+                display_width(r)
+            );
         }
     }
 }

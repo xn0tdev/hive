@@ -21,7 +21,10 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
     while i < chars.len() {
         let c = chars[i];
         if c == '#' {
-            out.push(Span::styled(chars[i..].iter().collect::<String>(), theme.comment));
+            out.push(Span::styled(
+                chars[i..].iter().collect::<String>(),
+                theme.comment,
+            ));
             break;
         }
         if c == '"' || c == '\'' {
@@ -46,8 +49,7 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
             expect_key = false;
             continue;
         }
-        if c.is_ascii_digit()
-            || (c == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
+        if c.is_ascii_digit() || (c == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
         {
             let start = i;
             i += 1;
