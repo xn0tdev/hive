@@ -13,12 +13,12 @@ hive-core = { workspace = true }
 hive-llm = { workspace = true }
 hive-agent = { workspace = true }
 hive-tui = { workspace = true }
+comb = { workspace = true }
 
 tokio = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
 toml = { workspace = true }
-crossterm = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }

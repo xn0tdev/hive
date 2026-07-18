@@ -1,7 +1,7 @@
 //! Colour palette: quiet grayscale. Only ok/err status icons keep a muted
 //! tint so state is readable at a glance. All widgets pull colours from here.
 
-use ratatui::style::Color;
+use comb::Color;
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)

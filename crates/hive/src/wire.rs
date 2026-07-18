@@ -106,16 +106,13 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     Ok(())
 }
 
-/// Make sure the terminal is restored if a panic escapes the TUI.
+/// Make sure the terminal is restored if a panic escapes the TUI. `comb` saves
+/// the original termios when it enters raw mode, so `restore` can undo raw mode,
+/// leave the alternate screen, and stop mouse reporting from here.
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture,
-            crossterm::terminal::LeaveAlternateScreen
-        );
+        comb::restore();
         default_hook(info);
     }));
 }

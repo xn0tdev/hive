@@ -1,12 +1,11 @@
 //! Width-aware word wrapping that preserves per-span styling. Wrapping happens
-//! here (not in ratatui's Paragraph) so we always know the exact rendered line
-//! count and can scroll precisely.
+//! here (not in the renderer) so we always know the exact rendered line count
+//! and can scroll precisely.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use comb::{Line, Span, Style};
 use unicode_width::UnicodeWidthChar;
 
-pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+pub fn wrap_lines(lines: Vec<Line>, width: usize) -> Vec<Line> {
     let width = width.max(1);
     let mut out = Vec::new();
     for line in lines {
@@ -19,7 +18,7 @@ fn char_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
-fn wrap_one(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+fn wrap_one(line: Line, width: usize) -> Vec<Line> {
     let mut cells: Vec<(char, Style)> = Vec::new();
     for span in line.spans {
         for ch in span.content.chars() {
@@ -30,7 +29,7 @@ fn wrap_one(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         return vec![Line::from(String::new())];
     }
 
-    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut result: Vec<Line> = Vec::new();
     let mut cur: Vec<(char, Style)> = Vec::new();
     let mut cur_w = 0usize;
     let mut last_space: Option<usize> = None;
@@ -68,8 +67,8 @@ fn wrap_one(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     result
 }
 
-fn to_line(cells: &[(char, Style)]) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
+fn to_line(cells: &[(char, Style)]) -> Line {
+    let mut spans: Vec<Span> = Vec::new();
     let mut buf = String::new();
     let mut cur_style: Option<Style> = None;
 

@@ -19,8 +19,6 @@ tokio-util = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 eventsource-stream = "0.2"
-ratatui = "0.29"
-crossterm = "0.28"
 inventory = "0.3"
 directories = "5"
 toml = "0.8"
@@ -34,7 +32,9 @@ globset = "0.4"
 regex = "1"
 
 # Internal crates: core (contracts) → llm (provider), agent (loop + tools +
-# swarm + skills + vision), tui (frontend), and the hive binary that wires them.
+# swarm + skills + vision), tui (frontend on the native `comb` engine), and the
+# hive binary that wires them.
+comb = { path = "crates/comb" }
 hive-core = { path = "crates/hive-core" }
 hive-llm = { path = "crates/hive-llm" }
 hive-agent = { path = "crates/hive-agent" }

@@ -3,11 +3,7 @@
 //! user's input is just a `/command` prefix — never when a slash appears
 //! mid-text. The selected row is a full-width light bar, OpenCode-style.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
+use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 
 use crate::app::App;
 
@@ -21,7 +17,7 @@ pub fn height(app: &App) -> u16 {
     (n.min(MAX_ROWS) + usize::from(n > MAX_ROWS)) as u16
 }
 
-pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let theme = &app.theme;
     let items = app.menu_items();
     if items.is_empty() || area.width < 8 || area.height == 0 {
@@ -32,7 +28,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let w = area.width as usize;
 
     // Opaque card, merged with the input band below it.
-    f.render_widget(Block::default().style(Style::default().bg(panel_bg)), area);
+    buf.paint(area, Style::default().bg(panel_bg));
 
     // Column widths from the visible items, so the hint and description columns
     // line up in a clean grid.
@@ -71,7 +67,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ", Style::default().bg(bg)),
             Span::styled(
                 name,
-                Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD),
+                Style::default().fg(name_fg).bg(bg).add(Modifier::BOLD),
             ),
             // gap + hint column, nudged right and greyed so it reads apart.
             Span::styled(" ".repeat(name_pad + 2), Style::default().bg(bg)),
@@ -88,7 +84,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    f.render_widget(Paragraph::new(lines), area);
+    buf.set_lines(area, &lines, 0);
 }
 
 /// Cut a description to `max` display cells, ending with `…` instead of a

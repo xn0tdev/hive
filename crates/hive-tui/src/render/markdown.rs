@@ -2,13 +2,12 @@
 //! blocks, headings, bullets, and inline `code`/**bold**/*italic*. Enough to
 //! make assistant output look great without pulling in a heavy parser.
 
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use comb::{Line, Modifier, Span, Style};
 
 use crate::theme::Theme;
 
 /// Render markdown into styled logical lines (not yet wrapped to width).
-pub fn render(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+pub fn render(text: &str, theme: &Theme) -> Vec<Line> {
     let mut lines = Vec::new();
     let mut in_code = false;
 
@@ -44,7 +43,7 @@ pub fn render(text: &str, theme: &Theme) -> Vec<Line<'static>> {
                 content.to_string(),
                 Style::default()
                     .fg(theme.heading)
-                    .add_modifier(Modifier::BOLD),
+                    .add(Modifier::BOLD),
             )));
             continue;
         }
@@ -73,7 +72,7 @@ pub fn render(text: &str, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// Render text as plain lines (used for live streaming before markdown is final).
-pub fn plain(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+pub fn plain(text: &str, theme: &Theme) -> Vec<Line> {
     text.split('\n')
         .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(theme.fg))))
         .collect()
@@ -110,15 +109,15 @@ fn find_double(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+fn inline(text: &str, theme: &Theme) -> Vec<Span> {
     let base = Style::default().fg(theme.fg);
     let code = Style::default().fg(theme.tool).bg(theme.code_bg);
-    let bold = base.add_modifier(Modifier::BOLD);
-    let italic = base.add_modifier(Modifier::ITALIC);
+    let bold = base.add(Modifier::BOLD);
+    let italic = base.add(Modifier::ITALIC);
 
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
     let mut buf = String::new();
     let mut i = 0;
 
@@ -160,7 +159,7 @@ fn inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-fn flush(buf: &mut String, spans: &mut Vec<Span<'static>>, style: Style) {
+fn flush(buf: &mut String, spans: &mut Vec<Span>, style: Style) {
     if !buf.is_empty() {
         spans.push(Span::styled(std::mem::take(buf), style));
     }

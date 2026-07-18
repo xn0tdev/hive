@@ -1,6 +1,7 @@
-//! `hive-tui`: the ratatui frontend. Consumes `AgentEvent`s to render a live,
-//! streaming conversation and sends the user's `InputCommand`s back to the
-//! agent driver. Knows nothing about providers, tools, or the swarm.
+//! `hive-tui`: the terminal frontend, built on the native `comb` engine.
+//! Consumes `AgentEvent`s to render a live, streaming conversation and sends the
+//! user's `InputCommand`s back to the agent driver. Knows nothing about
+//! providers, tools, or the swarm.
 
 mod app;
 mod commands;

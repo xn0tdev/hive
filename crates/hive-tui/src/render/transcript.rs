@@ -1,17 +1,13 @@
 //! Builds and draws the scrolling conversation transcript and the "Working"
 //! indicator. The greeting lives only on the landing screen, not here.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
 use crate::app::state::{Block as UiBlock, ToolCard, ToolStatus};
 use crate::app::App;
 use crate::render::{markdown, wrap};
 
-pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
+pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let width = area.width.max(1) as usize;
     let (all, heads) = build(app, width);
     let total = all.len();
@@ -41,12 +37,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let paragraph = Paragraph::new(all).scroll((scroll as u16, 0));
-    f.render_widget(paragraph, target);
+    buf.set_lines(target, &all, scroll);
 }
 
 /// The spinner block shown above the input while a turn is running.
-pub fn draw_working(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw_working(buf: &mut Buffer, area: Rect, app: &App) {
     let theme = &app.theme;
     let mut spans = vec![Span::styled(
         format!("{} ", app.spinner_char()),
@@ -55,12 +50,12 @@ pub fn draw_working(f: &mut Frame, area: Rect, app: &App) {
     spans.extend(shimmer("Working", app.spinner));
     // A blank line above and below so the indicator breathes.
     let lines = vec![Line::default(), Line::from(spans), Line::default()];
-    f.render_widget(Paragraph::new(lines), area);
+    buf.set_lines(area, &lines, 0);
 }
 
 /// Per-character grayscale "shimmer": a bright highlight sweeps across `text`,
 /// driven by the animation tick, so the word glows while a turn runs.
-fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
+fn shimmer(text: &str, tick: usize) -> Vec<Span> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len() as i32;
     // Highlight head sweeps from just before the word to just after, then repeats.
@@ -77,7 +72,7 @@ fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
                 c.to_string(),
                 Style::default()
                     .fg(Color::Rgb(v, v, v))
-                    .add_modifier(Modifier::BOLD),
+                    .add(Modifier::BOLD),
             )
         })
         .collect()
@@ -85,15 +80,15 @@ fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
 
 /// Build the full, pre-wrapped set of transcript lines (test helper).
 #[cfg(test)]
-pub fn lines(app: &App, width: usize) -> Vec<Line<'static>> {
+pub fn lines(app: &App, width: usize) -> Vec<Line> {
     build(app, width).0
 }
 
 /// Like `lines`, but also reports which line index holds each thought header
 /// (with its block index) so mouse clicks can be hit-tested.
-fn build(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+fn build(app: &App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
     let theme = &app.theme;
-    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut out: Vec<Line> = Vec::new();
     let mut heads: Vec<(usize, usize)> = Vec::new();
 
     for (i, block) in app.blocks.iter().enumerate() {
@@ -130,8 +125,8 @@ fn build(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
                 if th.open && !th.text.trim().is_empty() {
                     let style = Style::default()
                         .fg(theme.faint)
-                        .add_modifier(Modifier::ITALIC);
-                    let raw: Vec<Line<'static>> = th
+                        .add(Modifier::ITALIC);
+                    let raw: Vec<Line> = th
                         .text
                         .split('\n')
                         .map(|l| Line::from(Span::styled(l.to_string(), style)))
@@ -185,11 +180,11 @@ fn thought_header(
     th: &crate::app::state::Thought,
     app: &App,
     show_hint: bool,
-) -> Line<'static> {
+) -> Line {
     let theme = &app.theme;
     let active = th.elapsed_ms.is_none() && app.running;
 
-    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
         spans.extend(shimmer("thinking", app.spinner));
         spans.push(Span::styled(
@@ -200,7 +195,7 @@ fn thought_header(
         spans.push(Span::styled("∴ ", Style::default().fg(theme.faint)));
         spans.push(Span::styled(
             format!("thought for {:.1}s", th.secs()),
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.dim).add(Modifier::ITALIC),
         ));
         if th.approx_tokens() > 0 {
             spans.push(Span::styled(
@@ -224,13 +219,13 @@ fn thought_header(
 
 /// User message: a full-width gray strip like the input bar — one tinted
 /// padding row above and below, text rows in the middle, lightly inset.
-fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line<'static>> {
+fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let bg = theme.strip;
     let body = Style::default().fg(theme.fg).bg(bg);
     let pad_row = || Line::from(Span::styled(" ".repeat(width), body));
 
-    let raw: Vec<Line<'static>> = text
+    let raw: Vec<Line> = text
         .split('\n')
         .map(|l| Line::from(Span::styled(l.to_string(), body)))
         .collect();
@@ -243,7 +238,7 @@ fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line<'static>> {
         // Re-tint the content spans onto the strip background.
         for s in line.spans {
             used += s.content.chars().count();
-            spans.push(Span::styled(s.content.into_owned(), s.style.bg(bg)));
+            spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
         if width > used {
             spans.push(Span::styled(" ".repeat(width - used), body));
@@ -254,7 +249,7 @@ fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-fn indent(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+fn indent(lines: Vec<Line>) -> Vec<Line> {
     lines
         .into_iter()
         .map(|mut l| {
@@ -264,7 +259,7 @@ fn indent(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn push_caret(lines: &mut Vec<Line<'static>>, color: Color) {
+fn push_caret(lines: &mut Vec<Line>, color: Color) {
     match lines.last_mut() {
         Some(last) => last
             .spans
@@ -274,7 +269,7 @@ fn push_caret(lines: &mut Vec<Line<'static>>, color: Color) {
 }
 
 /// One compact line per tool; live output tail only while running or on error.
-fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line<'static>> {
+fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let (icon, color) = match card.status {
         ToolStatus::Running => (app.spinner_char().to_string(), theme.accent),
@@ -286,7 +281,7 @@ fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line<'static>> {
         Span::styled(format!("  {icon} "), Style::default().fg(color)),
         Span::styled(
             card.name.clone(),
-            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.dim).add(Modifier::BOLD),
         ),
     ];
     if !card.args.is_empty() {
@@ -318,7 +313,7 @@ fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line<'static>> {
             }
             v
         };
-        let raw: Vec<Line<'static>> = tail
+        let raw: Vec<Line> = tail
             .into_iter()
             .map(|l| {
                 Line::from(Span::styled(
@@ -333,108 +328,10 @@ fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::diff_lines;
-    use crate::app::App;
-    use crate::TuiInit;
-
-    fn app() -> App {
-        App::new(TuiInit {
-            model: "m".into(),
-            cwd: "/tmp".into(),
-            theme: "gray".into(),
-            version: "0.1.0".into(),
-        })
-    }
-
-    #[test]
-    fn thoughts_collapse_and_expand() {
-        use hive_core::event::AgentEvent;
-        let mut a = app();
-        a.apply(AgentEvent::TurnStarted);
-        a.apply(AgentEvent::ReasoningDelta("let me ponder this".into()));
-
-        // Active: shimmering "thinking" header, no body text.
-        let text = |lines: &Vec<ratatui::text::Line>| {
-            lines
-                .iter()
-                .map(|l| {
-                    l.spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let t = text(&super::lines(&a, 80));
-        assert!(t.contains("thinking"));
-        assert!(!t.contains("ponder"));
-
-        // Model moves on → thought closes with a duration; still collapsed.
-        a.apply(AgentEvent::AssistantTextDelta("answer".into()));
-        let t = text(&super::lines(&a, 80));
-        assert!(t.contains("thought for"));
-        assert!(t.contains("tokens"));
-        assert!(!t.contains("ponder"));
-
-        // ctrl+t reveals the full text.
-        a.toggle_thoughts();
-        let t = text(&super::lines(&a, 80));
-        assert!(t.contains("ponder"));
-    }
-
-    #[test]
-    fn click_toggles_one_thought() {
-        use hive_core::event::AgentEvent;
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let mut a = app();
-        a.apply(AgentEvent::TurnStarted);
-        a.apply(AgentEvent::ReasoningDelta("secret plan".into()));
-        a.apply(AgentEvent::AssistantTextDelta("done".into()));
-        a.apply(AgentEvent::TurnFinished);
-
-        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
-        term.draw(|f| crate::render::draw(f, &mut a)).unwrap();
-
-        // Collapsed: the header row is registered for hit-testing, text hidden.
-        let (row, _) = *a.thought_hits.first().expect("header row recorded");
-        let before = format!("{:?}", term.backend().buffer());
-        assert!(!before.contains("secret plan"));
-
-        // A click on that row opens exactly that thought.
-        let idx = a.thought_at_row(row).expect("click hits the header");
-        a.toggle_thought_at(idx);
-        term.draw(|f| crate::render::draw(f, &mut a)).unwrap();
-        let after = format!("{:?}", term.backend().buffer());
-        assert!(after.contains("secret plan"));
-    }
-
-    #[test]
-    fn diff_rows_are_coloured_and_blocked() {
-        let a = app();
-        let lines = diff_lines("- gone\n+ added new\n… 3 more\n", &a, 60);
-        assert_eq!(lines.len(), 3);
-        // Every row is [indent, styled block].
-        for l in &lines {
-            assert_eq!(l.spans.len(), 2);
-        }
-        assert_eq!(lines[0].spans[1].style.bg, Some(a.theme.del_bg));
-        assert_eq!(lines[1].spans[1].style.bg, Some(a.theme.add_bg));
-        // All blocks share one width (a neat rectangle), sized to content.
-        let w = lines[0].spans[1].content.chars().count();
-        assert!(lines.iter().all(|l| l.spans[1].content.chars().count() == w));
-        assert!(w < 60); // not the full terminal width
-    }
-}
-
 /// Render a diff (lines prefixed `+`/`-`) as an indented block where each row's
 /// background hugs the content width — a green add / red delete band, never the
 /// full terminal width.
-fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line<'static>> {
+fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let indent = 4usize;
     let avail = width.saturating_sub(indent + 1).max(8);
@@ -468,4 +365,98 @@ fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line<'static>> {
             ])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_lines;
+    use crate::app::App;
+    use crate::TuiInit;
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+        })
+    }
+
+    #[test]
+    fn thoughts_collapse_and_expand() {
+        use hive_core::event::AgentEvent;
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("let me ponder this".into()));
+
+        // Active: shimmering "thinking" header, no body text.
+        let text = |lines: &[comb::Line]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let t = text(&super::lines(&a, 80));
+        assert!(t.contains("thinking"));
+        assert!(!t.contains("ponder"));
+
+        // Model moves on → thought closes with a duration; still collapsed.
+        a.apply(AgentEvent::AssistantTextDelta("answer".into()));
+        let t = text(&super::lines(&a, 80));
+        assert!(t.contains("thought for"));
+        assert!(t.contains("tokens"));
+        assert!(!t.contains("ponder"));
+
+        // ctrl+t reveals the full text.
+        a.toggle_thoughts();
+        let t = text(&super::lines(&a, 80));
+        assert!(t.contains("ponder"));
+    }
+
+    #[test]
+    fn click_toggles_one_thought() {
+        use comb::{render, Size};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("secret plan".into()));
+        a.apply(AgentEvent::AssistantTextDelta("done".into()));
+        a.apply(AgentEvent::TurnFinished);
+
+        let before = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+
+        // Collapsed: the header row is registered for hit-testing, text hidden.
+        let (row, _) = *a.thought_hits.first().expect("header row recorded");
+        assert!(!before.text().contains("secret plan"));
+
+        // A click on that row opens exactly that thought.
+        let idx = a.thought_at_row(row).expect("click hits the header");
+        a.toggle_thought_at(idx);
+        let after = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+        assert!(after.text().contains("secret plan"));
+    }
+
+    #[test]
+    fn diff_rows_are_coloured_and_blocked() {
+        let a = app();
+        let lines = diff_lines("- gone\n+ added new\n… 3 more\n", &a, 60);
+        assert_eq!(lines.len(), 3);
+        // Every row is [indent, styled block].
+        for l in &lines {
+            assert_eq!(l.spans.len(), 2);
+        }
+        assert_eq!(lines[0].spans[1].style.bg, Some(a.theme.del_bg));
+        assert_eq!(lines[1].spans[1].style.bg, Some(a.theme.add_bg));
+        // All blocks share one width (a neat rectangle), sized to content.
+        let w = lines[0].spans[1].content.chars().count();
+        assert!(lines.iter().all(|l| l.spans[1].content.chars().count() == w));
+        assert!(w < 60); // not the full terminal width
+    }
 }

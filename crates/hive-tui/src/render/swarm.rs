@@ -1,11 +1,7 @@
 //! Compact, borderless swarm activity block shown above the input while
 //! subagents exist: a summary line plus the most recent entries.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 
 use hive_core::event::SubagentStatus;
 
@@ -21,7 +17,7 @@ pub fn height(app: &App) -> u16 {
     (1 + app.swarm.len().min(MAX_ENTRIES) + 1) as u16
 }
 
-pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let theme = &app.theme;
     let running = count(app, SubagentStatus::Running);
     let done = count(app, SubagentStatus::Done);
@@ -33,7 +29,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             "swarm",
             Style::default()
                 .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+                .add(Modifier::BOLD),
         ),
         Span::styled(
             format!(" · {running} running · {done} done"),
@@ -69,7 +65,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    f.render_widget(Paragraph::new(lines), area);
+    buf.set_lines(area, &lines, 0);
 }
 
 fn count(app: &App, status: SubagentStatus) -> usize {

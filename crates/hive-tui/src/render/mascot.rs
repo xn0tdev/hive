@@ -1,8 +1,7 @@
 //! The hive wordmark: an ASCII-art "HIVE". Rendered as one block (left-aligned
 //! at a centered x) so the letters never skew.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use comb::{Line, Span, Style};
 
 use crate::theme::Theme;
 
@@ -17,7 +16,7 @@ const ART: [&str; 4] = [
 pub const WIDTH: u16 = 20;
 pub const HEIGHT: u16 = ART.len() as u16;
 
-pub fn wordmark(theme: &Theme) -> Vec<Line<'static>> {
+pub fn wordmark(theme: &Theme) -> Vec<Line> {
     ART.iter()
         .map(|row| Line::from(Span::styled(row.to_string(), Style::default().fg(theme.dim))))
         .collect()

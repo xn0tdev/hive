@@ -1,11 +1,7 @@
 //! The input strip: a borderless dark band with a → prompt, placeholder text,
 //! and a right-aligned "ctrl+c to stop" hint while a turn is running.
 
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
+use comb::{Frame, Line, Modifier, Rect, Span, Style};
 
 use crate::app::App;
 
@@ -21,7 +17,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     // row, a padding row below) IS THE INPUT — its decorative rows are part of
     // the design. NEVER remove them to "close a gap": the only thing that ever
     // gets trimmed to remove empty space is the layout OUTSIDE this band.
-    f.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    f.buffer().paint(area, Style::default().bg(bg));
 
     // One padding row above/below, one padding column left/right — always.
     let inner = Rect {
@@ -53,7 +49,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 Style::default()
                     .fg(theme.faint)
                     .bg(bg)
-                    .add_modifier(Modifier::ITALIC),
+                    .add(Modifier::ITALIC),
             ),
         ]));
     } else {
@@ -69,7 +65,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    f.buffer().set_lines(inner, &lines, 0);
 
     // Right-aligned hint while running, if there's room.
     if app.running {
@@ -87,20 +83,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         if free > first_len + hint.len() + 4 {
             // Leave a column of breathing room on the right so the hint isn't
             // glued to the strip edge.
-            let hint_area = Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width.saturating_sub(1),
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(theme.faint).bg(bg),
-                )))
-                .alignment(ratatui::layout::Alignment::Right),
-                hint_area,
-            );
+            let hint_w = hint.chars().count() as u16;
+            let hx = inner.x + inner.width.saturating_sub(1 + hint_w);
+            let hint_line = Line::from(Span::styled(hint, Style::default().fg(theme.faint).bg(bg)));
+            f.buffer().set_line(hx, inner.y, &hint_line, hint_w);
         }
     }
 
@@ -111,5 +97,5 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let max_y = inner.y + inner.height.saturating_sub(1);
     let x = (inner.x + x_off + col as u16).min(max_x);
     let y = (inner.y + line as u16).min(max_y);
-    f.set_cursor_position(Position::new(x, y));
+    f.set_cursor(x, y);
 }

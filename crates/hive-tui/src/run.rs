@@ -7,16 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use comb::{Event, Key, KeyCode, Mouse, MouseButton, MouseKind, Terminal};
 use tokio::sync::mpsc::UnboundedSender;
 
 use hive_core::event::EventReceiver;
@@ -40,23 +31,16 @@ pub fn run(
             "hive must be run in an interactive terminal",
         ));
     }
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // comb enters raw mode + the alternate screen and turns on mouse reporting;
+    // its `Drop` restores everything, so there's no manual teardown here.
+    let mut terminal = Terminal::new()?;
     let mut app = App::new(init);
 
-    let res = run_loop(&mut terminal, &mut app, &mut events, &input_tx, &interrupt);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    res
+    run_loop(&mut terminal, &mut app, &mut events, &input_tx, &interrupt)
 }
 
 fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal,
     app: &mut App,
     events: &mut EventReceiver,
     input_tx: &UnboundedSender<InputCommand>,
@@ -70,17 +54,15 @@ fn run_loop(
 
         terminal.draw(|f| render::draw(f, app))?;
 
-        if event::poll(tick)? {
-            match event::read()? {
+        if let Some(ev) = terminal.read_event(tick)? {
+            match ev {
                 Event::Key(key) => {
-                    if key.kind == KeyEventKind::Press
-                        && handle_key(app, key, input_tx, interrupt)
-                    {
+                    if handle_key(app, key, input_tx, interrupt) {
                         break;
                     }
                 }
                 Event::Mouse(m) => handle_mouse(app, m),
-                _ => {}
+                Event::Resize(_, _) => {}
             }
         }
 
@@ -92,13 +74,13 @@ fn run_loop(
 /// Returns true when the user asked to quit.
 fn handle_key(
     app: &mut App,
-    key: KeyEvent,
+    key: Key,
     input_tx: &UnboundedSender<InputCommand>,
     interrupt: &Arc<AtomicBool>,
 ) -> bool {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let ctrl = key.mods.ctrl;
+    let alt = key.mods.alt;
+    let shift = key.mods.shift;
 
     let menu_open = app.slash_prefix().is_some() && !app.menu_items().is_empty();
 
@@ -166,11 +148,11 @@ fn handle_key(
 }
 
 /// Wheel scrolls the transcript; a left click on a thought header toggles it.
-fn handle_mouse(app: &mut App, m: MouseEvent) {
+fn handle_mouse(app: &mut App, m: Mouse) {
     match m.kind {
-        MouseEventKind::ScrollUp => app.scroll_up(3),
-        MouseEventKind::ScrollDown => app.scroll_down(3),
-        MouseEventKind::Down(MouseButton::Left) => {
+        MouseKind::ScrollUp => app.scroll_up(3),
+        MouseKind::ScrollDown => app.scroll_down(3),
+        MouseKind::Down(MouseButton::Left) => {
             if let Some(idx) = app.thought_at_row(m.row) {
                 app.toggle_thought_at(idx);
             }

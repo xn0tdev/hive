@@ -18,11 +18,7 @@ mod menu;
 mod swarm;
 mod transcript;
 
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::text::{Line, Span};
-use ratatui::style::Style;
-use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use comb::{Frame, Line, Rect, Span, Style};
 
 use crate::app::App;
 
@@ -41,7 +37,9 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
 
     // A narrower, centered input — clamped so it looks good on any width.
-    let inner_w = (area.width * 3 / 5).clamp(36, 72).min(area.width.saturating_sub(4));
+    let inner_w = (area.width * 3 / 5)
+        .clamp(36, 72)
+        .min(area.width.saturating_sub(4));
     let ix = area.x + (area.width - inner_w) / 2;
 
     // Full input band (top pad + text + bottom pad). NEVER strip the band's
@@ -55,49 +53,28 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &App) {
     let group_h = mascot::HEIGHT + gap + 1 /*version*/ + gap + input_h + 2 /*status*/;
     let mut y = area.y + area.height.saturating_sub(group_h) / 2;
 
-    let full = |y: u16, h: u16| Rect {
-        x: area.x,
-        y,
-        width: area.width,
-        height: h,
-    };
-
     // ASCII "HIVE", centered as one block so the letters stay aligned.
-    let art_x = area.x + (area.width.saturating_sub(mascot::WIDTH)) / 2;
-    f.render_widget(
-        Paragraph::new(mascot::wordmark(theme)),
-        Rect {
-            x: art_x,
-            y,
-            width: mascot::WIDTH,
-            height: mascot::HEIGHT,
-        },
+    let art_x = area.x + area.width.saturating_sub(mascot::WIDTH) / 2;
+    f.buffer().set_lines(
+        Rect::new(art_x, y, mascot::WIDTH, mascot::HEIGHT),
+        &mascot::wordmark(theme),
+        0,
     );
     y += mascot::HEIGHT + gap;
 
     // Version, centered under the wordmark.
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("v{}", app.version),
-            Style::default().fg(theme.faint),
-        )))
-        .alignment(Alignment::Center),
-        full(y, 1),
-    );
+    let version = Line::from(Span::styled(
+        format!("v{}", app.version),
+        Style::default().fg(theme.faint),
+    ));
+    let vw = version.width() as u16;
+    let vx = area.x + area.width.saturating_sub(vw) / 2;
+    f.buffer().set_line(vx, y, &version, vw);
     y += 1 + gap;
 
     // Centered, narrower input strip.
     let input_top = y;
-    input_box::draw(
-        f,
-        Rect {
-            x: ix,
-            y,
-            width: inner_w,
-            height: input_h,
-        },
-        app,
-    );
+    input_box::draw(f, Rect::new(ix, y, inner_w, input_h), app);
     y += input_h;
 
     // Model + cwd: left-aligned right under the input band, no empty gap.
@@ -107,32 +84,21 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &App) {
     // right-aligned flash line up with the input band's edges (not the screen's).
     let sx = ix + 1;
     let sw = inner_w.saturating_sub(2);
-    let status = |y: u16| Rect { x: sx, y, width: sw, height: 1 };
-    f.render_widget(Paragraph::new(footer::model_line(app)), status(y));
+    f.buffer().set_line(sx, y, &footer::model_line(app), sw);
     if let Some(msg) = app.flash_text() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                msg.to_string(),
-                Style::default().fg(theme.warn),
-            )))
-            .alignment(Alignment::Right),
-            status(y),
-        );
+        let flash = Line::from(Span::styled(msg.to_string(), Style::default().fg(theme.warn)));
+        let fw = flash.width() as u16;
+        f.buffer().set_line(sx + sw.saturating_sub(fw), y, &flash, fw);
     }
-    f.render_widget(Paragraph::new(footer::cwd_line(app)), status(y + 1));
+    f.buffer().set_line(sx, y + 1, &footer::cwd_line(app), sw);
 
     // Slash menu overlay: floats above the input, layering over the space under
     // the wordmark without shifting anything.
     if menu_h > 0 {
         let top = input_top.saturating_sub(menu_h).max(area.y);
         menu::draw(
-            f,
-            Rect {
-                x: ix,
-                y: top,
-                width: inner_w,
-                height: input_top - top,
-            },
+            f.buffer(),
+            Rect::new(ix, top, inner_w, input_top - top),
             app,
         );
     }
@@ -146,59 +112,38 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     let input_h = input_height(app);
     let menu_h = menu::height(app);
 
-    // The slash menu is NOT part of this layout — it floats above the input as
-    // an overlay, so opening it never pushes the transcript up.
-    let rows = Layout::vertical([
-        Constraint::Min(1),            // transcript
-        Constraint::Length(swarm_h),   // swarm (0 when idle)
-        Constraint::Length(working_h), // spinner block (0 when idle)
-        Constraint::Length(input_h),   // input strip
-        Constraint::Length(2),         // footer: model row + cwd row
-    ])
-    .split(area);
+    // Manual vertical layout, bottom-anchored: the footer sits on the last two
+    // rows, then the input, working, and swarm blocks stack upward, and the
+    // transcript fills whatever is left. The slash menu is NOT part of this — it
+    // floats above the input as an overlay, so opening it never shifts anything.
+    let footer_y = area.bottom().saturating_sub(2);
+    let input_y = footer_y.saturating_sub(input_h);
+    let working_y = input_y.saturating_sub(working_h);
+    let swarm_y = working_y.saturating_sub(swarm_h);
+    let transcript = Rect::new(area.x, area.y, area.width, swarm_y.saturating_sub(area.y));
 
     // Everything — transcript included — lives in a band a touch narrower than
     // the terminal, centered, so the chat doesn't sprawl across the screen.
     let inner_w = area.width.saturating_sub(6).max(20).min(area.width);
     let ix = area.x + (area.width - inner_w) / 2;
-    let band = |r: Rect| Rect {
-        x: ix,
-        y: r.y,
-        width: inner_w,
-        height: r.height,
-    };
-    let band_inner = |r: Rect| Rect {
-        x: ix + 1,
-        y: r.y,
-        width: inner_w.saturating_sub(2),
-        height: r.height,
-    };
+    let band = |y: u16, h: u16| Rect::new(ix, y, inner_w, h);
+    let band_inner = |y: u16, h: u16| Rect::new(ix + 1, y, inner_w.saturating_sub(2), h);
 
-    transcript::draw(f, band(rows[0]), app);
+    transcript::draw(f.buffer(), band(transcript.y, transcript.height), app);
     if swarm_h > 0 {
-        swarm::draw(f, band_inner(rows[1]), app);
+        swarm::draw(f.buffer(), band_inner(swarm_y, swarm_h), app);
     }
     if app.running {
-        transcript::draw_working(f, band_inner(rows[2]), app);
+        transcript::draw_working(f.buffer(), band_inner(working_y, working_h), app);
     }
-    input_box::draw(f, band(rows[3]), app);
-    footer::draw(f, band_inner(rows[4]), app);
+    input_box::draw(f, band(input_y, input_h), app);
+    footer::draw(f.buffer(), band_inner(footer_y, 2), app);
 
     // Menu overlay, drawn last so it layers over the transcript, its bottom
     // edge flush with the input's top. If it can't fit it clips at the top.
     if menu_h > 0 {
-        let input_top = rows[3].y;
-        let top = input_top.saturating_sub(menu_h).max(area.y);
-        menu::draw(
-            f,
-            Rect {
-                x: ix,
-                y: top,
-                width: inner_w,
-                height: input_top - top,
-            },
-            app,
-        );
+        let top = input_y.saturating_sub(menu_h).max(area.y);
+        menu::draw(f.buffer(), Rect::new(ix, top, inner_w, input_y - top), app);
     }
 }
 

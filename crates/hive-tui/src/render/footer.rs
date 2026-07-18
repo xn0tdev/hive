@@ -1,14 +1,10 @@
 //! Footer content: `model · tokens` and the working directory. Exposed as
 //! reusable lines so both the bottom bar and the centered landing can use them.
 
-use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use comb::{Buffer, Line, Rect, Span, Style};
 
 /// `model · tokens · attachments` as a single line.
-pub fn model_line(app: &crate::app::App) -> Line<'static> {
+pub fn model_line(app: &crate::app::App) -> Line {
     let theme = &app.theme;
     let mut spans = vec![Span::styled(
         short_model(&app.model),
@@ -31,37 +27,30 @@ pub fn model_line(app: &crate::app::App) -> Line<'static> {
     Line::from(spans)
 }
 
-pub fn cwd_line(app: &crate::app::App) -> Line<'static> {
+pub fn cwd_line(app: &crate::app::App) -> Line {
     Line::from(Span::styled(
         tilde(&app.cwd),
         Style::default().fg(app.theme.faint),
     ))
 }
 
-pub fn draw(f: &mut Frame, area: Rect, app: &crate::app::App) {
+pub fn draw(buf: &mut Buffer, area: Rect, app: &crate::app::App) {
     let theme = &app.theme;
     if area.height < 2 {
         return;
     }
 
-    let row1 = Rect { y: area.y, height: 1, ..area };
-    let row2 = Rect { y: area.y + 1, height: 1, ..area };
-
-    f.render_widget(Paragraph::new(model_line(app)), row1);
+    buf.set_line(area.x, area.y, &model_line(app), area.width);
 
     // Ephemeral status (copy feedback, quit confirmation), right-aligned.
     if let Some(msg) = app.flash_text() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                msg.to_string(),
-                Style::default().fg(theme.warn),
-            )))
-            .alignment(ratatui::layout::Alignment::Right),
-            row1,
-        );
+        let line = Line::from(Span::styled(msg.to_string(), Style::default().fg(theme.warn)));
+        let w = line.width() as u16;
+        let x = area.x + area.width.saturating_sub(w);
+        buf.set_line(x, area.y, &line, w);
     }
 
-    f.render_widget(Paragraph::new(cwd_line(app)), row2);
+    buf.set_line(area.x, area.y + 1, &cwd_line(app), area.width);
 }
 
 fn short_model(model: &str) -> String {
