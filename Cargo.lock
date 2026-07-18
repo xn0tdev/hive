@@ -102,7 +102,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "comb"
+name = "comb-tui"
 version = "0.1.1"
 dependencies = [
  "libc",
@@ -339,11 +339,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
-name = "hive"
+name = "hive-agent"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "comb",
+ "comb-tui",
  "directories",
  "hive-core",
  "hive-llm",
@@ -393,7 +393,7 @@ name = "hive-tui"
 version = "0.1.1"
 dependencies = [
  "base64",
- "comb",
+ "comb-tui",
  "hive-core",
  "tokio",
  "unicode-width",

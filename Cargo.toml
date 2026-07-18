@@ -7,6 +7,8 @@ edition = "2021"
 version = "0.1.1"
 license = "MIT"
 authors = ["gotlib"]
+repository = "https://github.com/xn0tdev/hive"
+homepage = "https://github.com/xn0tdev/hive"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -31,10 +33,12 @@ ignore = "0.4"
 globset = "0.4"
 regex = "1"
 
-comb = { path = "lib/comb" }
-hive-core = { path = "crates/hive-core" }
-hive-llm = { path = "crates/hive-llm" }
-hive-tui = { path = "crates/hive-tui" }
+# Local path + version so `cargo publish` can resolve crates.io deps.
+# `comb-tui` on crates.io; Rust crate name stays `comb`.
+comb = { package = "comb-tui", path = "lib/comb", version = "0.1.1" }
+hive-core = { path = "crates/hive-core", version = "0.1.1" }
+hive-llm = { path = "crates/hive-llm", version = "0.1.1" }
+hive-tui = { path = "crates/hive-tui", version = "0.1.1" }
 
 [profile.release]
 lto = "thin"

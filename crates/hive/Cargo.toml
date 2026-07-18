@@ -1,8 +1,15 @@
 [package]
-name = "hive"
+name = "hive-agent"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "A native Rust + TUI YOLO coding agent"
+readme = "../../README.md"
+keywords = ["ai", "agent", "tui", "coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "hive"

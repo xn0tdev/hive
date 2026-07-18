@@ -1,10 +1,20 @@
 [package]
-name = "comb"
+name = "comb-tui"
 description = "A tiny native terminal-UI engine — a comb of cells: surfaces, layers, effects."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository = "https://github.com/xn0tdev/comb"
+homepage = "https://github.com/xn0tdev/comb"
+documentation = "https://docs.rs/comb-tui"
+keywords = ["tui", "terminal", "ui", "ansi"]
+categories = ["command-line-interface", "gui"]
+publish = false # published from https://github.com/xn0tdev/comb
+
+[lib]
+name = "comb"
+path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"

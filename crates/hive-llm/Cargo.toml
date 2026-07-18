@@ -2,6 +2,14 @@
 name = "hive-llm"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Hive LLM providers (Fireworks / OpenAI-compatible)"
+readme = "README.md"
+keywords = ["ai", "llm"]
+categories = ["api-bindings"]
 
 [dependencies]
 hive-core = { workspace = true }
