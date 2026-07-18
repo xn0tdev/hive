@@ -31,7 +31,10 @@ pub mod widgets;
 
 // The `effects` module is re-exported by name so `comb::effects::…` keeps working.
 pub use crate::draw::effects;
-pub use crate::widgets::{List, Menu, Palette, ScrollView, Tabs, TextInput, Toasts};
+pub use crate::draw::highlight::{self, HighlightTheme, Lang};
+pub use crate::widgets::{
+    CodeBlock, List, Menu, Palette, ScrollView, Scrollbar, ScrollbarStyle, Tabs, TextInput, Toasts,
+};
 
 pub use crate::core::buffer::{Buffer, Cell};
 pub use crate::core::geom::{Pos, Rect, Size};

@@ -2,17 +2,21 @@
 //! [`draw`](crate::draw): a selectable [`List`], a [`ScrollView`] with a
 //! scrollbar, and a dropdown/context [`Menu`] overlay.
 
+pub mod code;
 pub mod input;
 pub mod list;
 pub mod menu;
 pub mod scroll;
+pub mod scrollbar;
 pub mod tabs;
 pub mod toast;
 
+pub use code::CodeBlock;
 pub use input::TextInput;
 pub use list::List;
 pub use menu::Menu;
-pub use scroll::{scrollbar, ScrollView};
+pub use scroll::ScrollView;
+pub use scrollbar::{ScrollHit, ScrollMetrics, Scrollbar, ScrollbarStyle};
 pub use tabs::Tabs;
 pub use toast::{Toast, Toasts};
 

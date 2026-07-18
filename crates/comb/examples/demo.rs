@@ -3,16 +3,25 @@
 //!
 //! Run: `cargo run -p comb --example demo`
 //! Keys: ↑/↓ · enter · tab focuses input · ctrl+tab cycles tabs · q quits.
-//! Mouse: wheel scrolls hovered zone · click tabs · right-click context menu.
+//! Mouse: wheel scrolls zone · drag log scrollbar · right-click menu · code tab.
 
 use std::time::{Duration, Instant};
 
 use comb::effects::{bar, shimmer, sparkline, SPINNERS};
+use comb::highlight::Lang;
 use comb::{
-    Border, Color, Event, KeyCode, Line, Menu, MouseButton, MouseKind, MouseMode, Palette,
-    Rect, ScrollView, Span, Style, Tabs, Terminal, TextInput, Toasts,
+    Border, CodeBlock, Color, Event, KeyCode, Line, Menu, MouseButton, MouseKind, MouseMode, Palette,
+    Rect, ScrollView, ScrollbarStyle, Span, Style, Tabs, Terminal, TextInput, Toasts,
 };
 use comb::widgets::List;
+
+const SAMPLE_RUST: &str = r#"pub fn run(items: &[Item]) -> Result<()> {
+    // drag the log scrollbar with the mouse
+    for item in items {
+        process(item)?;
+    }
+    Ok(())
+}"#;
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::rgb(r, g, b)
@@ -57,15 +66,32 @@ fn main() -> std::io::Result<()> {
             })
             .collect(),
     );
+    log.scrollbar.style = ScrollbarStyle {
+        track_glyph: '░',
+        thumb_glyph: '▐',
+        track: Style::new().fg(rgb(0x28, 0x28, 0x28)),
+        thumb: Style::new().fg(rgb(0x72, 0x72, 0x72)),
+        thumb_active: Style::new().fg(rgb(0xcc, 0xcc, 0xcc)).bold(),
+        ..Default::default()
+    };
     let mut ctx = Menu::new(
         ["Copy", "Paste", "Delete"].iter().map(|s| s.to_string()).collect(),
     );
     let mut tabs = Tabs::new(
-        ["widgets", "metrics", "about"]
+        ["widgets", "code", "metrics", "about"]
             .iter()
             .map(|s| s.to_string())
             .collect(),
     );
+    let mut code = CodeBlock::new(SAMPLE_RUST, Lang::Rust);
+    code.scrollbar.style = ScrollbarStyle {
+        track_glyph: '▕',
+        thumb_glyph: '█',
+        width: 1,
+        track: Style::new().fg(rgb(0x35, 0x35, 0x35)),
+        thumb: Style::new().fg(rgb(0x88, 0x88, 0x88)),
+        thumb_active: Style::new().fg(rgb(0xee, 0xee, 0xee)),
+    };
     let mut input = TextInput::with_placeholder("type a toast message…");
     let mut toasts = Toasts::default();
 
@@ -80,20 +106,19 @@ fn main() -> std::io::Result<()> {
         let size = term.size();
         let caret_on = phase % 16 < 10;
 
-        let menu_panel = Rect::new(2, 3, 28, 12);
-        let menu_inner = Rect::new(3, 4, 26, 10);
-        let log_panel = Rect::new(32, 3, 40, 12);
-        let log_inner = Rect::new(33, 4, 38, 10);
+        let menu_panel = Rect::new(2, 3, 28, 10);
+        let menu_inner = Rect::new(3, 4, 26, 8);
+        let log_panel = Rect::new(32, 3, 40, 10);
+        let log_inner = Rect::new(33, 4, 38, 8);
         let spin_w = size.width.saturating_sub(76).min(18);
-        let spin_panel = Rect::new(74, 3, spin_w, 12);
+        let spin_panel = Rect::new(74, 3, spin_w, 10);
 
         let content_w = size.width.saturating_sub(4).min(70);
         let footer_rows = 2u16;
         let input_h = 3u16;
-        let tab_body_h = 5u16;
+        let tab_body_h = 7u16;
         let tab_bar_h = 2u16;
-        let bottom = size.height.saturating_sub(footer_rows);
-        let input_y = bottom.saturating_sub(input_h);
+        let input_y = size.height.saturating_sub(footer_rows + input_h);
         let tab_body_y = input_y.saturating_sub(tab_body_h);
         let tab_bar_y = tab_body_y.saturating_sub(tab_bar_h);
 
@@ -111,12 +136,12 @@ fn main() -> std::io::Result<()> {
                 &Line::from(shimmer("comb — a native TUI engine", phase)),
                 size.width.saturating_sub(4),
             );
-            buf.set_str(2, 1, "menus · scroll · tabs · toast · input · sparkline", faint);
+            buf.set_str(2, 1, "syntax highlight · custom scrollbar · drag thumb · scroll zones", faint);
 
             buf.border_title(menu_panel, Border::Rounded, pal.border, &Line::from(Span::styled("menu", bright)));
             menu.render(buf, menu_inner, &pal);
 
-            buf.border_title(log_panel, Border::Rounded, pal.border, &Line::from(Span::styled("log", bright)));
+            buf.border_title(log_panel, Border::Rounded, pal.border, &Line::from(Span::styled("log — drag ▐", bright)));
             log.render(buf, log_inner, &pal);
 
             if spin_panel.width >= 8 {
@@ -133,19 +158,23 @@ fn main() -> std::io::Result<()> {
 
             tabs.render(buf, tab_bar, &pal);
             buf.border(tab_body, Border::Rounded, pal.border);
+            let tab_inner = tab_body.inner(1, 1);
             match tabs.selected {
                 0 => {
                     let lines = [
-                        " List — selectable menu rows + scrollbar",
-                        " ScrollView — wheel-scroll zone",
-                        " Menu — right-click overlay layer",
-                        " Tabs / Toast / TextInput — this demo",
+                        " List — selectable rows + scrollbar",
+                        " Scrollbar — custom glyphs, drag thumb",
+                        " CodeBlock — syntax-highlighted source",
+                        " highlight — Rust / JSON / Shell",
                     ];
                     for (i, l) in lines.iter().enumerate() {
-                        buf.set_str(tab_body.x + 2, tab_body.y + 1 + i as u16, l, dim);
+                        buf.set_str(tab_inner.x, tab_inner.y + i as u16, l, dim);
                     }
                 }
                 1 => {
+                    code.render(buf, tab_inner, pal.panel);
+                }
+                2 => {
                     let t = start.elapsed().as_secs_f32();
                     let values: Vec<f32> = (0..48)
                         .map(|i| {
@@ -153,32 +182,34 @@ fn main() -> std::io::Result<()> {
                             (x.sin() * 0.4 + 0.5).clamp(0.05, 0.95)
                         })
                         .collect();
-                    buf.set_str(tab_body.x + 2, tab_body.y + 1, "throughput (live)", dim);
-                    let w = tab_body.width.saturating_sub(4) as usize;
+                    buf.set_str(tab_inner.x, tab_inner.y, "throughput (live)", dim);
+                    let w = tab_inner.width.saturating_sub(2) as usize;
                     let mut line = Line::new();
                     for s in sparkline(&values, w, Style::new().fg(rgb(0xc8, 0xc8, 0xc8))) {
                         line.push(s);
                     }
-                    buf.set_line(tab_body.x + 2, tab_body.y + 3, &line, w as u16);
+                    buf.set_line(tab_inner.x, tab_inner.y + 2, &line, w as u16);
                 }
                 _ => {
-                    buf.set_str(tab_body.x + 2, tab_body.y + 1, "comb — surfaces, layers, diffed ANSI", dim);
-                    buf.set_str(tab_body.x + 2, tab_body.y + 2, "core · draw · term · widgets", faint);
+                    buf.set_str(tab_inner.x, tab_inner.y, "comb — surfaces, layers, diffed ANSI", dim);
+                    buf.set_str(tab_inner.x, tab_inner.y + 1, "draw/highlight · widgets/scrollbar", faint);
                 }
             }
 
-            let bw = 36usize;
-            let frac = (start.elapsed().as_millis() % 4000) as f32 / 4000.0;
-            let mut pb = Line::new();
-            for s in bar(frac, bw, Style::new().fg(rgb(0xd4, 0xd4, 0xd4)), Style::new().fg(rgb(0x30, 0x30, 0x30))) {
-                pb.push(s);
+            if tabs.selected != 1 {
+                let bw = 36usize;
+                let frac = (start.elapsed().as_millis() % 4000) as f32 / 4000.0;
+                let mut pb = Line::new();
+                for s in bar(frac, bw, Style::new().fg(rgb(0xd4, 0xd4, 0xd4)), Style::new().fg(rgb(0x30, 0x30, 0x30))) {
+                    pb.push(s);
+                }
+                buf.set_line(
+                    tab_body.x + 2,
+                    tab_body.y + tab_body.height.saturating_sub(2),
+                    &pb,
+                    bw as u16,
+                );
             }
-            buf.set_line(
-                tab_body.x + 2,
-                tab_body.y + tab_body.height.saturating_sub(2),
-                &pb,
-                bw as u16,
-            );
 
             let caret = input.render(buf, input_area, &pal, input_focus && caret_on);
 
@@ -186,7 +217,7 @@ fn main() -> std::io::Result<()> {
             let hint = if input_focus {
                 "input focused · enter sends toast · tab unfocus · ctrl+tab next tab"
             } else {
-                "↑/↓ menu · wheel scrolls zone · right-click menu · tab → input · q quit"
+                "drag log ▐ · wheel scroll · code tab · right-click menu · q quit"
             };
             buf.set_str(2, size.height.saturating_sub(1), hint, faint);
 
@@ -261,7 +292,15 @@ fn main() -> std::io::Result<()> {
                     }
                     _ => {}
                 },
-                Event::Mouse(m) => match m.kind {
+                Event::Mouse(m) => {
+                    let tab_inner = tab_body.inner(1, 1);
+                    if log.handle_mouse(log_inner, m.kind, m.col, m.row)
+                        || (tabs.selected == 1 && code.handle_mouse(tab_inner, m.kind, m.col, m.row))
+                        || menu.handle_mouse(menu_inner, m.kind, m.col, m.row)
+                    {
+                        continue;
+                    }
+                    match m.kind {
                     MouseKind::Down(MouseButton::Left) => {
                         if let Some(idx) = tabs.index_at(tab_bar, m.col, m.row) {
                             tabs.select(idx);
@@ -291,8 +330,6 @@ fn main() -> std::io::Result<()> {
                             ctx.list.select_up();
                         } else if menu_inner.contains(m.col, m.row) {
                             menu.select_up();
-                        } else if log_inner.contains(m.col, m.row) {
-                            log.scroll_by(-3);
                         }
                     }
                     MouseKind::ScrollDown => {
@@ -300,11 +337,15 @@ fn main() -> std::io::Result<()> {
                             ctx.list.select_down();
                         } else if menu_inner.contains(m.col, m.row) {
                             menu.select_down();
-                        } else if log_inner.contains(m.col, m.row) {
-                            log.scroll_by(3);
                         }
                     }
+                    MouseKind::Up => {
+                        log.scrollbar.end_drag();
+                        code.end_drag();
+                        menu.scrollbar.end_drag();
+                    }
                     _ => {}
+                    }
                 },
                 Event::Resize(_, _) => {}
             }

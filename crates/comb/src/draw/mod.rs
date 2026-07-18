@@ -3,4 +3,5 @@
 
 pub mod border;
 pub mod effects;
+pub mod highlight;
 pub mod surface;

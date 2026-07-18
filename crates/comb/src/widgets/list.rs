@@ -2,7 +2,8 @@
 
 use crate::core::buffer::Buffer;
 use crate::core::geom::Rect;
-use crate::widgets::scroll::scrollbar;
+use crate::term::event::MouseKind;
+use crate::widgets::scrollbar::Scrollbar;
 use crate::widgets::Palette;
 
 #[derive(Default)]
@@ -10,6 +11,7 @@ pub struct List {
     pub items: Vec<String>,
     pub selected: usize,
     pub offset: usize,
+    pub scrollbar: Scrollbar,
 }
 
 impl List {
@@ -18,6 +20,7 @@ impl List {
             items,
             selected: 0,
             offset: 0,
+            scrollbar: Scrollbar::default(),
         }
     }
 
@@ -60,7 +63,6 @@ impl List {
         }
     }
 
-    /// Map a screen row inside `area` to the item index it shows, if any.
     pub fn index_at(&self, area: Rect, row: u16) -> Option<usize> {
         if row < area.y || row >= area.bottom() {
             return None;
@@ -75,11 +77,7 @@ impl List {
         }
         let h = area.height as usize;
         let overflow = self.items.len() > h;
-        let list_w = if overflow {
-            area.width.saturating_sub(1)
-        } else {
-            area.width
-        };
+        let list_w = self.scrollbar.content_area(area, overflow).width;
         self.ensure_visible(h);
         self.offset = self.offset.min(self.items.len().saturating_sub(h));
 
@@ -100,15 +98,52 @@ impl List {
         }
 
         if overflow {
-            scrollbar(
-                buf,
-                Rect::new(area.right() - 1, area.y, 1, area.height),
+            let mut bar = self.scrollbar.clone();
+            if bar.style.track == crate::core::style::Style::new() {
+                bar.style.track = pal.track;
+                bar.style.thumb = pal.thumb;
+                bar.style.thumb_active = pal.thumb;
+            }
+            bar.render(buf, bar.area(area), self.items.len(), h, self.offset);
+        }
+    }
+
+    pub fn handle_mouse(&mut self, area: Rect, kind: MouseKind, col: u16, row: u16) -> bool {
+        let h = area.height as usize;
+        let overflow = self.items.len() > h;
+        if !overflow {
+            return false;
+        }
+        let bar_area = self.scrollbar.area(area);
+        if self.scrollbar.is_dragging() || bar_area.contains(col, row) {
+            return self.scrollbar.on_mouse(
+                bar_area,
                 self.items.len(),
-                self.offset,
                 h,
-                pal.thumb,
-                pal.track,
+                &mut self.offset,
+                kind,
+                col,
+                row,
             );
+        }
+        let content = self.scrollbar.content_area(area, true);
+        if !content.contains(col, row) {
+            return false;
+        }
+        match kind {
+            MouseKind::ScrollUp => {
+                self.select_up();
+                true
+            }
+            MouseKind::ScrollDown => {
+                self.select_down();
+                true
+            }
+            MouseKind::Up => {
+                self.scrollbar.end_drag();
+                false
+            }
+            _ => false,
         }
     }
 }
