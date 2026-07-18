@@ -13,6 +13,7 @@ use crate::render::{markdown, wrap};
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.is_empty() {
         app.click_hits.clear();
+        app.set_transcript_max_scroll(0);
         return;
     }
     // Clear the whole transcript band (including the top spacer row) so
@@ -30,6 +31,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     };
     let viewport = target.height as usize;
     let max_scroll = total.saturating_sub(viewport);
+    app.set_transcript_max_scroll(max_scroll);
     let scroll = max_scroll.saturating_sub(app.scroll_from_bottom);
 
     // Remember which screen rows hold expandable headers (thoughts / subagents)
@@ -334,7 +336,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                 out.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        "∴ Thinking",
+                        "Thinking",
                         Style::default().fg(theme.fg).add(Modifier::BOLD),
                     ),
                 ]));
@@ -407,10 +409,6 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
             Style::default().fg(theme.dim),
         ));
     } else {
-        spans.push(Span::styled(
-            "∴ ",
-            Style::default().fg(theme.accent).add(Modifier::BOLD),
-        ));
         spans.push(Span::styled(
             format!("Thought for {:.1}s", th.secs()),
             Style::default().fg(theme.fg).add(Modifier::BOLD),
@@ -578,6 +576,7 @@ mod tests {
         a.apply(AgentEvent::AssistantTextDelta("answer".into()));
         let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("Thought for"));
+        assert!(!t.contains('∴'), "thought rows should be plain text labels");
         assert!(t.contains("tokens"));
         assert!(!t.contains("ponder"));
         assert!(!t.contains("click to show"), "{t}");

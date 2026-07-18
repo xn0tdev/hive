@@ -121,7 +121,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "about",
         aliases: &["help", "version"],
         label: "About",
-        desc: "Mascot, version, what Hive is",
+        desc: "A little info about Hive",
         hint: "",
         takes_arg: false,
         category: Category::Session,

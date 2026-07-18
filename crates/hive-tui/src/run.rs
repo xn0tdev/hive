@@ -186,18 +186,23 @@ fn handle_key(
         _ => {}
     }
 
-    // Blurred: arrows scroll the transcript; printable typing focuses the
-    // composer and falls through so the keystroke is applied. Subagent/plan
-    // views already returned above and keep their own key bindings.
+    // Blurred: Up/Down scroll the transcript when there is room; otherwise
+    // (and for Left/Right/Home/End) focus the composer and fall through so
+    // arrows stay useful after idle blur / click-away. Printable typing also
+    // focuses and falls through. Subagent/plan views already returned above.
     if !app.input_focused {
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up if app.can_scroll_up() => {
                 app.scroll_up(1);
                 return false;
             }
-            KeyCode::Down => {
+            KeyCode::Down if app.can_scroll_down() => {
                 app.scroll_down(1);
                 return false;
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Home
+            | KeyCode::End => {
+                app.focus_input();
             }
             KeyCode::Esc if app.running => {
                 interrupt.store(true, Ordering::Relaxed);
@@ -1096,6 +1101,8 @@ mod tests {
     #[test]
     fn arrows_while_blurred_scroll_without_focusing() {
         let mut app = test_app();
+        // Pretend the last paint had room to scroll (active chat overflow).
+        app.set_transcript_max_scroll(10);
         app.blur_input();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
@@ -1103,6 +1110,106 @@ mod tests {
         assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
+        assert_eq!(app.scroll_from_bottom, 1);
+
+        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt));
+        assert!(!app.input_focused);
+        assert_eq!(app.scroll_from_bottom, 0);
+    }
+
+    #[test]
+    fn arrows_still_scroll_after_idle_blur() {
+        let mut app = test_app();
+        app.set_transcript_max_scroll(10);
+        app.focus_input();
+        app.input_last_activity = std::time::Instant::now().checked_sub(
+            std::time::Duration::from_millis((crate::app::INPUT_IDLE_BLUR_MS + 50) as u64),
+        );
+        assert!(app.tick(), "idle blur should fire");
+        assert!(!app.input_focused);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(!app.input_focused);
+        assert_eq!(app.scroll_from_bottom, 1);
+
+        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt));
+        assert!(!app.input_focused);
+        assert_eq!(app.scroll_from_bottom, 0);
+
+        // Printable typing still auto-focuses after idle blur.
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Char('x')),
+            &tx,
+            &interrupt
+        ));
+        assert!(app.input_focused);
+        assert_eq!(app.input.value, "x");
+    }
+
+    #[test]
+    fn blurred_arrows_focus_when_transcript_cannot_scroll() {
+        // Fresh / short chat: max_scroll is 0. Blurred Up used to bump a
+        // phantom offset with no visual change — felt broken until click.
+        let mut app = test_app();
+        app.set_transcript_max_scroll(0);
+        app.blur_input();
+        app.input.value = "hello".into();
+        app.input.cursor = 5;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(&mut app, key(KeyCode::Left), &tx, &interrupt));
+        assert!(app.input_focused, "Left should restore composer focus");
+        assert_eq!(app.input.cursor, 4);
+
+        app.blur_input();
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(
+            app.input_focused,
+            "Up with nothing to scroll should focus, not no-op"
+        );
+        assert_eq!(app.scroll_from_bottom, 0, "must not accumulate phantom scroll");
+    }
+
+    #[test]
+    fn blurred_up_clamps_to_max_scroll() {
+        let mut app = test_app();
+        app.set_transcript_max_scroll(2);
+        app.blur_input();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(!app.input_focused);
+        assert_eq!(app.scroll_from_bottom, 2, "Up stops at top");
+
+        // Further Up cannot scroll — hand focus back to the composer.
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(app.input_focused);
+        assert_eq!(app.scroll_from_bottom, 2);
+    }
+
+    #[test]
+    fn arrows_work_after_closing_about_while_blurred() {
+        let mut app = test_app();
+        app.set_transcript_max_scroll(5);
+        app.blur_input();
+        app.open_about();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        // Esc closes About; arrows must not stay swallowed afterward.
+        assert!(!handle_key(&mut app, key(KeyCode::Esc), &tx, &interrupt));
+        assert!(!app.about_open());
+        assert!(!app.input_focused);
+
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt));
+        assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
     }
 

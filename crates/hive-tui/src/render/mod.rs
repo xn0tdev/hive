@@ -40,6 +40,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.buffer().paint(area, Style::default());
     if app.is_empty_chat() {
         app.click_hits.clear();
+        // Landing has no scrollable transcript — keep scroll state honest so
+        // blurred arrows don't accumulate a phantom offset.
+        app.set_transcript_max_scroll(0);
         draw_landing(f, area, app);
     } else {
         draw_active(f, area, app);

@@ -99,6 +99,9 @@ pub struct App {
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
+    /// Max scroll offset from the last transcript paint (`total - viewport`).
+    /// Used to clamp scroll and to decide whether blurred arrows can move the view.
+    pub(crate) transcript_max_scroll: usize,
     /// Files / images queued for the next user message (shown as tags).
     pub(crate) pending_attaches: Vec<PendingAttach>,
     /// Roles offered in the Switch-model picker.
@@ -180,6 +183,7 @@ impl App {
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
+            transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             model_choices: init.model_choices,
             palette: None,
@@ -536,11 +540,31 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(n);
+        let next = self.scroll_from_bottom.saturating_add(n);
+        self.scroll_from_bottom = next.min(self.transcript_max_scroll);
     }
 
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(n);
+    }
+
+    /// True when Up can move the transcript toward older content.
+    pub fn can_scroll_up(&self) -> bool {
+        self.scroll_from_bottom < self.transcript_max_scroll
+    }
+
+    /// True when Down can move the transcript back toward the bottom.
+    pub fn can_scroll_down(&self) -> bool {
+        self.scroll_from_bottom > 0
+    }
+
+    /// Remember how far the transcript can scroll (from the last paint) and
+    /// pin `scroll_from_bottom` so phantom Ups on a short view don't stick.
+    pub fn set_transcript_max_scroll(&mut self, max: usize) {
+        self.transcript_max_scroll = max;
+        if self.scroll_from_bottom > max {
+            self.scroll_from_bottom = max;
+        }
     }
 
     pub fn push_user(&mut self, text: String) {
@@ -1242,6 +1266,21 @@ mod tests {
         assert!(a.tick(), "idle blur should request a redraw");
         assert!(!a.input_focused);
         assert!(a.input_last_activity.is_none());
+    }
+
+    #[test]
+    fn transcript_scroll_clamps_to_max() {
+        let mut a = app();
+        a.set_transcript_max_scroll(3);
+        a.scroll_up(100);
+        assert_eq!(a.scroll_from_bottom, 3);
+        a.set_transcript_max_scroll(1);
+        assert_eq!(a.scroll_from_bottom, 1, "shrinking max must unpin phantom offset");
+        assert!(!a.can_scroll_up());
+        assert!(a.can_scroll_down());
+        a.scroll_down(1);
+        assert_eq!(a.scroll_from_bottom, 0);
+        assert!(!a.can_scroll_down());
     }
 
     #[test]

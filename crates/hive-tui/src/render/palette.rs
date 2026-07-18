@@ -23,7 +23,7 @@ struct PaletteGeom {
 
 fn geom(area: Rect, list_rows: u16) -> PaletteGeom {
     let w = (area.width / 2).clamp(MIN_W, MAX_W).min(area.width);
-    let list_h = list_rows.min(MAX_LIST).max(1);
+    let list_h = list_rows.clamp(1, MAX_LIST);
     let h = (PAD_Y * 2 + CHROME_ROWS + list_h)
         .min(area.height.saturating_sub(2))
         .max(PAD_Y * 2 + CHROME_ROWS + 1);

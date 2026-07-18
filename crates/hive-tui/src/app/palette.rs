@@ -167,7 +167,7 @@ impl PaletteState {
     }
 
     pub fn insert(&mut self, ch: char, choices: &[ModelChoice]) {
-        self.search_focused = true;
+        self.focus_search();
         let idx = self.byte_at(self.cursor);
         self.query.insert(idx, ch);
         self.cursor += 1;
