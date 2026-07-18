@@ -1,17 +1,16 @@
-//! A showcase for `comb`: a selectable menu list and a scrollable log — each its
-//! own wheel-scroll zone — plus a spinner gallery, a progress bar, and a
-//! right-click context-menu overlay. All over the terminal's own background.
+//! A showcase for `comb`: menus, scroll zones, overlays, spinners, tabs, toasts,
+//! a text input, and a sparkline — all over the terminal's own background.
 //!
-//! Run in a real terminal: `cargo run -p comb --example demo`
-//! Keys: ↑/↓ move · enter runs · right-click for a context menu · esc/q quit.
-//! Mouse: wheel over the menu or the log scrolls that zone · click to select.
+//! Run: `cargo run -p comb --example demo`
+//! Keys: ↑/↓ · enter · tab focuses input · ctrl+tab cycles tabs · q quits.
+//! Mouse: wheel scrolls hovered zone · click tabs · right-click context menu.
 
 use std::time::{Duration, Instant};
 
-use comb::effects::{bar, shimmer, SPINNERS};
+use comb::effects::{bar, shimmer, sparkline, SPINNERS};
 use comb::{
-    Border, Color, Event, KeyCode, Line, Menu, MouseButton, MouseKind, MouseMode, Palette, Rect,
-    ScrollView, Span, Style, Terminal,
+    Border, Color, Event, KeyCode, Line, Menu, MouseButton, MouseKind, MouseMode, Palette,
+    Rect, ScrollView, Span, Style, Tabs, Terminal, TextInput, Toasts,
 };
 use comb::widgets::List;
 
@@ -27,7 +26,6 @@ fn main() -> std::io::Result<()> {
     let faint = Style::new().fg(rgb(0x63, 0x63, 0x63));
     let dim = Style::new().fg(rgb(0x9c, 0x9c, 0x9c));
 
-    // Palettes: one for panels over the terminal bg, one for the opaque overlay.
     let pal = Palette {
         panel: Style::new().bg(rgb(0x22, 0x22, 0x22)),
         border: Style::new().fg(rgb(0x6a, 0x6a, 0x6a)),
@@ -43,46 +41,65 @@ fn main() -> std::io::Result<()> {
     };
 
     let mut menu = List::new(
-        [
-            "New file", "Open…", "Save", "Save as…", "Close", "Undo", "Redo", "Cut", "Copy",
-            "Paste", "Find", "Replace", "Settings", "Toggle theme", "Quit",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
+        ["New", "Open", "Save", "Copy", "Paste", "Find", "Settings", "Quit"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     );
-
     let mut log = ScrollView::new(
         (1..=40)
             .map(|i| {
                 Line::from(vec![
                     Span::styled(format!(" {i:>2}  "), faint),
-                    Span::styled(format!("event #{i:03}  "), dim),
-                    Span::styled("processed batch, all good".to_string(), faint),
+                    Span::styled(format!("#{i:03}  "), dim),
+                    Span::styled("ok".to_string(), faint),
                 ])
             })
             .collect(),
     );
-
     let mut ctx = Menu::new(
-        ["Copy", "Paste", "Rename", "Delete", "Properties"]
+        ["Copy", "Paste", "Delete"].iter().map(|s| s.to_string()).collect(),
+    );
+    let mut tabs = Tabs::new(
+        ["widgets", "metrics", "about"]
             .iter()
             .map(|s| s.to_string())
             .collect(),
     );
+    let mut input = TextInput::with_placeholder("type a toast message…");
+    let mut toasts = Toasts::default();
+
     let mut ctx_at: Option<(u16, u16)> = None;
+    let mut input_focus = false;
     let mut status = String::from("ready");
     let mut quit = false;
 
     while !quit {
+        toasts.tick();
         let phase = (start.elapsed().as_millis() / 90) as usize;
         let size = term.size();
+        let caret_on = phase % 16 < 10;
 
-        let menu_panel = Rect::new(2, 3, 30, 14);
-        let menu_inner = Rect::new(3, 4, 28, 12);
-        let log_panel = Rect::new(34, 3, 44, 14);
-        let log_inner = Rect::new(35, 4, 42, 12);
-        let spin_panel = Rect::new(80, 3, size.width.saturating_sub(82).min(20), 14);
+        let menu_panel = Rect::new(2, 3, 28, 12);
+        let menu_inner = Rect::new(3, 4, 26, 10);
+        let log_panel = Rect::new(32, 3, 40, 12);
+        let log_inner = Rect::new(33, 4, 38, 10);
+        let spin_w = size.width.saturating_sub(76).min(18);
+        let spin_panel = Rect::new(74, 3, spin_w, 12);
+
+        let content_w = size.width.saturating_sub(4).min(70);
+        let footer_rows = 2u16;
+        let input_h = 3u16;
+        let tab_body_h = 5u16;
+        let tab_bar_h = 2u16;
+        let bottom = size.height.saturating_sub(footer_rows);
+        let input_y = bottom.saturating_sub(input_h);
+        let tab_body_y = input_y.saturating_sub(tab_body_h);
+        let tab_bar_y = tab_body_y.saturating_sub(tab_bar_h);
+
+        let tab_bar = Rect::new(2, tab_bar_y, content_w, tab_bar_h);
+        let tab_body = Rect::new(2, tab_body_y, content_w, tab_body_h);
+        let input_area = Rect::new(2, input_y, content_w.min(52), input_h);
 
         term.draw(|f| {
             let bright = Style::new().fg(rgb(0xe6, 0xe6, 0xe6)).bold();
@@ -94,57 +111,94 @@ fn main() -> std::io::Result<()> {
                 &Line::from(shimmer("comb — a native TUI engine", phase)),
                 size.width.saturating_sub(4),
             );
-            buf.set_str(2, 1, "menus · scroll zones · wheel · overlays · spinners", faint);
+            buf.set_str(2, 1, "menus · scroll · tabs · toast · input · sparkline", faint);
 
-            // Menu (selectable, scrollable).
             buf.border_title(menu_panel, Border::Rounded, pal.border, &Line::from(Span::styled("menu", bright)));
             menu.render(buf, menu_inner, &pal);
 
-            // Log (scrollable zone with a scrollbar).
-            buf.border_title(log_panel, Border::Rounded, pal.border, &Line::from(Span::styled("log — wheel to scroll", bright)));
+            buf.border_title(log_panel, Border::Rounded, pal.border, &Line::from(Span::styled("log", bright)));
             log.render(buf, log_inner, &pal);
 
-            // Spinner gallery.
-            if spin_panel.width >= 10 {
-                buf.border_title(spin_panel, Border::Rounded, pal.border, &Line::from(Span::styled("spinners", bright)));
-                for (i, sp) in SPINNERS.iter().enumerate() {
+            if spin_panel.width >= 8 {
+                buf.border_title(spin_panel, Border::Rounded, pal.border, &Line::from(Span::styled("spin", bright)));
+                for (i, sp) in SPINNERS.iter().take(8).enumerate() {
                     let y = spin_panel.y + 1 + i as u16;
                     if y >= spin_panel.bottom() - 1 {
                         break;
                     }
-                    buf.set_str(spin_panel.x + 2, y, sp.frame(phase), bright);
-                    buf.set_str(spin_panel.x + 5, y, sp.name, dim);
+                    buf.set_str(spin_panel.x + 1, y, sp.frame(phase), bright);
+                    buf.set_str(spin_panel.x + 3, y, sp.name, dim);
                 }
             }
 
-            // Progress bar.
-            let by = menu_panel.bottom() + 1;
-            let bw = 42usize;
+            tabs.render(buf, tab_bar, &pal);
+            buf.border(tab_body, Border::Rounded, pal.border);
+            match tabs.selected {
+                0 => {
+                    let lines = [
+                        " List — selectable menu rows + scrollbar",
+                        " ScrollView — wheel-scroll zone",
+                        " Menu — right-click overlay layer",
+                        " Tabs / Toast / TextInput — this demo",
+                    ];
+                    for (i, l) in lines.iter().enumerate() {
+                        buf.set_str(tab_body.x + 2, tab_body.y + 1 + i as u16, l, dim);
+                    }
+                }
+                1 => {
+                    let t = start.elapsed().as_secs_f32();
+                    let values: Vec<f32> = (0..48)
+                        .map(|i| {
+                            let x = i as f32 / 8.0 + t;
+                            (x.sin() * 0.4 + 0.5).clamp(0.05, 0.95)
+                        })
+                        .collect();
+                    buf.set_str(tab_body.x + 2, tab_body.y + 1, "throughput (live)", dim);
+                    let w = tab_body.width.saturating_sub(4) as usize;
+                    let mut line = Line::new();
+                    for s in sparkline(&values, w, Style::new().fg(rgb(0xc8, 0xc8, 0xc8))) {
+                        line.push(s);
+                    }
+                    buf.set_line(tab_body.x + 2, tab_body.y + 3, &line, w as u16);
+                }
+                _ => {
+                    buf.set_str(tab_body.x + 2, tab_body.y + 1, "comb — surfaces, layers, diffed ANSI", dim);
+                    buf.set_str(tab_body.x + 2, tab_body.y + 2, "core · draw · term · widgets", faint);
+                }
+            }
+
+            let bw = 36usize;
             let frac = (start.elapsed().as_millis() % 4000) as f32 / 4000.0;
-            buf.set_str(2, by, "progress", dim);
             let mut pb = Line::new();
             for s in bar(frac, bw, Style::new().fg(rgb(0xd4, 0xd4, 0xd4)), Style::new().fg(rgb(0x30, 0x30, 0x30))) {
                 pb.push(s);
             }
-            buf.set_line(2, by + 1, &pb, bw as u16);
-            buf.set_str(2 + bw as u16 + 2, by + 1, &format!("{:>3.0}%", frac * 100.0), dim);
-
-            // Status + footer.
-            buf.set_str(2, size.height.saturating_sub(2), &format!("status: {status}"), dim);
-            buf.set_str(
-                2,
-                size.height.saturating_sub(1),
-                "↑/↓ select · enter run · right-click menu · wheel scrolls the hovered zone · q quits",
-                faint,
+            buf.set_line(
+                tab_body.x + 2,
+                tab_body.y + tab_body.height.saturating_sub(2),
+                &pb,
+                bw as u16,
             );
 
-            // Context menu overlay (drawn last, floats on top).
+            let caret = input.render(buf, input_area, &pal, input_focus && caret_on);
+
+            buf.set_str(2, size.height.saturating_sub(2), &format!("status: {status}"), dim);
+            let hint = if input_focus {
+                "input focused · enter sends toast · tab unfocus · ctrl+tab next tab"
+            } else {
+                "↑/↓ menu · wheel scrolls zone · right-click menu · tab → input · q quit"
+            };
+            buf.set_str(2, size.height.saturating_sub(1), hint, faint);
+
             if let Some((cx, cy)) = ctx_at {
                 ctx.render(f, cx, cy, 100, &ctx_pal);
             }
+            toasts.render(f, 150, &pal);
+            if let Some((cx, cy)) = caret {
+                f.set_cursor(cx, cy);
+            }
         })?;
 
-        // Drain input each frame (motion floods), blocking up to 40ms when idle.
         let mut first = true;
         loop {
             let ms = if first { 40 } else { 0 };
@@ -152,10 +206,26 @@ fn main() -> std::io::Result<()> {
                 break;
             };
             first = false;
+
+            if input_focus {
+                match handle_input_key(&mut input, &mut toasts, &mut status, &ev) {
+                    InputResult::Quit => {
+                        quit = true;
+                        break;
+                    }
+                    InputResult::Unfocus => input_focus = false,
+                    InputResult::Stay => {}
+                }
+                continue;
+            }
+
             match ev {
                 Event::Key(k) => match k.code {
                     KeyCode::Char('q') => quit = true,
                     KeyCode::Char('c') if k.mods.ctrl => quit = true,
+                    KeyCode::Tab if k.mods.ctrl && k.mods.shift => tabs.select_prev(),
+                    KeyCode::Tab if k.mods.ctrl => tabs.select_next(),
+                    KeyCode::Tab => input_focus = true,
                     KeyCode::Esc => {
                         if ctx_at.is_some() {
                             ctx_at = None;
@@ -179,27 +249,36 @@ fn main() -> std::io::Result<()> {
                     }
                     KeyCode::Enter => {
                         if ctx_at.is_some() {
-                            status = format!("action: {}", ctx.list.selected_item().unwrap_or(""));
+                            let msg = ctx.list.selected_item().unwrap_or("").to_string();
+                            status = format!("action: {msg}");
+                            toasts.show(format!("{msg}"), Duration::from_secs(2));
                             ctx_at = None;
                         } else {
-                            status = format!("ran: {}", menu.selected_item().unwrap_or(""));
+                            let msg = menu.selected_item().unwrap_or("").to_string();
+                            status = format!("ran: {msg}");
+                            toasts.show(format!("ran {msg}"), Duration::from_secs(2));
                         }
                     }
                     _ => {}
                 },
                 Event::Mouse(m) => match m.kind {
                     MouseKind::Down(MouseButton::Left) => {
-                        if let Some((cx, cy)) = ctx_at {
+                        if let Some(idx) = tabs.index_at(tab_bar, m.col, m.row) {
+                            tabs.select(idx);
+                        } else if let Some((cx, cy)) = ctx_at {
                             if let Some(idx) = ctx.index_at(cx, cy, m.col, m.row) {
                                 ctx.list.select(idx);
-                                status = format!("action: {}", ctx.list.selected_item().unwrap_or(""));
+                                let msg = ctx.list.selected_item().unwrap_or("").to_string();
+                                status = format!("action: {msg}");
+                                toasts.show(msg.clone(), Duration::from_secs(2));
                             }
                             ctx_at = None;
-                        } else if let Some(idx) = menu.index_at(menu_inner, m.row) {
-                            if menu_inner.contains(m.col, m.row) {
+                        } else if menu_inner.contains(m.col, m.row) {
+                            if let Some(idx) = menu.index_at(menu_inner, m.row) {
                                 menu.select(idx);
-                                status = format!("selected: {}", menu.selected_item().unwrap_or(""));
                             }
+                        } else if input_area.contains(m.col, m.row) {
+                            input_focus = true;
                         }
                     }
                     MouseKind::Down(MouseButton::Right) => {
@@ -232,4 +311,50 @@ fn main() -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_input_key(
+    input: &mut TextInput,
+    toasts: &mut Toasts,
+    status: &mut String,
+    ev: &Event,
+) -> InputResult {
+    let Event::Key(k) = ev else {
+        return InputResult::Stay;
+    };
+    match k.code {
+        KeyCode::Char('q') if k.mods.ctrl => InputResult::Quit,
+        KeyCode::Esc | KeyCode::Tab => InputResult::Unfocus,
+        KeyCode::Enter => {
+            let text = input.take();
+            if !text.trim().is_empty() {
+                *status = format!("toast: {text}");
+                toasts.show(text, Duration::from_secs(2));
+            }
+            InputResult::Stay
+        }
+        KeyCode::Char(c) if !k.mods.ctrl => {
+            input.insert(c);
+            InputResult::Stay
+        }
+        KeyCode::Backspace => {
+            input.backspace();
+            InputResult::Stay
+        }
+        KeyCode::Left => {
+            input.left();
+            InputResult::Stay
+        }
+        KeyCode::Right => {
+            input.right();
+            InputResult::Stay
+        }
+        _ => InputResult::Stay,
+    }
+}
+
+enum InputResult {
+    Stay,
+    Unfocus,
+    Quit,
 }

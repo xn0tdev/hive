@@ -104,3 +104,24 @@ pub fn bar(fraction: f32, width: usize, filled: Style, empty: Style) -> Vec<Span
     }
     out
 }
+
+const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// A tiny inline sparkline: `values` in `[0, 1]`, resampled to `width` cells.
+pub fn sparkline(values: &[f32], width: usize, style: Style) -> Vec<Span> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if values.is_empty() {
+        return vec![Span::styled(" ".repeat(width), style)];
+    }
+    let n = values.len();
+    let mut s = String::with_capacity(width);
+    for i in 0..width {
+        let idx = i * n / width;
+        let v = values[idx.min(n - 1)].clamp(0.0, 1.0);
+        let ch = SPARK[(v * 7.0).round() as usize];
+        s.push(ch);
+    }
+    vec![Span::styled(s, style)]
+}

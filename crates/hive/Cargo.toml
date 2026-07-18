@@ -12,7 +12,7 @@ path = "src/main.rs"
 hive-core = { workspace = true }
 hive-llm = { workspace = true }
 hive-agent = { workspace = true }
-hive-tui = { workspace = true }
+comb-tui = { workspace = true }
 comb = { workspace = true }
 
 tokio = { workspace = true }

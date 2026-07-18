@@ -15,8 +15,8 @@ use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
+use comb_tui::TuiInit;
 use hive_llm::FireworksProvider;
-use hive_tui::TuiInit;
 
 use crate::config;
 use crate::driver;
@@ -100,7 +100,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         driver::run(agent, input_rx, driver_events, driver_interrupt, driver_cfg).await;
     });
 
-    tokio::task::spawn_blocking(move || hive_tui::run(tui_init, event_rx, input_tx, interrupt))
+    tokio::task::spawn_blocking(move || comb_tui::run(tui_init, event_rx, input_tx, interrupt))
         .await??;
 
     Ok(())

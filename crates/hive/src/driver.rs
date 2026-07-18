@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use comb_tui::InputCommand;
 use hive_agent::{Agent, UserInput};
 use hive_core::config::{AppConfig, ModelRole};
 use hive_core::event::{AgentEvent, EventSender};
-use hive_tui::InputCommand;
 
 pub async fn run(
     mut agent: Agent,

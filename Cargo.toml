@@ -35,10 +35,10 @@ regex = "1"
 # swarm + skills + vision), tui (frontend on the native `comb` engine), and the
 # hive binary that wires them.
 comb = { path = "crates/comb" }
+comb-tui = { path = "crates/comb-tui" }
 hive-core = { path = "crates/hive-core" }
 hive-llm = { path = "crates/hive-llm" }
 hive-agent = { path = "crates/hive-agent" }
-hive-tui = { path = "crates/hive-tui" }
 
 [profile.release]
 lto = "thin"
