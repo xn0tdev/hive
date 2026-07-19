@@ -39,15 +39,11 @@ pub fn plan_path(cwd: &Path) -> PathBuf {
 /// True when `path` (relative or absolute) resolves to the plan file.
 pub fn is_plan_path(cwd: &Path, path: &str) -> bool {
     let trimmed = path.trim();
-    if trimmed == PLAN_REL_PATH || trimmed.ends_with("/.hive/Plan.md") {
+    if trimmed == PLAN_REL_PATH {
         return true;
     }
-    let full = if Path::new(trimmed).is_absolute() {
-        PathBuf::from(trimmed)
-    } else {
-        cwd.join(trimmed)
-    };
-    full == plan_path(cwd)
+    let path = Path::new(trimmed);
+    path.is_absolute() && path == plan_path(cwd)
 }
 
 /// Tools the model may call while in PLAN mode (writes still path-gated).
@@ -121,8 +117,16 @@ mod tests {
     fn plan_mode_allows_plan_write() {
         let cwd = Path::new("/tmp/proj");
         assert!(plan_mode_check("write_file", Some(PLAN_REL_PATH), cwd).is_ok());
+        assert!(plan_mode_check("write_file", Some("/tmp/proj/.hive/Plan.md"), cwd).is_ok());
         assert!(plan_mode_check("write_file", Some("src/main.rs"), cwd).is_err());
         assert!(plan_mode_check("read_file", Some("src/main.rs"), cwd).is_ok());
+    }
+
+    #[test]
+    fn plan_mode_rejects_plan_path_outside_workspace() {
+        let cwd = Path::new("/tmp/proj");
+        assert!(plan_mode_check("write_file", Some("/tmp/other/.hive/Plan.md"), cwd).is_err());
+        assert!(plan_mode_check("write_file", Some("other/.hive/Plan.md"), cwd).is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Right-hand project panel on wide terminals: name, branch, Sub agents
-//! (running + completed, with tokens), then changed files with +green / -red.
+//! Right-hand project panel on wide terminals: name, branch, Context,
+//! Sub agents (running + completed, with tokens), then Changes (+green / -red).
+//! Body sections are click-to-collapse.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -8,15 +9,67 @@ use std::time::{Duration, Instant};
 
 use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 use hive_core::event::SubagentStatus;
+use hive_core::SidebarMode;
 
 use crate::app::state::SubagentCard;
 use crate::app::App;
 
+/// Collapsible sidebar body sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarSection {
+    Context,
+    Subagents,
+    Changes,
+}
+
+/// In-memory expand/collapse flags for sidebar sections.
+#[derive(Clone, Debug)]
+pub struct SidebarSections {
+    pub context: bool,
+    pub subagents: bool,
+    pub changes: bool,
+}
+
+impl Default for SidebarSections {
+    fn default() -> Self {
+        Self {
+            context: true,
+            subagents: true,
+            changes: true,
+        }
+    }
+}
+
+impl SidebarSections {
+    pub fn toggle(&mut self, section: SidebarSection) {
+        match section {
+            SidebarSection::Context => self.context = !self.context,
+            SidebarSection::Subagents => self.subagents = !self.subagents,
+            SidebarSection::Changes => self.changes = !self.changes,
+        }
+    }
+
+    pub fn expanded(&self, section: SidebarSection) -> bool {
+        match section {
+            SidebarSection::Context => self.context,
+            SidebarSection::Subagents => self.subagents,
+            SidebarSection::Changes => self.changes,
+        }
+    }
+}
+
 /// Show the sidebar when the terminal is at least this wide.
 pub const MIN_TERM_WIDTH: u16 = 110;
-/// Preferred sidebar content width (not including left gap).
-pub const WIDTH: u16 = 34;
+/// Narrowest usable panel.
+pub const MIN_WIDTH: u16 = 24;
+/// Widest panel — leave room for the chat column.
+pub const MAX_WIDTH: u16 = 56;
 const REFRESH: Duration = Duration::from_secs(2);
+
+/// Clamp a preferred width into the allowed range.
+pub fn clamp_width(w: u16) -> u16 {
+    w.clamp(MIN_WIDTH, MAX_WIDTH)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ChangedFile {
@@ -163,12 +216,24 @@ fn numstat(cwd: &str, args: &[&str]) -> Vec<(u32, u32, String)> {
     out
 }
 
-/// Layout helper: sidebar width when the terminal is wide enough and open.
-pub fn width_for(term_width: u16, open: bool) -> u16 {
-    if open && term_width >= MIN_TERM_WIDTH {
-        WIDTH
-    } else {
-        0
+/// Layout helper: sidebar width from terminal size + UI prefs.
+pub fn width_for(term_width: u16, open: bool, mode: SidebarMode, preferred: u16) -> u16 {
+    if term_width < MIN_TERM_WIDTH {
+        return 0;
+    }
+    // Keep enough room for the chat band (~48 cols + gaps).
+    let term_cap = term_width.saturating_sub(52).clamp(MIN_WIDTH, MAX_WIDTH);
+    let w = clamp_width(preferred).min(term_cap);
+    match mode {
+        SidebarMode::Hidden => 0,
+        SidebarMode::Pinned => w,
+        SidebarMode::Auto => {
+            if open {
+                w
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -177,10 +242,13 @@ pub fn available(term_width: u16) -> bool {
     term_width >= MIN_TERM_WIDTH
 }
 
-/// Draw the project panel. Records `app.sidebar_toggle_hit` for the hide control (`›`).
+/// Draw the project panel. Records `app.sidebar_toggle_hit` for the hide control (`›`)
+/// and `app.sidebar_section_hits` for collapsible section headers.
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.width < 12 || area.height < 4 {
         app.sidebar_toggle_hit = None;
+        app.sidebar_resize_hit = None;
+        app.sidebar_section_hits.clear();
         return;
     }
     // Opaque fill so collapsing width / shorter file lists cannot bleed.
@@ -189,8 +257,18 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let snap = &app.project;
     let w = area.width as usize;
 
-    // Header: "Project" left, hide control `›` right.
-    let hide = "›";
+    // Invisible drag handle on the left edge — stretch the panel left/right.
+    app.sidebar_resize_hit = Some(Rect {
+        x: area.x.saturating_sub(1),
+        y: area.y,
+        width: 2,
+        height: area.height,
+    });
+    app.sidebar_right_edge = area.right();
+
+    // Header: "Project" left; hide `›` only in auto mode.
+    let can_hide = app.ui.sidebar_mode == SidebarMode::Auto;
+    let hide = if can_hide { "›" } else { "" };
     let title = "Project";
     let pad = w.saturating_sub(title.chars().count() + hide.chars().count());
     buf.set_line(
@@ -209,12 +287,16 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         ]),
         area.width,
     );
-    app.sidebar_toggle_hit = Some(Rect {
-        x: area.x + area.width.saturating_sub(2),
-        y: area.y,
-        width: 2,
-        height: 1,
-    });
+    app.sidebar_toggle_hit = if can_hide {
+        Some(Rect {
+            x: area.x + area.width.saturating_sub(2),
+            y: area.y,
+            width: 2,
+            height: 1,
+        })
+    } else {
+        None
+    };
 
     let body = Rect {
         x: area.x,
@@ -223,55 +305,160 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         height: area.height.saturating_sub(1),
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        truncate(&snap.name, w),
-        Style::default().fg(theme.fg).add(Modifier::BOLD),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled("· ", Style::default().fg(theme.faint)),
-        Span::styled(
-            truncate(&snap.branch, w.saturating_sub(2)),
-            Style::default().fg(theme.dim),
-        ),
-    ]));
+    // Logical lines + which (if any) section header they are, for hit-testing
+    // after clip to the visible body.
+    let mut lines: Vec<(Line, Option<SidebarSection>)> = Vec::new();
+    lines.push((
+        Line::from(Span::styled(
+            truncate(&snap.name, w),
+            Style::default().fg(theme.fg).add(Modifier::BOLD),
+        )),
+        None,
+    ));
+    lines.push((
+        Line::from(vec![
+            Span::styled("· ", Style::default().fg(theme.faint)),
+            Span::styled(
+                truncate(&snap.branch, w.saturating_sub(2)),
+                Style::default().fg(theme.dim),
+            ),
+        ]),
+        None,
+    ));
 
-    // Sub agents sit directly under Project so a long Changes list cannot
-    // push them below the visible sidebar height.
+    let collapsible = app.ui.sidebar_collapse_sections;
+
+    // Context — project instruction files injected into the system prompt.
+    lines.push((Line::from(""), None));
+    let ctx_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Context);
+    lines.push((
+        section_header("Context", ctx_open, collapsible, theme),
+        if collapsible {
+            Some(SidebarSection::Context)
+        } else {
+            None
+        },
+    ));
+    if ctx_open {
+        if app.context_files.is_empty() {
+            lines.push((
+                Line::from(Span::styled("none", Style::default().fg(theme.faint))),
+                None,
+            ));
+        } else {
+            for f in &app.context_files {
+                let label = if f.rel_path == f.name {
+                    f.name.clone()
+                } else {
+                    f.rel_path.clone()
+                };
+                lines.push((
+                    Line::from(Span::styled(
+                        truncate(&label, w),
+                        Style::default().fg(theme.dim),
+                    )),
+                    None,
+                ));
+            }
+        }
+    }
+
+    // Sub agents sit above Changes so a long file list cannot push them out.
     let agents = app.sidebar_subagents();
     if !agents.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Sub agents",
-            Style::default().fg(theme.faint).add(Modifier::BOLD),
-        )));
-        for card in agents {
-            lines.push(agent_line(card, app, w));
+        lines.push((Line::from(""), None));
+        let open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Subagents);
+        lines.push((
+            section_header("Sub agents", open, collapsible, theme),
+            if collapsible {
+                Some(SidebarSection::Subagents)
+            } else {
+                None
+            },
+        ));
+        if open {
+            for card in agents {
+                lines.push((agent_line(card, app, w), None));
+            }
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Changes",
-        Style::default().fg(theme.faint).add(Modifier::BOLD),
-    )));
+    lines.push((Line::from(""), None));
+    let ch_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Changes);
+    lines.push((
+        section_header("Changes", ch_open, collapsible, theme),
+        if collapsible {
+            Some(SidebarSection::Changes)
+        } else {
+            None
+        },
+    ));
+    if ch_open {
+        if snap.files.is_empty() {
+            lines.push((
+                Line::from(Span::styled(
+                    "clean working tree",
+                    Style::default().fg(theme.faint),
+                )),
+                None,
+            ));
+        } else {
+            for f in &snap.files {
+                lines.push((file_line(f, app, w), None));
+            }
+        }
+    }
 
-    if snap.files.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "clean working tree",
-            Style::default().fg(theme.faint),
-        )));
+    let draw_lines: Vec<Line> = lines.iter().map(|(l, _)| l.clone()).collect();
+    buf.set_lines(body, &draw_lines, 0);
+
+    app.sidebar_section_hits.clear();
+    let visible = body.height as usize;
+    for (i, (_, section)) in lines.iter().enumerate().take(visible) {
+        if let Some(sec) = section {
+            app.sidebar_section_hits.push((
+                Rect {
+                    x: body.x,
+                    y: body.y + i as u16,
+                    width: body.width,
+                    height: 1,
+                },
+                *sec,
+            ));
+        }
+    }
+}
+
+fn section_header(
+    label: &str,
+    expanded: bool,
+    collapsible: bool,
+    theme: &crate::theme::Theme,
+) -> Line {
+    let mark = if !collapsible {
+        ""
+    } else if expanded {
+        "▾ "
     } else {
-        for f in &snap.files {
-            lines.push(file_line(f, app, w));
-        }
-    }
-
-    buf.set_lines(body, &lines, 0);
+        "▸ "
+    };
+    Line::from(vec![
+        Span::styled(mark.to_string(), Style::default().fg(theme.dim)),
+        Span::styled(
+            label.to_string(),
+            Style::default().fg(theme.faint).add(Modifier::BOLD),
+        ),
+    ])
 }
 
 /// Collapsed affordance on the far right — click `‹` to reopen the panel.
 pub fn draw_collapsed_toggle(buf: &mut Buffer, area: Rect, app: &mut App) {
+    app.sidebar_section_hits.clear();
+    app.sidebar_resize_hit = None;
+    if app.ui.sidebar_mode != SidebarMode::Auto {
+        app.sidebar_toggle_hit = None;
+        return;
+    }
     if area.width == 0 || area.height == 0 {
         app.sidebar_toggle_hit = None;
         return;
@@ -429,9 +616,12 @@ mod tests {
             model: "m".into(),
             model_display: "Model".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0".into(),
+            ui: Default::default(),
         })
     }
 
@@ -516,6 +706,7 @@ mod tests {
         draw(&mut buf, Rect::new(0, 0, 34, 16), &mut app);
         let text = buf.text();
 
+        assert!(text.contains("Context"), "missing Context section: {text}");
         assert!(text.contains("Sub agents"), "missing section label: {text}");
         assert!(text.contains("Checking"), "running agent missing: {text}");
         assert!(
@@ -524,11 +715,12 @@ mod tests {
         );
         assert!(text.contains("2.6k"), "token count missing: {text}");
 
+        let ctx_at = text.find("Context").expect("Context");
         let sub_at = text.find("Sub agents").expect("Sub agents");
         let changes_at = text.find("Changes").expect("Changes");
         assert!(
-            sub_at < changes_at,
-            "Sub agents must appear above Changes so a long file list cannot clip it"
+            ctx_at < sub_at && sub_at < changes_at,
+            "section order Context → Sub agents → Changes"
         );
         // Within a short sidebar, the section header itself must be on-screen
         // (not only present in the logical line list past the clip).
@@ -540,6 +732,56 @@ mod tests {
         assert!(
             visible.contains("Checking"),
             "running agent clipped out of viewport: {visible}"
+        );
+    }
+
+    #[test]
+    fn width_clamps_and_respects_term() {
+        assert_eq!(clamp_width(10), MIN_WIDTH);
+        assert_eq!(clamp_width(99), MAX_WIDTH);
+        assert_eq!(clamp_width(34), 34);
+        assert_eq!(width_for(200, true, SidebarMode::Pinned, 34), 34);
+        assert_eq!(width_for(200, true, SidebarMode::Pinned, 99), MAX_WIDTH);
+        assert_eq!(width_for(100, true, SidebarMode::Pinned, 40), 0);
+    }
+
+    #[test]
+    fn collapsing_changes_hides_file_rows() {
+        let mut app = test_app();
+        app.project = ProjectSnapshot {
+            name: "hive".into(),
+            branch: "main".into(),
+            files: vec![ChangedFile {
+                path: "src/main.rs".into(),
+                added: 3,
+                deleted: 1,
+                untracked: false,
+            }],
+            fetched_at: Some(Instant::now()),
+        };
+        app.context_files = vec![hive_core::ContextFile {
+            name: "AGENTS.md".into(),
+            rel_path: "AGENTS.md".into(),
+        }];
+
+        let mut buf = Buffer::blank(Size::new(40, 20));
+        draw(&mut buf, Rect::new(0, 0, 34, 20), &mut app);
+        let open = buf.text();
+        assert!(open.contains("src/main.rs"), "{open}");
+        assert!(open.contains("AGENTS.md"), "{open}");
+        assert!(open.contains('▾'), "expanded marker: {open}");
+
+        app.sidebar_sections.changes = false;
+        app.sidebar_sections.context = false;
+        let mut buf2 = Buffer::blank(Size::new(40, 20));
+        draw(&mut buf2, Rect::new(0, 0, 34, 20), &mut app);
+        let closed = buf2.text();
+        assert!(!closed.contains("src/main.rs"), "{closed}");
+        assert!(!closed.contains("AGENTS.md"), "{closed}");
+        assert!(closed.contains('▸'), "collapsed marker: {closed}");
+        assert!(
+            !app.sidebar_section_hits.is_empty(),
+            "section headers should be clickable"
         );
     }
 }

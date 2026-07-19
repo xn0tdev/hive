@@ -2,25 +2,31 @@
 
 mod app;
 mod commands;
+mod intro;
 mod render;
 mod run;
 mod sound;
 mod theme;
 
+use hive_core::event::ConnectionInfo;
 use hive_core::message::ImageSource;
 use hive_core::AgentMode;
+use hive_core::UiConfig;
 
+pub use intro::{run_intro, IntroOpts, IntroPrefill, IntroResult, SetupDraft, PRESETS};
 pub use run::run;
 
-/// A selectable model role / id for the Switch-model picker.
+/// A selectable model for the Switch-model picker.
 #[derive(Debug, Clone)]
 pub struct ModelChoice {
-    /// Value passed to `SetModel` (role name or provider id).
+    /// Value passed to `SetModel` (provider id).
     pub key: String,
     /// Pretty label in the picker.
     pub display: String,
-    /// Secondary text (e.g. role name).
+    /// Secondary text (badges / short id).
     pub detail: String,
+    /// Section header (provider or org).
+    pub group: String,
 }
 
 /// Everything the TUI needs to know at startup.
@@ -29,11 +35,17 @@ pub struct TuiInit {
     pub model: String,
     /// Pretty label shown in the footer.
     pub model_display: String,
-    /// Roles / models offered in the Switch-model picker.
+    /// Seed rows for the Switch-model picker (replaced by live catalog).
     pub model_choices: Vec<ModelChoice>,
+    /// Saved `/connect` providers.
+    pub connections: Vec<ConnectionInfo>,
+    /// Active connection profile id.
+    pub active_connection: String,
     pub cwd: String,
     pub theme: String,
     pub version: String,
+    /// Chat / sidebar prefs from `[ui]` in config.toml.
+    pub ui: UiConfig,
 }
 
 /// Messages the TUI sends to the agent driver.
@@ -44,6 +56,32 @@ pub enum InputCommand {
         images: Vec<ImageSource>,
         mode: AgentMode,
     },
-    SetModel(String),
+    /// Switch the active model (`display` is the TUI label).
+    SetModel {
+        id: String,
+        display: String,
+    },
+    /// Refresh the `/model` picker from `GET /models` + models.dev.
+    FetchModels,
+    /// Activate a saved `/connect` profile.
+    SetConnection {
+        id: String,
+    },
+    /// Add/update a provider profile and activate it.
+    UpsertConnection {
+        id: String,
+        label: String,
+        base_url: String,
+        api_key_env: String,
+        api_key: String,
+        model_id: String,
+        model_name: String,
+    },
+    /// Remove a saved provider profile.
+    RemoveConnection {
+        id: String,
+    },
     Clear,
+    /// Persist UI prefs into `~/.config/hive/config.toml`.
+    SaveUi(UiConfig),
 }

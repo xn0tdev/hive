@@ -32,6 +32,7 @@ base64 = "0.22"
 ignore = "0.4"
 globset = "0.4"
 regex = "1"
+libc = "0.2"
 
 # Local path + version so `cargo publish` can resolve crates.io deps.
 # `comb-tui` on crates.io; Rust crate name stays `comb`.

@@ -1,23 +1,21 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
-/// Named model roles the agent can route work to. The model behind each role is
-/// configurable; the agent only ever refers to roles, never hardcoded ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// Legacy role name kept so older tool calls / configs still parse.
+/// Everything resolves to the single configured model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelRole {
+    #[default]
     Default,
-    Smart,
-    Fast,
-    Vision,
 }
 
 impl ModelRole {
     pub fn parse(s: &str) -> Option<ModelRole> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "default" | "main" => Some(ModelRole::Default),
-            "smart" | "deep" | "backend" => Some(ModelRole::Smart),
-            "fast" | "simple" | "quick" => Some(ModelRole::Fast),
-            "vision" | "image" => Some(ModelRole::Vision),
+            "default" | "main" | "smart" | "deep" | "backend" | "fast" | "simple" | "quick"
+            | "vision" | "image" => Some(ModelRole::Default),
             _ => None,
         }
     }
@@ -92,10 +90,8 @@ fn short_model_id(model: &str) -> &str {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
+    /// The one model Hive uses for chat, tools, and subagents.
     pub default: ModelRef,
-    pub smart: ModelRef,
-    pub fast: ModelRef,
-    pub vision: ModelRef,
 }
 
 impl Default for ModelsConfig {
@@ -104,18 +100,6 @@ impl Default for ModelsConfig {
             default: ModelRef::Named {
                 id: "accounts/fireworks/routers/kimi-k2p6-fast".into(),
                 name: Some("Kimi Fast".into()),
-            },
-            smart: ModelRef::Named {
-                id: "accounts/fireworks/models/glm-5p2".into(),
-                name: Some("GLM 5.2".into()),
-            },
-            fast: ModelRef::Named {
-                id: "accounts/fireworks/models/deepseek-v4-flash".into(),
-                name: Some("DeepSeek Flash".into()),
-            },
-            vision: ModelRef::Named {
-                id: "accounts/fireworks/models/kimi-k2p6".into(),
-                name: Some("Kimi".into()),
             },
         }
     }
@@ -136,6 +120,29 @@ impl Default for VisionConfig {
                 "accounts/fireworks/models/kimi-k2p6".to_string(),
                 "accounts/fireworks/routers/kimi-k2p6-fast".to_string(),
             ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchBackend {
+    #[default]
+    Exa,
+    Perplexity,
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    pub backend: SearchBackend,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            backend: SearchBackend::Exa,
         }
     }
 }
@@ -161,6 +168,26 @@ impl Default for ExaConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct PerplexityConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl Default for PerplexityConfig {
+    fn default() -> Self {
+        PerplexityConfig {
+            api_key_env: "PERPLEXITY_API_KEY".to_string(),
+            api_key: None,
+            base_url: "https://api.perplexity.ai".to_string(),
+            model: "sonar".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct SwarmConfig {
     pub max_concurrent: usize,
     pub max_depth: usize,
@@ -175,16 +202,83 @@ impl Default for SwarmConfig {
     }
 }
 
+/// How the right project panel behaves on wide terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarMode {
+    /// User can show/hide with the › control (default).
+    #[default]
+    Auto,
+    /// Always open; hide control disabled.
+    Pinned,
+    /// Always hidden (even on wide terminals).
+    Hidden,
+}
+
+impl SidebarMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SidebarMode::Auto => "auto",
+            SidebarMode::Pinned => "pinned",
+            SidebarMode::Hidden => "hidden",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarMode::Auto => "auto",
+            SidebarMode::Pinned => "pinned",
+            SidebarMode::Hidden => "hidden",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            SidebarMode::Auto => SidebarMode::Pinned,
+            SidebarMode::Pinned => SidebarMode::Hidden,
+            SidebarMode::Hidden => SidebarMode::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub theme: String,
+    /// Set true after first-run intro (or when the user skips an existing config).
+    #[serde(default)]
+    pub setup_complete: bool,
+    /// Keep reasoning/thought blocks expanded in the transcript.
+    #[serde(default)]
+    pub thoughts_always_open: bool,
+    /// Right panel: auto / pinned / hidden.
+    #[serde(default)]
+    pub sidebar_mode: SidebarMode,
+    /// Allow ▾/▸ collapse on Context / Sub agents / Changes.
+    #[serde(default = "default_true")]
+    pub sidebar_collapse_sections: bool,
+    /// Right panel width in columns (clamped in the TUI to min/max).
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sidebar_width() -> u16 {
+    34
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         UiConfig {
-            theme: "mocha".to_string(),
+            theme: "gray".to_string(),
+            setup_complete: false,
+            thoughts_always_open: false,
+            sidebar_mode: SidebarMode::Auto,
+            sidebar_collapse_sections: true,
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -194,6 +288,29 @@ impl Default for UiConfig {
 pub struct Secrets {
     pub provider_api_key: String,
     pub exa_api_key: Option<String>,
+    pub perplexity_api_key: Option<String>,
+}
+
+/// One saved provider profile (`/connect`).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectionProfile {
+    pub label: String,
+    pub base_url: String,
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub model: ModelRef,
+}
+
+/// Saved providers + which one is active. Mirrored into `[provider]` / `[models]`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectionsConfig {
+    /// Id key in `profiles`.
+    #[serde(default)]
+    pub active: String,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ConnectionProfile>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -202,45 +319,38 @@ pub struct AppConfig {
     pub provider: ProviderConfig,
     pub models: ModelsConfig,
     pub vision: VisionConfig,
+    pub search: SearchConfig,
     pub exa: ExaConfig,
+    pub perplexity: PerplexityConfig,
     pub swarm: SwarmConfig,
     pub ui: UiConfig,
+    /// Reserved for multi-provider support.
+    #[serde(default)]
+    pub connections: ConnectionsConfig,
     #[serde(skip)]
     pub secrets: Secrets,
 }
 
 impl AppConfig {
-    fn model_ref(&self, role: ModelRole) -> &ModelRef {
-        match role {
-            ModelRole::Default => &self.models.default,
-            ModelRole::Smart => &self.models.smart,
-            ModelRole::Fast => &self.models.fast,
-            ModelRole::Vision => &self.models.vision,
-        }
+    fn model_ref(&self, _role: ModelRole) -> &ModelRef {
+        &self.models.default
     }
 
-    /// Resolve the concrete provider model id for a role.
+    /// Resolve the configured model id (`role` is ignored — one model only).
     pub fn model(&self, role: ModelRole) -> &str {
         self.model_ref(role).id()
     }
 
-    /// Pretty display name for a role (UI).
+    /// Pretty display name for the configured model.
     pub fn model_display(&self, role: ModelRole) -> &str {
         self.model_ref(role).display_name()
     }
 
-    /// Look up a display name for a concrete id (role match or short id).
+    /// Look up a display name for a concrete id (configured model or short id).
     pub fn display_for_model_id(&self, id: &str) -> String {
-        for role in [
-            ModelRole::Default,
-            ModelRole::Smart,
-            ModelRole::Fast,
-            ModelRole::Vision,
-        ] {
-            let r = self.model_ref(role);
-            if r.id() == id {
-                return r.display_name().to_string();
-            }
+        let r = &self.models.default;
+        if r.id() == id {
+            return r.display_name().to_string();
         }
         short_model_id(id).to_string()
     }

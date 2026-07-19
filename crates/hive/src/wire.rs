@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use hive_core::config::{AppConfig, ModelRole};
+use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
@@ -53,7 +53,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
     let vision: Arc<dyn VisionDescriber> = Arc::new(DescribeVision::new(
         provider.clone(),
-        cfg.models.vision.id().to_string(),
+        cfg.models.default.id().to_string(),
     ));
     let tools = all_tools();
 
@@ -76,27 +76,23 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let default_display = cfg.models.default.display_name().to_string();
     let agent = builder.build(event_tx.clone(), default_model.clone(), 0, spawner);
 
-    let model_choices = [
-        (ModelRole::Default, "default"),
-        (ModelRole::Smart, "smart"),
-        (ModelRole::Fast, "fast"),
-        (ModelRole::Vision, "vision"),
-    ]
-    .into_iter()
-    .map(|(role, key)| ModelChoice {
-        key: key.to_string(),
-        display: cfg.model_display(role).to_string(),
-        detail: key.to_string(),
-    })
-    .collect();
+    let model_choices = vec![ModelChoice {
+        key: default_model.clone(),
+        display: default_display.clone(),
+        detail: String::new(),
+        group: "Configured".into(),
+    }];
 
     let tui_init = TuiInit {
         model: default_model,
         model_display: default_display,
         model_choices,
+        connections: config::connection_infos(&cfg),
+        active_connection: cfg.connections.active.clone(),
         cwd: cwd.display().to_string(),
         theme: cfg.ui.theme.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        ui: cfg.ui.clone(),
     };
 
     install_panic_hook();
@@ -150,5 +146,4 @@ When asked to commit changes:
 4. Commit with `git commit -m "..."`.
 5. Show the resulting `git log -1 --stat`.
 
-Prefer the `fast` model role for this kind of work.
 "#;

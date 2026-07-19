@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use comb::{Event, Key, KeyCode, Mouse, MouseButton, MouseKind, Terminal};
+use comb::{Event, Key, KeyCode, Mouse, MouseButton, MouseKind, MouseMode, Terminal};
 use tokio::sync::mpsc::UnboundedSender;
 
 use hive_core::event::EventReceiver;
@@ -41,6 +41,8 @@ pub fn run(
     // comb enters raw mode + the alternate screen and turns on mouse reporting;
     // its `Drop` restores everything, so there's no manual teardown here.
     let mut terminal = Terminal::new()?;
+    // Need button-drag reports so the sidebar left edge can be resized.
+    terminal.mouse_mode(MouseMode::Drag)?;
     let mut app = App::new(init);
 
     run_loop(&mut terminal, &mut app, &mut events, &input_tx, &interrupt)
@@ -95,10 +97,105 @@ fn run_loop(
                     // repaint). Flag dirty so idle sessions never skip it.
                     dirty = true;
                 }
+                Event::Paste(text) => {
+                    if handle_paste(app, &text) {
+                        dirty = true;
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Bracketed paste / clipboard paste. Returns whether the UI should redraw.
+fn handle_paste(app: &mut App, text: &str) -> bool {
+    if app.about_open() || app.settings_open() {
+        return false;
+    }
+    if app.palette_open() {
+        return paste_into_palette(app, text);
+    }
+    if app.in_special_view() && !(app.in_plan_view() && app.plan_view.amending) {
+        return false;
+    }
+
+    app.focus_input();
+
+    let trimmed = text.trim();
+    // Lone path paste → attach, same as submit-time path detect.
+    if app.input.is_empty()
+        && !trimmed.is_empty()
+        && !trimmed.contains('\n')
+        && !trimmed.contains(' ')
+    {
+        if let Some(leftover) = app.try_attach_pasted_path(trimmed) {
+            if leftover.is_empty() {
+                app.flash(format!("Attached {}", app.attachment_tags_line()));
+                app.reset_menu();
+                return true;
+            }
+        }
+    }
+
+    app.input.insert_str(text);
+    app.reset_menu();
+    true
+}
+
+fn sanitize_api_key(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn paste_into_palette(app: &mut App, text: &str) -> bool {
+    let mode = app.palette.as_ref().map(|p| p.mode);
+    match mode {
+        Some(PaletteMode::ConnectPresets) => {
+            let idx = app.palette.as_ref().and_then(|p| p.selected_preset_idx());
+            let Some(idx) = idx else {
+                return false;
+            };
+            let cleaned = sanitize_api_key(text);
+            if cleaned.is_empty() {
+                return false;
+            }
+            app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
+            let choices = app.model_choices.clone();
+            let connections = app.connections.clone();
+            if let Some(pal) = app.palette.as_mut() {
+                pal.insert_str(&cleaned, &choices, &connections);
+            }
+            true
+        }
+        Some(PaletteMode::ConnectKey { .. }) => {
+            let cleaned = sanitize_api_key(text);
+            if cleaned.is_empty() {
+                return false;
+            }
+            let choices = app.model_choices.clone();
+            let connections = app.connections.clone();
+            if let Some(pal) = app.palette.as_mut() {
+                pal.insert_str(&cleaned, &choices, &connections);
+            }
+            true
+        }
+        Some(_) => {
+            if text.is_empty() {
+                return false;
+            }
+            let choices = app.model_choices.clone();
+            let connections = app.connections.clone();
+            if let Some(pal) = app.palette.as_mut() {
+                pal.insert_str(text, &choices, &connections);
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+fn read_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 /// Returns true when the user asked to quit.
@@ -113,11 +210,15 @@ fn handle_key(
     let shift = key.mods.shift;
 
     let special = app.in_special_view();
-    let menu_open = !special
+    let slash_menu =
+        !special && !app.palette_open() && !app.about_open() && !app.slash_items().is_empty();
+    let file_menu = !special
         && !app.palette_open()
         && !app.about_open()
-        && app.slash_prefix().is_some()
-        && !app.menu_items().is_empty();
+        && app.slash_items().is_empty()
+        && app.at_mention().is_some()
+        && !app.file_menu_items().is_empty();
+    let menu_open = slash_menu || file_menu;
 
     // Any key other than ctrl+c cancels a pending quit confirmation.
     if !(ctrl && key.code == KeyCode::Char('c')) {
@@ -127,6 +228,10 @@ fn handle_key(
     // About overlay captures keys while open (esc / Ctrl+P).
     if app.about_open() {
         return handle_about_key(app, key);
+    }
+
+    if app.settings_open() {
+        return handle_settings_key(app, key, input_tx);
     }
 
     // Plan preview: section select / amend / Build / back.
@@ -200,7 +305,11 @@ fn handle_key(
                 app.scroll_down(1);
                 return false;
             }
-            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Home
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
             | KeyCode::End => {
                 app.focus_input();
             }
@@ -226,7 +335,11 @@ fn handle_key(
         KeyCode::Tab if !menu_open => {
             app.toggle_agent_mode();
         }
-        KeyCode::Enter if menu_open => {
+        KeyCode::Enter if file_menu => {
+            complete_selected(app);
+            composer_activity = true;
+        }
+        KeyCode::Enter if slash_menu => {
             // Commands with an argument get completed; the rest run at once.
             if let Some(cmd) = app.menu_selected() {
                 if cmd.takes_arg {
@@ -252,6 +365,19 @@ fn handle_key(
         // Ctrl+J → newline when the host remaps it to Char('j')+CTRL.
         KeyCode::Char('j') if ctrl => {
             app.input.newline();
+            composer_activity = true;
+        }
+        // Ctrl+V / Insert → system clipboard (bracketed paste is Event::Paste).
+        KeyCode::Char('v') | KeyCode::Char('V') if ctrl => {
+            if let Some(text) = read_clipboard_text() {
+                let _ = handle_paste(app, &text);
+            }
+            composer_activity = true;
+        }
+        KeyCode::Insert => {
+            if let Some(text) = read_clipboard_text() {
+                let _ = handle_paste(app, &text);
+            }
             composer_activity = true;
         }
         KeyCode::Char(ch) if !ctrl => {
@@ -330,12 +456,8 @@ fn handle_key(
 /// Palette / About overlays are keyboard-only — mouse events are swallowed so
 /// they don't leak through to the chat underneath.
 /// Returns `true` when the UI should redraw.
-fn handle_mouse(
-    app: &mut App,
-    m: Mouse,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
-    if app.about_open() || app.palette_open() {
+fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    if app.about_open() || app.palette_open() || app.settings_open() {
         return false;
     }
     match m.kind {
@@ -352,9 +474,24 @@ fn handle_mouse(
                 app.blur_input();
                 return true;
             }
+            if let Some(hit) = app.sidebar_resize_hit {
+                if hit.contains(m.col, m.row) {
+                    app.sidebar_resizing = true;
+                    app.blur_input();
+                    return true;
+                }
+            }
             if let Some(hit) = app.sidebar_toggle_hit {
                 if hit.contains(m.col, m.row) {
                     app.toggle_sidebar();
+                    app.blur_input();
+                    return true;
+                }
+            }
+            for (hit, section) in &app.sidebar_section_hits {
+                if hit.contains(m.col, m.row) {
+                    let section = *section;
+                    app.toggle_sidebar_section(section);
                     app.blur_input();
                     return true;
                 }
@@ -403,7 +540,23 @@ fn handle_mouse(
             }
             false
         }
-        // Motion / drag / release must not thrash the redraw loop.
+        MouseKind::Drag if app.sidebar_resizing => {
+            let edge = app.sidebar_right_edge;
+            let next = render::clamp_width(edge.saturating_sub(m.col));
+            if next != app.ui.sidebar_width {
+                app.ui.sidebar_width = next;
+                true
+            } else {
+                false
+            }
+        }
+        MouseKind::Up if app.sidebar_resizing => {
+            app.sidebar_resizing = false;
+            app.ui.sidebar_width = render::clamp_width(app.ui.sidebar_width);
+            let _ = input_tx.send(InputCommand::SaveUi(app.ui.clone()));
+            true
+        }
+        // Motion / other releases must not thrash the redraw loop.
         _ => false,
     }
 }
@@ -524,18 +677,23 @@ fn copy_last_answer(app: &mut App) {
     app.flash("Copied");
 }
 
-/// Replace the input with the selected command (plus a space if it wants an
-/// argument), keeping the user typing.
+/// Complete slash command or `@file` mention from the floating menu.
 fn complete_selected(app: &mut App) {
-    if let Some(cmd) = app.menu_selected() {
-        let text = if cmd.takes_arg {
-            format!("/{} ", cmd.name)
-        } else {
-            format!("/{}", cmd.name)
-        };
-        app.input.value = text;
-        app.input.end();
-        app.reset_menu();
+    if !app.slash_items().is_empty() {
+        if let Some(cmd) = app.menu_selected() {
+            let text = if cmd.takes_arg {
+                format!("/{} ", cmd.name)
+            } else {
+                format!("/{}", cmd.name)
+            };
+            app.input.value = text;
+            app.input.end();
+            app.reset_menu();
+        }
+        return;
+    }
+    if let Some(path) = app.file_menu_selected() {
+        app.complete_at_file(&path);
     }
 }
 
@@ -604,9 +762,9 @@ fn handle_slash(app: &mut App, cmd: &str, input_tx: &UnboundedSender<InputComman
     let name = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
 
-    // Removed command: steer users to attach / paste.
-    if name.eq_ignore_ascii_case("image") {
-        app.notice(" /image was removed — paste a path or use /attach <path>");
+    // Removed command: paste a path instead.
+    if name.eq_ignore_ascii_case("image") || name.eq_ignore_ascii_case("attach") {
+        app.notice(" /attach was removed — paste a file path into the composer");
         return false;
     }
 
@@ -633,21 +791,81 @@ fn run_command(
         }
         CmdId::Model => {
             if arg.is_empty() {
-                app.open_model_picker();
+                app.open_model_picker(input_tx);
             } else {
-                let _ = input_tx.send(InputCommand::SetModel(arg.to_string()));
+                let display = arg.rsplit('/').next().unwrap_or(arg).to_string();
+                let _ = input_tx.send(InputCommand::SetModel {
+                    id: arg.to_string(),
+                    display,
+                });
             }
         }
-        CmdId::Attach => match app.attach_path(arg) {
-            Ok(tag) => app.flash(format!("Attached {tag}")),
-            Err(e) => app.notice(e),
-        },
         CmdId::Copy => copy_last_answer(app),
         CmdId::Cost => app.notice(format!(
             "tokens — prompt {} · completion {} · total {}",
             app.usage.prompt_tokens, app.usage.completion_tokens, app.usage.total_tokens
         )),
+        CmdId::Connect => app.open_connect_picker(),
         CmdId::About => app.open_about(),
+        CmdId::Settings => app.open_settings(),
+    }
+    false
+}
+
+fn handle_settings_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    let ctrl = key.mods.ctrl;
+    match key.code {
+        KeyCode::Esc => {
+            if let Some(st) = app.settings.as_mut() {
+                if st.back() {
+                    app.close_settings();
+                }
+            }
+        }
+        KeyCode::Up => {
+            if let Some(st) = app.settings.as_mut() {
+                st.move_up();
+            }
+        }
+        KeyCode::Down => {
+            if let Some(st) = app.settings.as_mut() {
+                st.move_down();
+            }
+        }
+        KeyCode::Enter | KeyCode::Right => {
+            let width_row = app
+                .settings
+                .as_ref()
+                .is_some_and(|st| {
+                    st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+                });
+            let changed = if width_row {
+                crate::app::settings::nudge_width(app, 2)
+            } else {
+                crate::app::settings::activate(app)
+            };
+            if changed {
+                app.persist_ui(input_tx);
+            }
+        }
+        KeyCode::Left => {
+            let width_row = app
+                .settings
+                .as_ref()
+                .is_some_and(|st| {
+                    st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+                });
+            if width_row && crate::app::settings::nudge_width(app, -2) {
+                app.persist_ui(input_tx);
+            }
+        }
+        KeyCode::Char('p') if ctrl => {
+            app.close_settings();
+            app.open_palette();
+        }
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        _ => {}
     }
     false
 }
@@ -667,22 +885,31 @@ fn handle_about_key(app: &mut App, key: Key) -> bool {
     false
 }
 
-fn handle_palette_key(
-    app: &mut App,
-    key: Key,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
+fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let ctrl = key.mods.ctrl;
     let choices = app.model_choices.clone();
+    let connections = app.connections.clone();
+
+    // Ctrl+V / Insert / Shift+Insert → system clipboard (bracketed paste is Event::Paste).
+    let wants_clipboard = (ctrl && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')))
+        || matches!(key.code, KeyCode::Insert);
+    if wants_clipboard {
+        if let Some(text) = read_clipboard_text() {
+            let _ = paste_into_palette(app, &text);
+        }
+        return false;
+    }
 
     match key.code {
         KeyCode::Esc => {
             if let Some(pal) = app.palette.as_ref() {
-                if pal.mode == PaletteMode::Models {
-                    // Back to the main command list.
-                    app.open_palette();
-                } else {
-                    app.close_palette();
+                match pal.mode {
+                    PaletteMode::Models | PaletteMode::Connect => app.open_palette(),
+                    PaletteMode::ConnectPresets => app.open_connect_picker(),
+                    PaletteMode::ConnectKey { .. } => {
+                        app.palette = Some(crate::app::palette::PaletteState::connect_presets());
+                    }
+                    PaletteMode::Commands => app.close_palette(),
                 }
             } else {
                 app.close_palette();
@@ -697,9 +924,9 @@ fn handle_palette_key(
             let visible = app.palette_list_visible as usize;
             if let Some(pal) = app.palette.as_mut() {
                 if visible > 0 {
-                    pal.move_up_visible(&choices, visible);
+                    pal.move_up_visible(&choices, &connections, visible);
                 } else {
-                    pal.move_up(&choices);
+                    pal.move_up(&choices, &connections);
                 }
             }
         }
@@ -707,16 +934,16 @@ fn handle_palette_key(
             let visible = app.palette_list_visible as usize;
             if let Some(pal) = app.palette.as_mut() {
                 if visible > 0 {
-                    pal.move_down_visible(&choices, visible);
+                    pal.move_down_visible(&choices, &connections, visible);
                 } else {
-                    pal.move_down(&choices);
+                    pal.move_down(&choices, &connections);
                 }
             }
         }
         KeyCode::Enter => return activate_palette(app, input_tx),
         KeyCode::Backspace => {
             if let Some(pal) = app.palette.as_mut() {
-                pal.backspace(&choices);
+                pal.backspace(&choices, &connections);
             }
         }
         KeyCode::Left => {
@@ -731,7 +958,7 @@ fn handle_palette_key(
         }
         KeyCode::Char(ch) if !ctrl => {
             if let Some(pal) = app.palette.as_mut() {
-                pal.insert(ch, &choices);
+                pal.insert(ch, &choices, &connections);
             }
         }
         _ => {}
@@ -743,16 +970,84 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
     let mode = app.palette.as_ref().map(|p| p.mode);
     match mode {
         Some(PaletteMode::Models) => {
-            let key = app
+            let picked = app
                 .palette
                 .as_ref()
                 .and_then(|p| p.selected_model(&app.model_choices))
-                .map(|c| c.key.clone());
+                .map(|c| (c.key.clone(), c.display.clone()));
             app.close_palette();
-            if let Some(key) = key {
-                let _ = input_tx.send(InputCommand::SetModel(key));
+            if let Some((id, display)) = picked {
+                let _ = input_tx.send(InputCommand::SetModel { id, display });
                 app.flash("Switching model…");
             }
+            false
+        }
+        Some(PaletteMode::Connect) => {
+            use crate::app::palette::ConnectRow;
+            let row = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_connect(&app.connections))
+                .map(|r| match r {
+                    ConnectRow::Profile(c) => ConnectPick::Profile(c.id.clone()),
+                    ConnectRow::Add => ConnectPick::Add,
+                    ConnectRow::RemoveActive => ConnectPick::Remove,
+                });
+            match row {
+                Some(ConnectPick::Profile(id)) => {
+                    app.close_palette();
+                    let _ = input_tx.send(InputCommand::SetConnection { id });
+                    app.flash("Switching provider…");
+                }
+                Some(ConnectPick::Add) => {
+                    app.palette = Some(crate::app::palette::PaletteState::connect_presets());
+                }
+                Some(ConnectPick::Remove) => {
+                    let id = app.active_connection.clone();
+                    if !id.is_empty() {
+                        let _ = input_tx.send(InputCommand::RemoveConnection { id });
+                        app.flash("Removing provider…");
+                    }
+                }
+                None => {}
+            }
+            false
+        }
+        Some(PaletteMode::ConnectPresets) => {
+            let idx = app.palette.as_ref().and_then(|p| p.selected_preset_idx());
+            if let Some(idx) = idx {
+                app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
+            }
+            false
+        }
+        Some(PaletteMode::ConnectKey { preset_idx }) => {
+            let key = app
+                .palette
+                .as_ref()
+                .map(|p| p.query.trim().to_string())
+                .unwrap_or_default();
+            if key.is_empty() {
+                app.flash("Paste an API key");
+                return false;
+            }
+            let preset = crate::PRESETS.get(preset_idx).copied();
+            let Some(preset) = preset else {
+                return false;
+            };
+            let id = unique_connection_id(preset.label, &app.connections);
+            let model_id = app.model.clone();
+            let model_name = app.model_display.clone();
+            app.close_palette();
+            let _ = input_tx.send(InputCommand::UpsertConnection {
+                id,
+                label: preset.label.to_string(),
+                base_url: preset.base_url.to_string(),
+                api_key_env: preset.api_key_env.to_string(),
+                api_key: key,
+                model_id,
+                model_name,
+            });
+            app.flash(format!("Connecting {}…", preset.label));
             false
         }
         Some(PaletteMode::Commands) => {
@@ -771,14 +1066,11 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
             app.close_palette();
             match id {
                 Some(CmdId::Model) => {
-                    app.open_model_picker();
+                    app.open_model_picker(input_tx);
                     false
                 }
-                Some(CmdId::Attach) => {
-                    app.focus_input();
-                    app.input.value = "/attach ".into();
-                    app.input.cursor = app.input.value.chars().count();
-                    app.note_input_activity();
+                Some(CmdId::Connect) => {
+                    app.open_connect_picker();
                     false
                 }
                 Some(_id) if takes_arg => {
@@ -798,6 +1090,41 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
     }
 }
 
+enum ConnectPick {
+    Profile(String),
+    Add,
+    Remove,
+}
+
+fn unique_connection_id(label: &str, existing: &[hive_core::event::ConnectionInfo]) -> String {
+    let base: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-').to_string();
+    let base = if base.is_empty() {
+        "provider".into()
+    } else {
+        base
+    };
+    if !existing.iter().any(|c| c.id == base) {
+        return base;
+    }
+    for n in 2..100 {
+        let candidate = format!("{base}-{n}");
+        if !existing.iter().any(|c| c.id == candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-x")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,16 +1140,21 @@ mod tests {
                     key: "default".into(),
                     display: "Default".into(),
                     detail: "default".into(),
+                    group: "Test".into(),
                 },
                 crate::ModelChoice {
                     key: "fast".into(),
                     display: "Fast".into(),
                     detail: "fast".into(),
+                    group: "Test".into(),
                 },
             ],
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         })
     }
 
@@ -893,7 +1225,7 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::Model) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone());
+                pal.move_down(&app.model_choices.clone(), &app.connections.clone());
             }
         }
         assert_eq!(
@@ -905,9 +1237,20 @@ mod tests {
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Models)
         );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::FetchModels)
+        ));
+        app.models_catalog = crate::app::ModelsCatalogState::Ready;
+        if let Some(pal) = app.palette.as_mut() {
+            pal.clamp_selection(&app.model_choices.clone(), &app.connections.clone());
+        }
         assert!(!activate_palette(&mut app, &tx));
         match rx.try_recv() {
-            Ok(InputCommand::SetModel(k)) => assert_eq!(k, "default"),
+            Ok(InputCommand::SetModel { id, display }) => {
+                assert_eq!(id, "default");
+                assert_eq!(display, "Default");
+            }
             other => panic!("expected SetModel, got {other:?}"),
         }
     }
@@ -944,7 +1287,7 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::About) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone());
+                pal.move_down(&app.model_choices.clone(), &app.connections.clone());
             }
         }
         assert_eq!(
@@ -994,9 +1337,10 @@ mod tests {
     #[test]
     fn palette_models_esc_returns_to_commands() {
         let mut app = test_app();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
-        app.open_model_picker();
+        app.open_model_picker(&tx);
+        let _ = rx.try_recv(); // FetchModels
         assert_eq!(
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Models)
@@ -1038,6 +1382,59 @@ mod tests {
             &tx
         ));
         assert!(app.about_open());
+    }
+
+    #[test]
+    fn paste_inserts_multiline_into_composer() {
+        let mut app = test_app();
+        app.blur_input();
+        assert!(handle_paste(&mut app, "hello\r\nworld"));
+        assert!(app.input_focused);
+        assert_eq!(app.input.value, "hello\nworld");
+        assert_eq!(app.input.cursor, app.input.value.chars().count());
+    }
+
+    #[test]
+    fn paste_into_connect_key_strips_whitespace() {
+        let mut app = test_app();
+        app.palette = Some(crate::app::palette::PaletteState::connect_key(0));
+        assert!(handle_paste(&mut app, " sk-abc \n"));
+        let q = app.palette.as_ref().unwrap().query.clone();
+        assert_eq!(q, "sk-abc");
+    }
+
+    #[test]
+    fn at_mention_completes_file_into_input() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("hive-at-run-{n}"));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/hello.rs"), "fn main() {}").unwrap();
+
+        let mut app = App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: vec![],
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: dir.to_string_lossy().into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+        });
+        app.input.value = "look @hel".into();
+        app.input.cursor = app.input.value.chars().count();
+        assert!(app.at_mention().is_some());
+        let items = app.file_menu_items();
+        assert!(items.iter().any(|p| p == "src/hello.rs"), "items={items:?}");
+        app.complete_at_file("src/hello.rs");
+        assert_eq!(app.input.value, "look `src/hello.rs` ");
+        assert!(app.at_mention().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1172,7 +1569,10 @@ mod tests {
             app.input_focused,
             "Up with nothing to scroll should focus, not no-op"
         );
-        assert_eq!(app.scroll_from_bottom, 0, "must not accumulate phantom scroll");
+        assert_eq!(
+            app.scroll_from_bottom, 0,
+            "must not accumulate phantom scroll"
+        );
     }
 
     #[test]

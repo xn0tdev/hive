@@ -1,10 +1,13 @@
-//! Short-lived status toasts — soft strip, centered near the bottom.
+//! Short-lived status toasts — soft text on the last row of a given band.
 
 use comb::{Frame, Line, Rect, Span, Style};
 
 use crate::app::App;
 
-/// Draw the current flash as a centered soft pill on the last row of `area`.
+/// Draw the current flash centered on the last row of `area`.
+///
+/// Callers choose the band: landing uses the screen bottom; active chat uses
+/// the transcript band so the toast sits above the input and never fights BUILD.
 pub fn draw(f: &mut Frame, area: Rect, app: &App) -> bool {
     let Some(msg) = app.flash_text() else {
         return false;
@@ -23,7 +26,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) -> bool {
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(1);
 
-    // No background — just faint centered text so it doesn't look like a bar.
     let style = Style::default().fg(theme.dim);
     f.buffer()
         .set_line(x, y, &Line::from(Span::styled(label, style)), w);

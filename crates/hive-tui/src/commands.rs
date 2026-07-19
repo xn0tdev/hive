@@ -5,10 +5,11 @@
 pub enum CmdId {
     Clear,
     Model,
-    Attach,
+    Connect,
     Copy,
     Cost,
     About,
+    Settings,
     Quit,
 }
 
@@ -16,7 +17,6 @@ pub enum CmdId {
 pub enum Category {
     Suggested,
     Session,
-    Files,
 }
 
 impl Category {
@@ -24,7 +24,6 @@ impl Category {
         match self {
             Category::Suggested => "Suggested",
             Category::Session => "Session",
-            Category::Files => "Files",
         }
     }
 
@@ -32,7 +31,6 @@ impl Category {
         match self {
             Category::Suggested => 0,
             Category::Session => 1,
-            Category::Files => 2,
         }
     }
 }
@@ -62,8 +60,20 @@ pub const COMMANDS: &[CommandDef] = &[
         aliases: &[],
         label: "Switch model",
         desc: "Change the active model",
-        hint: "[id·role]",
+        hint: "[id]",
         takes_arg: true,
+        category: Category::Session,
+        shortcut: None,
+        suggested: true,
+    },
+    CommandDef {
+        id: CmdId::Connect,
+        name: "connect",
+        aliases: &["provider", "providers"],
+        label: "Providers",
+        desc: "Add or switch API providers",
+        hint: "",
+        takes_arg: false,
         category: Category::Session,
         shortcut: None,
         suggested: true,
@@ -79,18 +89,6 @@ pub const COMMANDS: &[CommandDef] = &[
         category: Category::Session,
         shortcut: None,
         suggested: true,
-    },
-    CommandDef {
-        id: CmdId::Attach,
-        name: "attach",
-        aliases: &[],
-        label: "Attach file",
-        desc: "Attach a file to the next message",
-        hint: "<path>",
-        takes_arg: true,
-        category: Category::Files,
-        shortcut: None,
-        suggested: false,
     },
     CommandDef {
         id: CmdId::Copy,
@@ -115,6 +113,18 @@ pub const COMMANDS: &[CommandDef] = &[
         category: Category::Session,
         shortcut: None,
         suggested: false,
+    },
+    CommandDef {
+        id: CmdId::Settings,
+        name: "settings",
+        aliases: &["prefs", "config"],
+        label: "Configure chat",
+        desc: "Chat & sidebar preferences",
+        hint: "",
+        takes_arg: false,
+        category: Category::Session,
+        shortcut: None,
+        suggested: true,
     },
     CommandDef {
         id: CmdId::About,
@@ -162,9 +172,9 @@ fn matches_prefix(c: &CommandDef, prefix: &str) -> bool {
 /// Resolve a typed slash name (canonical or alias) to its definition.
 pub fn resolve(name: &str) -> Option<&'static CommandDef> {
     let name = name.to_ascii_lowercase();
-    COMMANDS.iter().find(|c| {
-        c.name == name || c.aliases.iter().any(|a| *a == name)
-    })
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.iter().any(|a| *a == name))
 }
 
 /// Palette rows for a search query, grouped by category (Suggested first).
@@ -182,7 +192,7 @@ pub fn palette_rows(query: &str) -> Vec<PaletteRow> {
                 rows.push(PaletteRow::Command(c));
             }
         }
-        for cat in [Category::Session, Category::Files] {
+        for cat in [Category::Session] {
             // Suggested items stay under Suggested only when browsing.
             let list: Vec<_> = COMMANDS
                 .iter()
@@ -217,7 +227,11 @@ pub fn palette_rows(query: &str) -> Vec<PaletteRow> {
     cats.dedup();
 
     for cat in cats {
-        let items: Vec<_> = matched.iter().copied().filter(|c| c.category == cat).collect();
+        let items: Vec<_> = matched
+            .iter()
+            .copied()
+            .filter(|c| c.category == cat)
+            .collect();
         if items.is_empty() {
             continue;
         }
@@ -255,9 +269,7 @@ impl PaletteRow {
 
 /// First selectable index in `rows`, or 0 if none.
 pub fn first_selectable(rows: &[PaletteRow]) -> usize {
-    rows.iter()
-        .position(|r| r.is_selectable())
-        .unwrap_or(0)
+    rows.iter().position(|r| r.is_selectable()).unwrap_or(0)
 }
 
 /// Move selection to the next/previous selectable row.
@@ -270,10 +282,7 @@ pub fn move_selection(rows: &[PaletteRow], selected: usize, delta: isize) -> usi
     if selectable.is_empty() {
         return 0;
     }
-    let pos = selectable
-        .iter()
-        .position(|&i| i == selected)
-        .unwrap_or(0);
+    let pos = selectable.iter().position(|&i| i == selected).unwrap_or(0);
     let n = selectable.len() as isize;
     let next = (pos as isize + delta).rem_euclid(n) as usize;
     selectable[next]
@@ -311,15 +320,19 @@ mod tests {
     }
 
     #[test]
-    fn no_image_command() {
+    fn no_image_or_attach_command() {
         assert!(resolve("image").is_none());
+        assert!(resolve("attach").is_none());
         assert!(filtered("im").is_empty());
+        assert!(filtered("attach").is_empty());
     }
 
     #[test]
     fn palette_rows_include_suggested() {
         let rows = palette_rows("");
-        assert!(rows.iter().any(|r| matches!(r, PaletteRow::Header(Category::Suggested))));
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, PaletteRow::Header(Category::Suggested))));
         let labels: Vec<_> = rows
             .iter()
             .filter_map(|r| r.command().map(|c| c.label))

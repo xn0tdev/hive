@@ -187,7 +187,10 @@ mod tests {
         let theme = Theme::from_name("gray");
         let lines = lines(&theme, None);
         assert_eq!(lines.len(), HEIGHT as usize);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_str())).collect();
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_str()))
+            .collect();
         assert!(text.contains('█'));
         assert!(!text.contains("(o.o)"));
     }

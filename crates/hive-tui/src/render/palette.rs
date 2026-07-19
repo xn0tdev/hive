@@ -2,9 +2,10 @@
 
 use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
-use crate::app::palette::{PaletteMode, PaletteState};
-use crate::app::App;
+use crate::app::palette::{ConnectRow, ModelRow, PaletteMode, PaletteState};
+use crate::app::{App, ModelsCatalogState};
 use crate::commands::PaletteRow;
+use crate::intro::PRESETS;
 
 const MAX_LIST: u16 = 14;
 const MIN_W: u16 = 36;
@@ -54,10 +55,16 @@ fn geom(area: Rect, list_rows: u16) -> PaletteGeom {
 fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
     match pal.mode {
         PaletteMode::Commands => pal.command_rows().len() as u16,
-        PaletteMode::Models => {
-            // Category header + model rows.
-            1 + pal.model_rows(&app.model_choices).len() as u16
-        }
+        PaletteMode::Models => match &app.models_catalog {
+            ModelsCatalogState::Loading => 1,
+            ModelsCatalogState::Failed(_) => 1,
+            ModelsCatalogState::Ready | ModelsCatalogState::Idle => {
+                pal.model_rows(&app.model_choices).len().max(1) as u16
+            }
+        },
+        PaletteMode::Connect => pal.connect_rows(&app.connections).len().max(1) as u16,
+        PaletteMode::ConnectPresets => pal.preset_indices().len().max(1) as u16,
+        PaletteMode::ConnectKey { .. } => 1,
     }
 }
 
@@ -81,6 +88,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let title = match pal.mode {
         PaletteMode::Commands => "Commands",
         PaletteMode::Models => "Switch model",
+        PaletteMode::Connect => "Providers",
+        PaletteMode::ConnectPresets => "Add provider",
+        PaletteMode::ConnectKey { .. } => "API key",
     };
     draw_title(buf, g.content, title, theme.fg, theme.faint, panel);
     draw_search(
@@ -99,6 +109,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     match pal.mode {
         PaletteMode::Commands => draw_command_list(buf, g.list, pal, theme, panel),
         PaletteMode::Models => draw_model_list(buf, g.list, pal, app, theme, panel),
+        PaletteMode::Connect => draw_connect_list(buf, g.list, pal, app, theme, panel),
+        PaletteMode::ConnectPresets => draw_preset_list(buf, g.list, pal, theme, panel),
+        PaletteMode::ConnectKey { preset_idx } => {
+            draw_connect_key_hint(buf, g.list, preset_idx, theme, panel);
+        }
     }
 }
 
@@ -131,13 +146,25 @@ fn draw_search(
     bg: Color,
 ) {
     let empty = pal.query.is_empty();
-    let text = if empty { "Search" } else { pal.query.as_str() };
+    let masked = matches!(pal.mode, PaletteMode::ConnectKey { .. });
+    let placeholder = if masked {
+        "Paste API key…"
+    } else {
+        "Search"
+    };
+    let shown = if empty {
+        placeholder.to_string()
+    } else if masked {
+        "•".repeat(pal.query.chars().count().min(area.width as usize))
+    } else {
+        pal.query.clone()
+    };
     let fg = if empty { theme.faint } else { theme.fg };
     let mut style_text = Style::default().fg(fg).bg(bg);
     if empty {
         style_text = style_text.add(Modifier::ITALIC);
     }
-    let line = Line::from(vec![Span::styled(text.to_string(), style_text)]);
+    let line = Line::from(vec![Span::styled(shown, style_text)]);
     crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, bg);
     let _ = pal.cursor;
 }
@@ -225,7 +252,7 @@ fn draw_command_list(
     // Scroll via list_offset, keeping the selection in view.
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&[], visible);
+    let offset = pal.visible_offset(&[], &[], visible);
 
     for row in 0..visible {
         let idx = offset + row;
@@ -265,10 +292,7 @@ fn draw_command_list(
                 let left_w = left.chars().count();
                 let short_w = shortcut.chars().count();
                 let avail = area.width as usize;
-                let mut spans = vec![Span::styled(
-                    left,
-                    Style::default().fg(name_fg).bg(bg),
-                )];
+                let mut spans = vec![Span::styled(left, Style::default().fg(name_fg).bg(bg))];
                 let mid_budget = avail.saturating_sub(left_w + short_w + 2);
                 if mid_budget > 4 && !desc.is_empty() {
                     let d = ellipsize(desc, mid_budget.saturating_sub(1));
@@ -311,6 +335,32 @@ fn draw_model_list(
         return;
     }
     let panel_style = Style::default().bg(panel);
+
+    match &app.models_catalog {
+        ModelsCatalogState::Loading | ModelsCatalogState::Idle => {
+            let line = Line::from(Span::styled(
+                "Loading models…",
+                Style::default().fg(theme.faint).bg(panel),
+            ));
+            crate::render::strip_paint::set_line_on_strip(
+                buf, area.x, area.y, &line, area.width, panel,
+            );
+            return;
+        }
+        ModelsCatalogState::Failed(err) => {
+            let msg = ellipsize(err, area.width as usize);
+            let line = Line::from(Span::styled(
+                msg,
+                Style::default().fg(theme.err).bg(panel),
+            ));
+            crate::render::strip_paint::set_line_on_strip(
+                buf, area.x, area.y, &line, area.width, panel,
+            );
+            return;
+        }
+        ModelsCatalogState::Ready => {}
+    }
+
     let rows = pal.model_rows(&app.model_choices);
     if rows.is_empty() {
         let line = Line::from(Span::styled(
@@ -325,55 +375,187 @@ fn draw_model_list(
 
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&app.model_choices, visible);
+    let offset = pal.visible_offset(&app.model_choices, &app.connections, visible);
 
-    let header_y = area.y;
-    let header = Line::from(Span::styled(
-        "Models",
-        Style::default()
-            .fg(theme.build)
-            .bg(panel)
-            .add(Modifier::BOLD),
-    ));
-    crate::render::strip_paint::set_line_on_strip(
-        buf, area.x, header_y, &header, area.width, panel,
-    );
-
-    let list_top = area.y + 1;
-    let list_h = area.height.saturating_sub(1) as usize;
-    for row in 0..list_h {
+    for row in 0..visible {
         let idx = offset + row;
-        let y = list_top + row as u16;
-        let Some(choice) = rows.get(idx) else {
+        let y = area.y + row as u16;
+        let Some(item) = rows.get(idx) else {
+            buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
+            continue;
+        };
+        match item {
+            ModelRow::Header(label) => {
+                let line = Line::from(Span::styled(
+                    (*label).to_string(),
+                    Style::default()
+                        .fg(theme.build)
+                        .bg(panel)
+                        .add(Modifier::BOLD),
+                ));
+                crate::render::strip_paint::set_line_on_strip(
+                    buf, area.x, y, &line, area.width, panel,
+                );
+            }
+            ModelRow::Model(choice) => {
+                let is_sel = idx == sel;
+                let bg = if is_sel { theme.sel_bg } else { panel };
+                let base = Style::default().bg(bg);
+                let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
+                let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
+                let current =
+                    choice.key == app.model || choice.display == app.model_display;
+
+                let mark = if current { "›" } else { " " };
+                let left = format!("{mark} {}", choice.display);
+                let right = if choice.detail.is_empty() {
+                    String::new()
+                } else {
+                    choice.detail.clone()
+                };
+                let left_w = left.chars().count();
+                let right_w = right.chars().count();
+                let gap = (area.width as usize).saturating_sub(left_w + right_w);
+                let line = Line::from(vec![
+                    Span::styled(left, Style::default().fg(name_fg).bg(bg)),
+                    Span::styled(" ".repeat(gap), base),
+                    Span::styled(right, Style::default().fg(detail_fg).bg(bg)),
+                ]);
+                crate::render::strip_paint::set_line_on_strip(
+                    buf, area.x, y, &line, area.width, bg,
+                );
+            }
+        }
+    }
+}
+
+fn draw_connect_list(
+    buf: &mut Buffer,
+    area: Rect,
+    pal: &PaletteState,
+    app: &App,
+    theme: &crate::theme::Theme,
+    panel: Color,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let panel_style = Style::default().bg(panel);
+    let rows = pal.connect_rows(&app.connections);
+    if rows.is_empty() {
+        return;
+    }
+    let sel = pal.selected.min(rows.len() - 1);
+    let visible = area.height as usize;
+    let offset = pal.visible_offset(&[], &app.connections, visible);
+    for row in 0..visible {
+        let idx = offset + row;
+        let y = area.y + row as u16;
+        let Some(item) = rows.get(idx) else {
             buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
             continue;
         };
         let is_sel = idx == sel;
         let bg = if is_sel { theme.sel_bg } else { panel };
-        let base = Style::default().bg(bg);
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
-        let current = choice.key == app.model
-            || choice.display == app.model_display
-            || (choice.key == "default" && app.model_display == choice.display);
-
-        let mark = if current { "●" } else { " " };
-        let left = format!("{mark} {}", choice.display);
-        let right = if choice.detail.is_empty() {
-            choice.key.clone()
-        } else {
-            choice.detail.clone()
+        let (raw_left, raw_right) = match item {
+            ConnectRow::Profile(c) => {
+                let mark = if c.id == app.active_connection {
+                    "›"
+                } else {
+                    " "
+                };
+                (format!("{mark} {}", c.label), c.detail.clone())
+            }
+            ConnectRow::Add => ("  Add provider…".into(), String::new()),
+            ConnectRow::RemoveActive => ("  Remove active".into(), String::new()),
         };
-        let left_w = left.chars().count();
-        let right_w = right.chars().count();
-        let gap = (area.width as usize).saturating_sub(left_w + right_w);
+        let (left, right, gap) =
+            layout_label_host(&raw_left, &raw_right, area.width as usize);
         let line = Line::from(vec![
             Span::styled(left, Style::default().fg(name_fg).bg(bg)),
-            Span::styled(" ".repeat(gap), base),
+            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
             Span::styled(right, Style::default().fg(detail_fg).bg(bg)),
         ]);
         crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, bg);
     }
+}
+
+fn draw_preset_list(
+    buf: &mut Buffer,
+    area: Rect,
+    pal: &PaletteState,
+    theme: &crate::theme::Theme,
+    panel: Color,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let panel_style = Style::default().bg(panel);
+    let indices = pal.preset_indices();
+    if indices.is_empty() {
+        let line = Line::from(Span::styled(
+            "No matching providers",
+            Style::default().fg(theme.faint).bg(panel),
+        ));
+        crate::render::strip_paint::set_line_on_strip(
+            buf, area.x, area.y, &line, area.width, panel,
+        );
+        return;
+    }
+    let sel = pal.selected.min(indices.len() - 1);
+    let visible = area.height as usize;
+    let offset = pal.visible_offset(&[], &[], visible);
+    for row in 0..visible {
+        let idx = offset + row;
+        let y = area.y + row as u16;
+        let Some(&pi) = indices.get(idx) else {
+            buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
+            continue;
+        };
+        let preset = &PRESETS[pi];
+        let is_sel = idx == sel;
+        let bg = if is_sel { theme.sel_bg } else { panel };
+        let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
+        let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
+        let host = preset
+            .base_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        let (left, right, gap) =
+            layout_label_host(preset.label, host, area.width as usize);
+        let line = Line::from(vec![
+            Span::styled(left, Style::default().fg(name_fg).bg(bg)),
+            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+            Span::styled(right, Style::default().fg(detail_fg).bg(bg)),
+        ]);
+        crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, bg);
+    }
+}
+
+fn draw_connect_key_hint(
+    buf: &mut Buffer,
+    area: Rect,
+    preset_idx: usize,
+    theme: &crate::theme::Theme,
+    panel: Color,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let label = PRESETS
+        .get(preset_idx)
+        .map(|p| p.label)
+        .unwrap_or("Provider");
+    let line = Line::from(Span::styled(
+        format!("Enter key for {label} · enter to save"),
+        Style::default().fg(theme.faint).bg(panel),
+    ));
+    crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
 }
 
 fn ellipsize(s: &str, max: usize) -> String {
@@ -388,6 +570,32 @@ fn ellipsize(s: &str, max: usize) -> String {
     out
 }
 
+/// Left label + right-aligned host; truncates host (then label) so they never collide.
+fn layout_label_host(label: &str, host: &str, width: usize) -> (String, String, usize) {
+    if width == 0 {
+        return (String::new(), String::new(), 0);
+    }
+    if host.is_empty() {
+        return (ellipsize(label, width), String::new(), 0);
+    }
+
+    const MIN_GAP: usize = 1;
+    let label_w = label.chars().count();
+    let host_w = host.chars().count();
+    if label_w + MIN_GAP + host_w <= width {
+        return (label.to_string(), host.to_string(), width - label_w - host_w);
+    }
+
+    // Prefer a readable label; squeeze the host first.
+    let label_max = width.saturating_sub(MIN_GAP + 4).max(1);
+    let left = ellipsize(label, label_max.min(label_w));
+    let left_w = left.chars().count();
+    let right = ellipsize(host, width.saturating_sub(left_w + MIN_GAP));
+    let right_w = right.chars().count();
+    let gap = width.saturating_sub(left_w + right_w);
+    (left, right, gap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,9 +607,12 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         });
         a.open_palette();
         a
@@ -409,6 +620,19 @@ mod tests {
 
     fn panel_bg() -> Color {
         Color::Rgb(0x26, 0x26, 0x26)
+    }
+
+    #[test]
+    fn long_host_does_not_collide_with_label() {
+        let (left, right, gap) = layout_label_host(
+            "  Google AI",
+            "generativelanguage.googleapis.com",
+            40,
+        );
+        assert_eq!(left.chars().count() + gap + right.chars().count(), 40);
+        assert!(gap >= 1);
+        assert!(right.ends_with('…'), "{right}");
+        assert!(!left.contains("generative"), "{left}");
     }
 
     #[test]
@@ -437,7 +661,10 @@ mod tests {
         assert!(text.contains("Commands"), "{text}");
         assert!(text.contains("Suggested"), "{text}");
         assert!(
-            !text.contains('╭') && !text.contains('╮') && !text.contains('╰') && !text.contains('╯'),
+            !text.contains('╭')
+                && !text.contains('╮')
+                && !text.contains('╰')
+                && !text.contains('╯'),
             "rounded border drawn: {text}"
         );
 
@@ -489,7 +716,7 @@ mod tests {
         let mut a = app();
         let choices = a.model_choices.clone();
         assert!(!a.palette.as_ref().unwrap().search_focused);
-        a.palette.as_mut().unwrap().insert('f', &choices);
+        a.palette.as_mut().unwrap().insert('f', &choices, &[]);
         assert!(a.palette.as_ref().unwrap().search_focused);
         assert_eq!(a.palette.as_ref().unwrap().query, "f");
     }

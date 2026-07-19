@@ -91,7 +91,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let tag_rows = usize::from(app.has_pending_attaches() && !app.input.is_empty());
     let visible = inner.height as usize;
-    let scroll = app.input.view_scroll(visible.saturating_sub(tag_rows), width);
+    let scroll = app
+        .input
+        .view_scroll(visible.saturating_sub(tag_rows), width);
     f.buffer()
         .set_lines_on(inner, &lines, scroll, Style::default().bg(bg));
 
@@ -268,9 +270,12 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         })
     }
 

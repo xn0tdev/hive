@@ -1,4 +1,8 @@
 //! The multiline input buffer with a char-indexed cursor and soft-wrap.
+//! Wrapping and caret columns use Unicode display width (not raw char count),
+//! so CJK / emoji lines stay aligned with the terminal.
+
+use unicode_width::UnicodeWidthChar;
 
 /// How many visual text rows the input strip will grow to before it scrolls.
 pub const MAX_VISIBLE_LINES: usize = 5;
@@ -35,9 +39,36 @@ impl InputState {
     }
 
     pub fn insert(&mut self, c: char) {
+        // Ignore NUL / most C0 controls except newline/tab handled elsewhere.
+        if c == '\0' || (c.is_control() && c != '\n' && c != '\t') {
+            return;
+        }
         let b = self.byte_at(self.cursor);
         self.value.insert(b, c);
         self.cursor += 1;
+    }
+
+    /// Insert a paste / multi-char chunk at the cursor. Normalizes `\r\n` / `\r`
+    /// to `\n` and strips other C0 controls.
+    pub fn insert_str(&mut self, text: &str) {
+        let normalized = normalize_paste(text);
+        if normalized.is_empty() {
+            return;
+        }
+        let b = self.byte_at(self.cursor);
+        let n = normalized.chars().count();
+        self.value.insert_str(b, &normalized);
+        self.cursor += n;
+    }
+
+    /// Replace the char range `[start, end)` with `text` and place the cursor after it.
+    pub fn replace_chars(&mut self, start: usize, end: usize, text: &str) {
+        let start = start.min(self.char_count());
+        let end = end.min(self.char_count()).max(start);
+        let b0 = self.byte_at(start);
+        let b1 = self.byte_at(end);
+        self.value.replace_range(b0..b1, text);
+        self.cursor = start + text.chars().count();
     }
 
     pub fn newline(&mut self) {
@@ -168,8 +199,8 @@ impl InputState {
         self.value.chars().filter(|c| *c == '\n').count() + 1
     }
 
-    /// Visual rows for one hard line of `len` characters at wrap width `w`.
-    fn rows_for_len(len: usize, w: usize) -> usize {
+    /// Visual rows for one hard line of display-width `len` at wrap width `w`.
+    fn rows_for_width(len: usize, w: usize) -> usize {
         if w == 0 {
             return 1;
         }
@@ -188,7 +219,7 @@ impl InputState {
         let w = width;
         self.value
             .split('\n')
-            .map(|line| Self::rows_for_len(line.chars().count(), w))
+            .map(|line| Self::rows_for_width(display_width(line), w))
             .sum()
     }
 
@@ -197,53 +228,53 @@ impl InputState {
         self.visual_row_count(width).clamp(1, MAX_VISIBLE_LINES)
     }
 
-    /// (visual row, column within that row) for the cursor.
-    #[allow(clippy::manual_checked_ops)]
+    /// (visual row, display column within that row) for the cursor.
     pub fn cursor_visual(&self, width: usize) -> (usize, usize) {
-        let (hard, col) = self.cursor_line_col();
         let w = width;
         let mut row = 0usize;
-        for (i, line) in self.value.split('\n').enumerate() {
-            let len = line.chars().count();
-            if i == hard {
-                if w == 0 {
-                    return (row, col);
-                }
-                return (row + col / w, col % w);
+        let mut col = 0usize; // display columns in current visual row
+        for (i, ch) in self.value.chars().enumerate() {
+            if i == self.cursor {
+                return (row, col);
             }
-            row += Self::rows_for_len(len, w);
+            if ch == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                let cw = glyph_width(ch);
+                if w > 0 && col > 0 && col + cw > w {
+                    row += 1;
+                    col = 0;
+                }
+                col += cw;
+                if w > 0 && col >= w {
+                    row += 1;
+                    col = 0;
+                }
+            }
         }
-        if w == 0 {
-            (row, col)
-        } else {
-            (row + col / w, col % w)
-        }
+        (row, col)
     }
 
-    /// Char index for a visual (row, col), clamping to the target row's end.
+    /// Char index for a visual (row, prefer_display_col).
     fn cursor_at_visual(&self, target_row: usize, prefer_col: usize, width: usize) -> usize {
         let w = width;
         let mut row = 0usize;
-        let mut char_base = 0usize; // char index at start of current hard line
+        let mut char_i = 0usize;
 
         for line in self.value.split('\n') {
-            let len = line.chars().count();
-            let rows = Self::rows_for_len(len, w);
-            if target_row < row + rows {
+            let chunks = wrap_hard_line(line, w);
+            let n = chunks.len().max(1);
+            if target_row < row + n {
                 let within = target_row - row;
-                if w == 0 {
-                    return (char_base + prefer_col).min(char_base + len);
-                }
-                let start_col = within * w;
-                let end_col = (start_col + w).min(len);
-                let col = start_col + prefer_col.min(end_col.saturating_sub(start_col));
-                return char_base + col.min(len);
+                let chunk = chunks.get(within).map(String::as_str).unwrap_or("");
+                let col = prefer_col.min(display_width(chunk));
+                return char_i + char_index_at_display_col(line, within, col, w);
             }
-            row += rows;
-            char_base += len + 1; // +1 for the '\n' (except we overshoot after last)
+            row += n;
+            char_i += line.chars().count() + 1; // +1 for '\n'
         }
 
-        // target past end — clamp to document end
         self.char_count()
     }
 
@@ -262,21 +293,107 @@ impl InputState {
             return out;
         }
         for (hi, line) in self.value.split('\n').enumerate() {
-            let chars: Vec<char> = line.chars().collect();
-            if chars.is_empty() {
-                out.push((hi == 0, String::new()));
-                continue;
-            }
-            if w == 0 {
-                out.push((hi == 0, chars.iter().collect()));
-                continue;
-            }
-            for (ci, chunk) in chars.chunks(w).enumerate() {
-                out.push((hi == 0 && ci == 0, chunk.iter().collect()));
+            let chunks = wrap_hard_line(line, w);
+            for (ci, chunk) in chunks.into_iter().enumerate() {
+                out.push((hi == 0 && ci == 0, chunk));
             }
         }
         out
     }
+}
+
+fn glyph_width(ch: char) -> usize {
+    match UnicodeWidthChar::width(ch) {
+        Some(0) | None => 1, // keep caret math stable for combining marks
+        Some(w) => w,
+    }
+}
+
+fn display_width(s: &str) -> usize {
+    s.chars().map(glyph_width).sum()
+}
+
+/// Normalize clipboard paste: CRLF/CR → LF, drop other C0 controls (keep tab/LF).
+fn normalize_paste(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            }
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Wrap one hard line into display-width chunks of at most `w` columns.
+fn wrap_hard_line(line: &str, w: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    if w == 0 {
+        return vec![line.to_string()];
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in line.chars() {
+        let cw = glyph_width(ch);
+        if cur_w > 0 && cur_w + cw > w {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
+        if cur_w >= w {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+    }
+    if !cur.is_empty() || rows.is_empty() {
+        rows.push(cur);
+    }
+    rows
+}
+
+/// Char offset into `line` for visual chunk `within` at display column `col`.
+fn char_index_at_display_col(line: &str, within: usize, col: usize, w: usize) -> usize {
+    if w == 0 {
+        return col.min(line.chars().count());
+    }
+    let mut row = 0usize;
+    let mut row_col = 0usize;
+    let mut idx = 0usize;
+    for ch in line.chars() {
+        let cw = glyph_width(ch);
+        if row_col > 0 && row_col + cw > w {
+            row += 1;
+            row_col = 0;
+        }
+        if row == within && row_col >= col {
+            return idx;
+        }
+        if row > within {
+            return idx;
+        }
+        row_col += cw;
+        idx += 1;
+        if row_col >= w {
+            if row == within {
+                return idx;
+            }
+            row += 1;
+            row_col = 0;
+        }
+    }
+    idx
 }
 
 #[cfg(test)]
@@ -315,8 +432,10 @@ mod tests {
 
     #[test]
     fn soft_wrap_grows_visual_rows() {
-        let mut i = InputState::default();
-        i.text_cols = 10;
+        let mut i = InputState {
+            text_cols: 10,
+            ..Default::default()
+        };
         for _ in 0..25 {
             i.insert('x');
         }
@@ -328,8 +447,10 @@ mod tests {
 
     #[test]
     fn soft_wrap_caps_visible_and_scrolls() {
-        let mut i = InputState::default();
-        i.text_cols = 4;
+        let mut i = InputState {
+            text_cols: 4,
+            ..Default::default()
+        };
         for _ in 0..30 {
             i.insert('a');
         }
@@ -341,8 +462,10 @@ mod tests {
 
     #[test]
     fn soft_wrap_up_down() {
-        let mut i = InputState::default();
-        i.text_cols = 5;
+        let mut i = InputState {
+            text_cols: 5,
+            ..Default::default()
+        };
         for _ in 0..12 {
             i.insert('x');
         }
@@ -357,8 +480,10 @@ mod tests {
 
     #[test]
     fn wrapped_rows_splits_long_line() {
-        let mut i = InputState::default();
-        i.value = "abcdefghij".into();
+        let i = InputState {
+            value: "abcdefghij".into(),
+            ..Default::default()
+        };
         let rows = i.wrapped_rows(4);
         assert_eq!(
             rows,
@@ -366,6 +491,46 @@ mod tests {
                 (true, "abcd".into()),
                 (false, "efgh".into()),
                 (false, "ij".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_str_normalizes_crlf_and_moves_cursor() {
+        let mut i = InputState::default();
+        i.insert_str("a\r\nb\rc");
+        assert_eq!(i.value, "a\nb\nc");
+        assert_eq!(i.cursor, 5);
+    }
+
+    #[test]
+    fn wide_glyphs_wrap_by_display_width() {
+        // Fullwidth chars are typically width 2.
+        let i = InputState {
+            value: "あああ".into(), // 3 chars, 6 columns
+            cursor: 3,
+            ..Default::default()
+        };
+        let rows = i.wrapped_rows(4);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(i.visual_row_count(4), 2);
+        // caret after all three → row 1, col 2 (third glyph starts a new row)
+        assert_eq!(i.cursor_visual(4), (1, 2));
+    }
+
+    #[test]
+    fn empty_hard_lines_keep_a_row() {
+        let i = InputState {
+            value: "a\n\nb".into(),
+            ..Default::default()
+        };
+        let rows = i.wrapped_rows(80);
+        assert_eq!(
+            rows,
+            vec![
+                (true, "a".into()),
+                (false, String::new()),
+                (false, "b".into()),
             ]
         );
     }

@@ -85,7 +85,7 @@ build/lint/review pass."
             id: format!("verify_{}", uuid::Uuid::new_v4().simple()),
             label: VERIFY_LABEL.to_string(),
             prompt: build_verify_prompt(task),
-            model_role: ModelRole::Fast,
+            model_role: ModelRole::Default,
             depth: ctx.depth + 1,
         };
 
@@ -107,8 +107,7 @@ impl Tool for SpawnSubagent {
 
     fn description(&self) -> &str {
         "Spawn one subagent to complete a focused task end-to-end and return its result. \
-You write the full task prompt yourself with all needed context. \
-Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (frontend), vision (images)."
+You write the full task prompt yourself with all needed context."
     }
 
     fn parameters(&self) -> Value {
@@ -116,8 +115,7 @@ Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (fr
             "type": "object",
             "properties": {
                 "task": {"type": "string", "description": "A self-contained task description with all needed context — you author this prompt."},
-                "prompt": {"type": "string", "description": "Alias for task."},
-                "model_role": {"type": "string", "description": "default | smart | fast | vision"}
+                "prompt": {"type": "string", "description": "Alias for task."}
             },
             "required": ["task"]
         })
@@ -140,15 +138,11 @@ Pick model_role: fast (commits/merges/simple), smart (backend/deep), default (fr
             ));
         }
 
-        let role = str_arg(&args, "model_role")
-            .and_then(ModelRole::parse)
-            .unwrap_or(ModelRole::Default);
-
         let st = SubagentTask {
             id: format!("sub_{}", uuid::Uuid::new_v4().simple()),
             label: truncate_label(task, 44),
             prompt: task.to_string(),
-            model_role: role,
+            model_role: ModelRole::Default,
             depth: ctx.depth + 1,
         };
 
@@ -179,10 +173,9 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "description": "List of tasks. Each item is a task string, or an object {task, model_role}.",
+                    "description": "List of tasks. Each item is a task string, or an object {task}.",
                     "items": {}
-                },
-                "model_role": {"type": "string", "description": "Default role for all tasks: default | smart | fast | vision"}
+                }
             },
             "required": ["tasks"]
         })
@@ -199,27 +192,16 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
             ));
         }
 
-        let default_role = str_arg(&args, "model_role")
-            .and_then(ModelRole::parse)
-            .unwrap_or(ModelRole::Default);
-
         let mut tasks = Vec::new();
         for item in arr {
-            let (prompt, role) = if let Some(s) = item.as_str() {
-                (s.to_string(), default_role)
+            let prompt = if let Some(s) = item.as_str() {
+                s.to_string()
             } else {
-                let p = item
-                    .get("task")
+                item.get("task")
                     .or_else(|| item.get("prompt"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
-                    .to_string();
-                let r = item
-                    .get("model_role")
-                    .and_then(|v| v.as_str())
-                    .and_then(ModelRole::parse)
-                    .unwrap_or(default_role);
-                (p, r)
+                    .to_string()
             };
             if prompt.trim().is_empty() {
                 continue;
@@ -228,7 +210,7 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
                 id: format!("sub_{}", uuid::Uuid::new_v4().simple()),
                 label: truncate_label(&prompt, 44),
                 prompt,
-                model_role: role,
+                model_role: ModelRole::Default,
                 depth: ctx.depth + 1,
             });
         }

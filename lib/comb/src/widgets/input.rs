@@ -37,9 +37,24 @@ impl TextInput {
     }
 
     pub fn insert(&mut self, c: char) {
+        if c == '\0' || (c.is_control() && c != '\t') {
+            return;
+        }
         let b = self.byte_at(self.cursor);
         self.value.insert(b, c);
         self.cursor += 1;
+    }
+
+    /// Insert clipboard / bracketed-paste text at the cursor.
+    /// Newlines become spaces (single-line field). Other C0 controls are dropped.
+    pub fn insert_str(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' | '\r' => self.insert(' '),
+                c if c.is_control() && c != '\t' => {}
+                c => self.insert(c),
+            }
+        }
     }
 
     pub fn backspace(&mut self) {

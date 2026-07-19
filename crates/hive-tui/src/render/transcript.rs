@@ -541,9 +541,12 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         })
     }
 

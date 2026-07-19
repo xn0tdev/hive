@@ -22,12 +22,13 @@ mod footer;
 mod input_box;
 mod menu;
 mod palette;
-mod sidebar;
-mod strip_paint;
+mod settings;
+pub(crate) mod sidebar;
+pub(crate) mod strip_paint;
 mod toast;
 mod transcript;
 
-pub use sidebar::ProjectSnapshot;
+pub use sidebar::{clamp_width, ProjectSnapshot, SidebarSection, SidebarSections};
 
 use comb::{Frame, Line, Rect, Span, Style};
 
@@ -108,11 +109,12 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    // Toasts sit centered on the bottom edge of the screen (not on the model row).
+    // Landing: toast on the screen bottom (away from the centered input).
     toast::draw(f, area, app);
 
     draw_palette(f, area, app);
     draw_about(f, area, app);
+    draw_settings(f, area, app);
 }
 
 /// The normal, bottom-anchored conversation layout.
@@ -124,11 +126,16 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     app.refresh_project();
 
     // On wide screens, reserve a right project sidebar; chat stays in a left band.
-    let side_w = sidebar::width_for(area.width, app.sidebar_open);
-    let gap: u16 = if side_w > 0 { 3 } else { 0 };
+    let side_w = sidebar::width_for(
+        area.width,
+        app.sidebar_open,
+        app.ui.sidebar_mode,
+        app.ui.sidebar_width,
+    );
+    let gap: u16 = if side_w > 0 { 2 } else { 0 };
     let chat_avail = area.width.saturating_sub(side_w).saturating_sub(gap);
     let inner_w = if side_w > 0 {
-        chat_avail.saturating_sub(4).clamp(40, 88)
+        chat_avail.saturating_sub(2).clamp(40, 88)
     } else {
         area.width.saturating_sub(6).max(20).min(area.width)
     };
@@ -171,13 +178,16 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if side_w > 0 {
-        let sx = area.right().saturating_sub(side_w).saturating_sub(1);
+        let sx = area.right().saturating_sub(side_w);
         let side = Rect::new(sx, area.y + 1, side_w, area.height.saturating_sub(4));
         sidebar::draw(f.buffer(), side, app);
-    } else if sidebar::available(area.width) {
+    } else if sidebar::available(area.width) && app.ui.sidebar_mode == hive_core::SidebarMode::Auto
+    {
         sidebar::draw_collapsed_toggle(f.buffer(), area, app);
     } else {
         app.sidebar_toggle_hit = None;
+        app.sidebar_resize_hit = None;
+        app.sidebar_section_hits.clear();
     }
 
     // Menu overlay, drawn last so it layers over the transcript, its bottom
@@ -187,11 +197,22 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         menu::draw(f.buffer(), Rect::new(ix, top, inner_w, input_y - top), app);
     }
 
-    // Centered toast on the bottom edge of the screen (same as landing).
-    toast::draw(f, area, app);
+    // Active chat: same x as the chat column, y on the very bottom screen row.
+    toast::draw(
+        f,
+        Rect::new(ix, area.bottom().saturating_sub(1), inner_w, 1),
+        app,
+    );
 
     draw_palette(f, area, app);
     draw_about(f, area, app);
+    draw_settings(f, area, app);
+}
+
+fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
+    if app.settings_open() {
+        settings::draw(f.buffer(), area, app);
+    }
 }
 
 fn draw_palette(f: &mut Frame, area: Rect, app: &mut App) {

@@ -189,9 +189,9 @@ impl Terminal {
         // alt screen · SGR mouse · modifyOtherKeys level 2 · kitty keyboard
         // disambiguate only (flag 1). Flag 8 (report all keys) + event types
         // made every letter a CSI-u press/release pair → doubled input, and
-        // broke UTF-8 Cyrillic. Clear · hide cursor.
+        // broke UTF-8 Cyrillic. Bracketed paste · clear · hide cursor.
         term.write_raw(
-            "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>4;2m\x1b[>1u\x1b[2J\x1b[H\x1b[?25l",
+            "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>4;2m\x1b[>1u\x1b[?2004h\x1b[2J\x1b[H\x1b[?25l",
         )?;
         term.cursor_visible = false;
         Ok(term)
@@ -271,7 +271,9 @@ impl Terminal {
             let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
             s.push(ch);
             // Wide glyphs advance the hardware cursor by two columns.
-            let adv = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+            let adv = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1) as u16;
             let next = x.saturating_add(adv);
             pen = if next < self.size.width {
                 Some((next, y))
@@ -383,9 +385,10 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // pop kitty keyboard · disable modifyOtherKeys · mouse · show cursor · leave alt
+        // pop kitty keyboard · disable modifyOtherKeys · mouse · bracketed paste
+        // · show cursor · leave alt
         let _ = self.out.write_all(
-            b"\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l",
+            b"\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l",
         );
         let _ = self.out.flush();
         unsafe {

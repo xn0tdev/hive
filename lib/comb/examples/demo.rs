@@ -576,6 +576,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }
                 Event::Resize(_, _) => {}
+                Event::Paste(_) => {}
             }
         }
     }

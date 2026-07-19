@@ -1,26 +1,30 @@
 //! The TUI application state and how it reacts to `AgentEvent`s.
 
+pub mod files;
 pub mod input;
 pub mod palette;
+pub mod settings;
 pub mod state;
 
 use std::collections::HashMap;
 
 use comb::{Line, Rect};
-use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
+use hive_core::event::{AgentEvent, ConnectionInfo, SubagentLine, SubagentStatus};
 use hive_core::message::ImageSource;
 use hive_core::provider::Usage;
-use hive_core::AgentMode;
+use hive_core::{AgentMode, SidebarMode, UiConfig};
 
 use crate::commands;
-use crate::render::wordmark::LogoBonk;
 use crate::render::spinner;
 use crate::render::tools::parse_sections;
-use crate::render::ProjectSnapshot;
+use crate::render::wordmark::LogoBonk;
+use crate::render::{ProjectSnapshot, SidebarSection, SidebarSections};
 use crate::theme::Theme;
 use crate::{ModelChoice, TuiInit};
 
+use files::AtQuery;
 use palette::PaletteState;
+use settings::SettingsState;
 
 use input::InputState;
 use state::{
@@ -85,6 +89,15 @@ impl PendingAttach {
     }
 }
 
+/// Live `/model` catalog fetch state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelsCatalogState {
+    Idle,
+    Loading,
+    Ready,
+    Failed(String),
+}
+
 pub struct App {
     pub(crate) blocks: Vec<Block>,
     pub(crate) input: InputState,
@@ -104,14 +117,26 @@ pub struct App {
     pub(crate) transcript_max_scroll: usize,
     /// Files / images queued for the next user message (shown as tags).
     pub(crate) pending_attaches: Vec<PendingAttach>,
-    /// Roles offered in the Switch-model picker.
+    /// Models offered in the Switch-model picker (live catalog when Ready).
     pub(crate) model_choices: Vec<ModelChoice>,
+    /// Fetch status for the live model catalog.
+    pub(crate) models_catalog: ModelsCatalogState,
+    /// Saved `/connect` provider profiles.
+    pub(crate) connections: Vec<ConnectionInfo>,
+    /// Active connection profile id.
+    pub(crate) active_connection: String,
     /// Ctrl+P command palette / model picker.
     pub(crate) palette: Option<PaletteState>,
     /// Centered About overlay (HIVE wordmark + version + tagline).
     pub(crate) about_open: bool,
-    /// Selected row in the slash command menu.
+    /// Configure chat / sidebar overlay.
+    pub(crate) settings: Option<SettingsState>,
+    /// Persisted UI prefs (`[ui]` in config.toml).
+    pub(crate) ui: UiConfig,
+    /// Selected row in the slash / `@file` menu.
     pub(crate) menu_index: usize,
+    /// Cached relative file paths for `@` mentions (lazy).
+    pub(crate) file_index: Option<Vec<String>>,
     /// Short-lived status message shown in the footer (not the chat).
     pub(crate) flash_msg: Option<(String, std::time::Instant)>,
     /// Set on the first ctrl+c; a second press within the window quits.
@@ -151,14 +176,26 @@ pub struct App {
     pub(crate) sidebar_open: bool,
     /// Hit target for the sidebar show/hide control (last draw).
     pub(crate) sidebar_toggle_hit: Option<Rect>,
+    /// Hit target for dragging the sidebar's left edge to resize.
+    pub(crate) sidebar_resize_hit: Option<Rect>,
+    /// Exclusive right edge of the sidebar panel (last draw) — used while resizing.
+    pub(crate) sidebar_right_edge: u16,
+    /// True while the user is dragging the sidebar resize handle.
+    pub(crate) sidebar_resizing: bool,
+    /// Expand/collapse state for sidebar body sections (in-memory for the session).
+    pub(crate) sidebar_sections: SidebarSections,
+    /// Hit targets for collapsible section headers (last draw).
+    pub(crate) sidebar_section_hits: Vec<(Rect, SidebarSection)>,
+    /// Project instruction files present under cwd (refreshed with the project snapshot).
+    pub(crate) context_files: Vec<hive_core::ContextFile>,
     /// Visible list rows in the palette (last draw) — keeps keyboard selection in view.
     pub(crate) palette_list_visible: u16,
 }
 
 /// How long the ctrl+c confirmation window lives.
 pub const FLASH_MS: u128 = 1500;
-/// Bottom toast lifetime — short so it doesn't linger.
-pub const TOAST_MS: u128 = 700;
+/// Bottom toast lifetime (model/provider status, Ctrl+C, etc.).
+pub const TOAST_MS: u128 = 2_000;
 /// Composer auto-blur after this many ms with no typing / caret keys.
 /// Transcript scroll and global chords do not refresh the timer, so a stuck
 /// caret does not linger while the user reads. Mid-range of the 8–15s band.
@@ -186,9 +223,15 @@ impl App {
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             model_choices: init.model_choices,
+            models_catalog: ModelsCatalogState::Idle,
+            connections: init.connections,
+            active_connection: init.active_connection,
             palette: None,
             about_open: false,
+            settings: None,
+            ui: init.ui.clone(),
             menu_index: 0,
+            file_index: None,
             flash_msg: None,
             ctrl_c_armed: None,
             anim_start: std::time::Instant::now(),
@@ -205,22 +248,92 @@ impl App {
             plan_view: PlanViewState::default(),
             md_cache: MdCache::default(),
             project: ProjectSnapshot::default(),
-            sidebar_open: true,
+            sidebar_open: !matches!(init.ui.sidebar_mode, SidebarMode::Hidden),
             sidebar_toggle_hit: None,
+            sidebar_resize_hit: None,
+            sidebar_right_edge: 0,
+            sidebar_resizing: false,
+            sidebar_sections: SidebarSections::default(),
+            sidebar_section_hits: Vec::new(),
+            context_files: Vec::new(),
             palette_list_visible: 0,
         };
         app.blocks.push(Block::Welcome);
         app.project.refresh_if_stale(&app.cwd);
+        app.refresh_context_files();
         app
     }
 
     /// Refresh git project snapshot when the cache is stale.
     pub fn refresh_project(&mut self) {
+        let was_stale = self.project.stale();
         self.project.refresh_if_stale(&self.cwd);
+        if was_stale {
+            self.refresh_context_files();
+        }
+    }
+
+    /// Re-scan project instruction files (AGENTS.md, CLAUDE.md, …).
+    pub fn refresh_context_files(&mut self) {
+        self.context_files = hive_core::discover_context_files(std::path::Path::new(&self.cwd));
     }
 
     pub fn toggle_sidebar(&mut self) {
-        self.sidebar_open = !self.sidebar_open;
+        match self.ui.sidebar_mode {
+            SidebarMode::Pinned => self.flash("Sidebar pinned — /settings to change"),
+            SidebarMode::Hidden => self.flash("Sidebar hidden — /settings to change"),
+            SidebarMode::Auto => self.sidebar_open = !self.sidebar_open,
+        }
+    }
+
+    /// Toggle a collapsible sidebar section (Context / Sub agents / Changes).
+    pub fn toggle_sidebar_section(&mut self, section: SidebarSection) {
+        if !self.ui.sidebar_collapse_sections {
+            return;
+        }
+        self.sidebar_sections.toggle(section);
+    }
+
+    pub fn open_settings(&mut self) {
+        self.close_palette();
+        self.close_about();
+        self.settings = Some(settings::SettingsState::root());
+    }
+
+    pub fn close_settings(&mut self) {
+        self.settings = None;
+    }
+
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// Apply in-memory UI prefs and ask the driver to persist them.
+    pub fn persist_ui(
+        &mut self,
+        input_tx: &tokio::sync::mpsc::UnboundedSender<crate::InputCommand>,
+    ) {
+        self.apply_ui_prefs();
+        let _ = input_tx.send(crate::InputCommand::SaveUi(self.ui.clone()));
+        self.flash("Settings saved");
+    }
+
+    fn apply_ui_prefs(&mut self) {
+        match self.ui.sidebar_mode {
+            SidebarMode::Pinned => self.sidebar_open = true,
+            SidebarMode::Hidden => self.sidebar_open = false,
+            SidebarMode::Auto => {}
+        }
+        // Sync open state with the pref so turning it off collapses again.
+        let open = self.ui.thoughts_always_open;
+        for block in &mut self.blocks {
+            if let Block::Reasoning(th) = block {
+                th.open = open;
+            }
+        }
+        if !self.ui.sidebar_collapse_sections {
+            self.sidebar_sections = SidebarSections::default();
+        }
     }
 
     /// True while viewing a subagent thread (read-only; no input).
@@ -493,7 +606,7 @@ impl App {
         })
     }
 
-    // --- slash command menu ---
+    // --- slash / @file menus ---
 
     /// The prefix typed after `/`, if the menu should be open: input starts
     /// with `/`, is a single line, and has no space yet.
@@ -506,33 +619,89 @@ impl App {
         Some(rest)
     }
 
-    pub fn menu_items(&self) -> Vec<&'static commands::SlashCmd> {
+    pub fn slash_items(&self) -> Vec<&'static commands::SlashCmd> {
         match self.slash_prefix() {
             Some(prefix) => commands::filtered(prefix),
             None => Vec::new(),
         }
     }
 
+    /// Active `@path` query at the cursor (disabled while slash menu owns input).
+    pub fn at_mention(&self) -> Option<AtQuery> {
+        if self.slash_prefix().is_some() {
+            return None;
+        }
+        files::at_query(&self.input.value, self.input.cursor)
+    }
+
+    /// Ensure the project file index is loaded (lazy, once per session).
+    pub fn ensure_file_index(&mut self) {
+        if self.file_index.is_some() {
+            return;
+        }
+        self.file_index = Some(files::index_files(std::path::Path::new(&self.cwd)));
+    }
+
+    /// Filtered file paths for the `@` menu (empty when menu closed).
+    pub fn file_menu_items(&mut self) -> Vec<String> {
+        let Some(q) = self.at_mention() else {
+            return Vec::new();
+        };
+        self.ensure_file_index();
+        let index = self.file_index.as_deref().unwrap_or(&[]);
+        files::filter_files(index, &q.query)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     pub fn menu_up(&mut self) {
-        let n = self.menu_items().len();
+        let n = if !self.slash_items().is_empty() {
+            self.slash_items().len()
+        } else {
+            self.file_menu_items().len()
+        };
         if n > 0 {
             self.menu_index = (self.menu_index + n - 1) % n;
         }
     }
 
     pub fn menu_down(&mut self) {
-        let n = self.menu_items().len();
+        let n = if !self.slash_items().is_empty() {
+            self.slash_items().len()
+        } else {
+            self.file_menu_items().len()
+        };
         if n > 0 {
             self.menu_index = (self.menu_index + 1) % n;
         }
     }
 
     pub fn menu_selected(&self) -> Option<&'static commands::SlashCmd> {
-        let items = self.menu_items();
+        let items = self.slash_items();
         if items.is_empty() {
             return None;
         }
         Some(items[self.menu_index.min(items.len() - 1)])
+    }
+
+    pub fn file_menu_selected(&mut self) -> Option<String> {
+        let items = self.file_menu_items();
+        if items.is_empty() {
+            return None;
+        }
+        Some(items[self.menu_index.min(items.len() - 1)].clone())
+    }
+
+    /// Replace `@query` with `` `path` `` and leave a trailing space.
+    pub fn complete_at_file(&mut self, rel: &str) {
+        let Some(q) = self.at_mention() else {
+            return;
+        };
+        let end = self.input.cursor;
+        let insert = format!("`{rel}` ");
+        self.input.replace_chars(q.at, end, &insert);
+        self.reset_menu();
     }
 
     pub fn reset_menu(&mut self) {
@@ -612,7 +781,7 @@ impl App {
     pub fn attach_path(&mut self, path: &str) -> Result<String, String> {
         let path = path.trim();
         if path.is_empty() {
-            return Err("usage: /attach <path>".into());
+            return Err("paste a file path to attach".into());
         }
         let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let is_image = is_image_path(path);
@@ -665,9 +834,30 @@ impl App {
         self.palette = Some(PaletteState::commands());
     }
 
-    pub fn open_model_picker(&mut self) {
+    pub fn open_model_picker(
+        &mut self,
+        input_tx: &tokio::sync::mpsc::UnboundedSender<crate::InputCommand>,
+    ) {
         self.about_open = false;
         self.palette = Some(PaletteState::models());
+        self.models_catalog = ModelsCatalogState::Loading;
+        let _ = input_tx.send(crate::InputCommand::FetchModels);
+    }
+
+    pub fn open_connect_picker(&mut self) {
+        self.about_open = false;
+        self.close_settings();
+        let mut pal = PaletteState::connect();
+        pal.clamp_selection(&self.model_choices, &self.connections);
+        // Prefer selecting the active profile.
+        if let Some(i) = pal
+            .connect_rows(&self.connections)
+            .iter()
+            .position(|r| matches!(r, palette::ConnectRow::Profile(c) if c.id == self.active_connection))
+        {
+            pal.selected = i;
+        }
+        self.palette = Some(pal);
     }
 
     pub fn close_palette(&mut self) {
@@ -680,6 +870,7 @@ impl App {
 
     pub fn open_about(&mut self) {
         self.close_palette();
+        self.close_settings();
         self.about_open = true;
     }
 
@@ -790,8 +981,47 @@ impl App {
                 self.model_display = display;
                 true
             }
+            AgentEvent::ModelsListed { models } => {
+                self.model_choices = models
+                    .into_iter()
+                    .map(|m| ModelChoice {
+                        key: m.id,
+                        display: m.name,
+                        detail: m.detail,
+                        group: m.group,
+                    })
+                    .collect();
+                self.models_catalog = ModelsCatalogState::Ready;
+                if let Some(pal) = self.palette.as_mut() {
+                    if pal.mode == palette::PaletteMode::Models {
+                        pal.clamp_selection(&self.model_choices, &self.connections);
+                    }
+                }
+                true
+            }
+            AgentEvent::ModelsListFailed(err) => {
+                self.models_catalog = ModelsCatalogState::Failed(err);
+                true
+            }
+            AgentEvent::ConnectionsUpdated { active, profiles } => {
+                self.active_connection = active;
+                self.connections = profiles;
+                if let Some(pal) = self.palette.as_mut() {
+                    if matches!(
+                        pal.mode,
+                        palette::PaletteMode::Connect
+                            | palette::PaletteMode::ConnectPresets
+                            | palette::PaletteMode::ConnectKey { .. }
+                    ) {
+                        pal.clamp_selection(&self.model_choices, &self.connections);
+                    }
+                }
+                true
+            }
             AgentEvent::Notice(s) => {
-                self.blocks.push(Block::Notice(s));
+                // Status feedback (model/provider switch, interrupt, …) lives in
+                // the bottom toast — same place as Ctrl+C — not the transcript.
+                self.flash(s);
                 true
             }
             AgentEvent::Error(s) => {
@@ -832,6 +1062,7 @@ impl App {
             }
         }
         let mut th = Thought::new();
+        th.open = self.ui.thoughts_always_open;
         th.text.push_str(t);
         self.blocks.push(Block::Reasoning(th));
     }
@@ -981,7 +1212,10 @@ impl App {
                     card.output.push_str(chunk);
                     const CAP: usize = 8000;
                     if card.output.len() > CAP {
-                        let start = card.output.len() - CAP;
+                        let mut start = card.output.len() - CAP;
+                        while !card.output.is_char_boundary(start) {
+                            start += 1;
+                        }
                         card.output = card.output.split_off(start);
                     }
                     return;
@@ -1143,9 +1377,12 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         })
     }
 
@@ -1241,6 +1478,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_truncation_preserves_utf8_boundaries() {
+        let mut a = app();
+        a.apply(AgentEvent::ToolStarted {
+            id: "shell".into(),
+            name: "run_shell".into(),
+            args_preview: String::new(),
+        });
+        a.apply(AgentEvent::ToolOutput {
+            id: "shell".into(),
+            chunk: format!("{}x", "я".repeat(4000)),
+        });
+
+        let Block::Tool(card) = a.blocks.last().expect("tool card") else {
+            panic!("expected tool card");
+        };
+        assert!(card.output.len() <= 8000);
+        assert!(card.output.is_char_boundary(0));
+    }
+
+    #[test]
     fn plan_amend_message_lists_sections() {
         use hive_core::event::AgentEvent;
 
@@ -1261,8 +1518,9 @@ mod tests {
     fn idle_timeout_blurs_focused_input() {
         let mut a = app();
         assert!(a.input_focused);
-        a.input_last_activity = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64));
+        a.input_last_activity = std::time::Instant::now().checked_sub(
+            std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64),
+        );
         assert!(a.tick(), "idle blur should request a redraw");
         assert!(!a.input_focused);
         assert!(a.input_last_activity.is_none());
@@ -1275,7 +1533,10 @@ mod tests {
         a.scroll_up(100);
         assert_eq!(a.scroll_from_bottom, 3);
         a.set_transcript_max_scroll(1);
-        assert_eq!(a.scroll_from_bottom, 1, "shrinking max must unpin phantom offset");
+        assert_eq!(
+            a.scroll_from_bottom, 1,
+            "shrinking max must unpin phantom offset"
+        );
         assert!(!a.can_scroll_up());
         assert!(a.can_scroll_down());
         a.scroll_down(1);
@@ -1290,8 +1551,9 @@ mod tests {
         assert!(!a.tick());
         assert!(a.input_focused);
 
-        a.input_last_activity = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64));
+        a.input_last_activity = std::time::Instant::now().checked_sub(
+            std::time::Duration::from_millis((INPUT_IDLE_BLUR_MS + 50) as u64),
+        );
         a.note_input_activity();
         assert!(!a.tick());
         assert!(a.input_focused);

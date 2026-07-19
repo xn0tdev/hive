@@ -140,11 +140,7 @@ fn block_brightness(tick: usize, index: usize) -> f32 {
     // One full bounce: 0 → max → 0.
     let cycle = 2.0 * max_i;
     let phase = (tick as f32 * WORKING_SPEED) % cycle;
-    let peak = if phase <= max_i {
-        phase
-    } else {
-        cycle - phase
-    };
+    let peak = if phase <= max_i { phase } else { cycle - phase };
 
     let dist = (peak - index as f32).abs();
     (1.0 - dist / WORKING_SOFT).clamp(0.0, 1.0)
@@ -197,17 +193,17 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         })
     }
 
     fn line_text(line: &Line) -> String {
-        line.spans
-            .iter()
-            .map(|s| s.content.as_str())
-            .collect()
+        line.spans.iter().map(|s| s.content.as_str()).collect()
     }
 
     fn working_glyph_count(text: &str) -> usize {
@@ -248,7 +244,11 @@ mod tests {
 
         // Peak mid-row going right: center bright, neighbors soft, ends dimmer.
         let t_mid = tick_for_peak(2.0);
-        assert!((peak_at(t_mid) - 2.0).abs() < 0.2, "peak={}", peak_at(t_mid));
+        assert!(
+            (peak_at(t_mid) - 2.0).abs() < 0.2,
+            "peak={}",
+            peak_at(t_mid)
+        );
         assert!(block_brightness(t_mid, 2) > 0.9);
         assert!(block_brightness(t_mid, 1) > 0.15);
         assert!(block_brightness(t_mid, 3) > 0.15);
@@ -314,7 +314,10 @@ mod tests {
             .collect();
         assert_eq!(text.chars().count(), WORKING_BLOCKS, "{text}");
         assert!(!text.contains(' '), "unexpected space in cubes: {text:?}");
-        assert!(!text.contains('\u{3000}'), "unexpected ideographic space: {text:?}");
+        assert!(
+            !text.contains('\u{3000}'),
+            "unexpected ideographic space: {text:?}"
+        );
     }
 
     #[test]
@@ -362,10 +365,7 @@ mod tests {
         let build_i = model_row.find("BUILD").unwrap();
         assert!(model_i < cube_i, "model left of cubes: {model_row:?}");
         assert!(cube_i < build_i, "cubes left of chip: {model_row:?}");
-        let cubes: String = model_row[cube_i..]
-            .chars()
-            .take(WORKING_BLOCKS)
-            .collect();
+        let cubes: String = model_row[cube_i..].chars().take(WORKING_BLOCKS).collect();
         assert!(
             cubes
                 .chars()

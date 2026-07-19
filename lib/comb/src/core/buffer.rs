@@ -99,7 +99,10 @@ impl Buffer {
     pub fn set(&mut self, x: u16, y: u16, ch: char, style: Style) {
         if let Some(c) = self.cell_mut(x, y) {
             c.ch = ch;
-            c.style = style;
+            // Patch, don't replace: `None` colours inherit the cell underneath.
+            // Critical for panels — `set_line` clears short-line tails with
+            // `Style::new()`, which must not punch black holes through a painted bg.
+            c.style = c.style.patch(style);
         }
     }
 
@@ -268,7 +271,11 @@ impl Buffer {
         for y in 0..self.height {
             for x in 0..self.width {
                 let ch = self.cells[y as usize * self.width as usize + x as usize].ch;
-                s.push(if ch == '\0' || ch == WIDE_CONT { ' ' } else { ch });
+                s.push(if ch == '\0' || ch == WIDE_CONT {
+                    ' '
+                } else {
+                    ch
+                });
             }
             if y + 1 < self.height {
                 s.push('\n');
@@ -282,6 +289,7 @@ impl Buffer {
 mod tests {
     use super::*;
     use crate::core::style::{Color, Style};
+    use crate::core::text::Span;
 
     #[test]
     fn set_str_clips_at_edge() {
@@ -309,6 +317,32 @@ mod tests {
         b.set_line(0, 0, &Line::from("hi"), 8);
         let row: String = (0..8).map(|x| b.get(x, 0).unwrap().ch).collect();
         assert_eq!(row, "hi      ");
+    }
+
+    #[test]
+    fn set_line_preserves_painted_panel_bg_on_tail() {
+        let panel = Color::rgb(0x22, 0x22, 0x22);
+        let mut b = Buffer::blank(Size::new(10, 1));
+        b.paint(Rect::new(0, 0, 10, 1), Style::new().bg(panel));
+        // Short line + clear remainder (Style::new base) must keep panel bg.
+        b.set_line(
+            0,
+            0,
+            &Line::from(Span::styled(
+                "Settings",
+                Style::new().fg(Color::rgb(0xe0, 0xe0, 0xe0)),
+            )),
+            10,
+        );
+        for x in 0..10 {
+            assert_eq!(
+                b.get(x, 0).unwrap().style.bg,
+                Some(panel),
+                "col {x} lost panel bg"
+            );
+        }
+        assert_eq!(b.get(0, 0).unwrap().ch, 'S');
+        assert_eq!(b.get(8, 0).unwrap().ch, ' ');
     }
 
     #[test]

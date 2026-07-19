@@ -1,12 +1,44 @@
-//! Command palette and nested model-picker state.
+//! Command palette, model picker, and `/connect` provider menu.
+
+use hive_core::event::ConnectionInfo;
 
 use crate::commands::{self, CmdId, PaletteRow};
+use crate::intro::PRESETS;
 use crate::ModelChoice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteMode {
     Commands,
     Models,
+    /// Saved providers + Add.
+    Connect,
+    /// Pick a preset to add.
+    ConnectPresets,
+    /// Paste API key for the chosen preset.
+    ConnectKey {
+        preset_idx: usize,
+    },
+}
+
+/// One row in the model picker (provider header or selectable model).
+#[derive(Debug, Clone, Copy)]
+pub enum ModelRow<'a> {
+    Header(&'a str),
+    Model(&'a ModelChoice),
+}
+
+impl ModelRow<'_> {
+    pub fn is_selectable(self) -> bool {
+        matches!(self, ModelRow::Model(_))
+    }
+}
+
+/// One row in the `/connect` list.
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectRow<'a> {
+    Profile(&'a ConnectionInfo),
+    Add,
+    RemoveActive,
 }
 
 #[derive(Debug, Clone)]
@@ -15,12 +47,11 @@ pub struct PaletteState {
     pub query: String,
     /// Byte index into `query` for the search caret.
     pub cursor: usize,
-    /// Index into the current row list (headers + commands).
+    /// Index into the current row list.
     pub selected: usize,
-    /// First visible row in the scrollable list (keyboard overflow viewport).
+    /// First visible row in the scrollable list.
     pub list_offset: usize,
-    /// Search field has the caret. Starts false so the list can be navigated
-    /// first; set when the user types into search.
+    /// Search field has the caret.
     pub search_focused: bool,
 }
 
@@ -48,9 +79,46 @@ impl PaletteState {
         }
     }
 
-    /// Keep `selected` inside the viewport after keyboard navigation.
-    pub fn ensure_selection_visible(&mut self, choices: &[ModelChoice], visible: usize) {
-        let (len, vis) = self.scroll_metrics(choices, visible);
+    pub fn connect() -> Self {
+        PaletteState {
+            mode: PaletteMode::Connect,
+            query: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_offset: 0,
+            search_focused: false,
+        }
+    }
+
+    pub fn connect_presets() -> Self {
+        PaletteState {
+            mode: PaletteMode::ConnectPresets,
+            query: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_offset: 0,
+            search_focused: false,
+        }
+    }
+
+    pub fn connect_key(preset_idx: usize) -> Self {
+        PaletteState {
+            mode: PaletteMode::ConnectKey { preset_idx },
+            query: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_offset: 0,
+            search_focused: true,
+        }
+    }
+
+    pub fn ensure_selection_visible(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        visible: usize,
+    ) {
+        let (len, vis) = self.scroll_metrics(choices, connections, visible);
         if len == 0 || vis == 0 {
             self.list_offset = 0;
             return;
@@ -66,17 +134,20 @@ impl PaletteState {
         self.list_offset = off.min(max_off);
     }
 
-    fn scroll_metrics(&self, choices: &[ModelChoice], visible: usize) -> (usize, usize) {
-        match self.mode {
-            PaletteMode::Commands => (self.command_rows().len(), visible),
-            PaletteMode::Models => {
-                // Sticky "Models" header consumes one viewport row.
-                (
-                    self.model_rows(choices).len(),
-                    visible.saturating_sub(1),
-                )
-            }
-        }
+    fn scroll_metrics(
+        &self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        visible: usize,
+    ) -> (usize, usize) {
+        let len = match self.mode {
+            PaletteMode::Commands => self.command_rows().len(),
+            PaletteMode::Models => self.model_rows(choices).len(),
+            PaletteMode::Connect => self.connect_rows(connections).len(),
+            PaletteMode::ConnectPresets => self.preset_indices().len(),
+            PaletteMode::ConnectKey { .. } => 0,
+        };
+        (len, visible)
     }
 
     pub fn focus_search(&mut self) {
@@ -87,22 +158,75 @@ impl PaletteState {
         commands::palette_rows(&self.query)
     }
 
-    pub fn model_rows<'a>(&self, choices: &'a [ModelChoice]) -> Vec<&'a ModelChoice> {
+    pub fn model_rows<'a>(&self, choices: &'a [ModelChoice]) -> Vec<ModelRow<'a>> {
         let q = self.query.trim().to_ascii_lowercase();
-        if q.is_empty() {
-            return choices.iter().collect();
+        let filtered: Vec<&'a ModelChoice> = if q.is_empty() {
+            choices.iter().collect()
+        } else {
+            choices
+                .iter()
+                .filter(|c| {
+                    c.key.to_ascii_lowercase().contains(&q)
+                        || c.display.to_ascii_lowercase().contains(&q)
+                        || c.detail.to_ascii_lowercase().contains(&q)
+                        || c.group.to_ascii_lowercase().contains(&q)
+                })
+                .collect()
+        };
+
+        let mut rows = Vec::new();
+        let mut last_group: Option<&str> = None;
+        for c in filtered {
+            let g = if c.group.is_empty() {
+                "Models"
+            } else {
+                c.group.as_str()
+            };
+            if last_group != Some(g) {
+                rows.push(ModelRow::Header(g));
+                last_group = Some(g);
+            }
+            rows.push(ModelRow::Model(c));
         }
-        choices
+        rows
+    }
+
+    pub fn connect_rows<'a>(&self, connections: &'a [ConnectionInfo]) -> Vec<ConnectRow<'a>> {
+        let q = self.query.trim().to_ascii_lowercase();
+        let mut rows: Vec<ConnectRow<'a>> = connections
             .iter()
             .filter(|c| {
-                c.key.to_ascii_lowercase().contains(&q)
-                    || c.display.to_ascii_lowercase().contains(&q)
+                q.is_empty()
+                    || c.label.to_ascii_lowercase().contains(&q)
                     || c.detail.to_ascii_lowercase().contains(&q)
+                    || c.id.to_ascii_lowercase().contains(&q)
             })
+            .map(ConnectRow::Profile)
+            .collect();
+        rows.push(ConnectRow::Add);
+        if connections.len() > 1 {
+            rows.push(ConnectRow::RemoveActive);
+        }
+        rows
+    }
+
+    /// Indices into [`PRESETS`] (Custom last, filterable).
+    pub fn preset_indices(&self) -> Vec<usize> {
+        let q = self.query.trim().to_ascii_lowercase();
+        PRESETS
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                !p.is_custom
+                    && (q.is_empty()
+                        || p.label.to_ascii_lowercase().contains(&q)
+                        || p.base_url.to_ascii_lowercase().contains(&q))
+            })
+            .map(|(i, _)| i)
             .collect()
     }
 
-    pub fn clamp_selection(&mut self, choices: &[ModelChoice]) {
+    pub fn clamp_selection(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
@@ -115,66 +239,131 @@ impl PaletteState {
                 }
             }
             PaletteMode::Models => {
-                let n = self.model_rows(choices).len();
+                let rows = self.model_rows(choices);
+                if rows.is_empty() {
+                    self.selected = 0;
+                    return;
+                }
+                if self.selected >= rows.len() || !rows[self.selected].is_selectable() {
+                    self.selected = first_selectable_model(&rows);
+                }
+            }
+            PaletteMode::Connect => {
+                let n = self.connect_rows(connections).len();
                 if n == 0 {
                     self.selected = 0;
                 } else if self.selected >= n {
                     self.selected = n - 1;
                 }
             }
+            PaletteMode::ConnectPresets => {
+                let n = self.preset_indices().len();
+                if n == 0 {
+                    self.selected = 0;
+                } else if self.selected >= n {
+                    self.selected = n - 1;
+                }
+            }
+            PaletteMode::ConnectKey { .. } => {
+                self.selected = 0;
+            }
         }
     }
 
-    pub fn move_up(&mut self, choices: &[ModelChoice]) {
+    pub fn move_up(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
                 self.selected = commands::move_selection(&rows, self.selected, -1);
             }
             PaletteMode::Models => {
-                let n = self.model_rows(choices).len();
+                let rows = self.model_rows(choices);
+                self.selected = move_model_selection(&rows, self.selected, -1);
+            }
+            PaletteMode::Connect => {
+                let n = self.connect_rows(connections).len();
                 if n > 0 {
                     self.selected = (self.selected + n - 1) % n;
                 }
             }
+            PaletteMode::ConnectPresets => {
+                let n = self.preset_indices().len();
+                if n > 0 {
+                    self.selected = (self.selected + n - 1) % n;
+                }
+            }
+            PaletteMode::ConnectKey { .. } => {}
         }
     }
 
-    pub fn move_down(&mut self, choices: &[ModelChoice]) {
+    pub fn move_down(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
                 self.selected = commands::move_selection(&rows, self.selected, 1);
             }
             PaletteMode::Models => {
-                let n = self.model_rows(choices).len();
+                let rows = self.model_rows(choices);
+                self.selected = move_model_selection(&rows, self.selected, 1);
+            }
+            PaletteMode::Connect => {
+                let n = self.connect_rows(connections).len();
                 if n > 0 {
                     self.selected = (self.selected + 1) % n;
                 }
             }
+            PaletteMode::ConnectPresets => {
+                let n = self.preset_indices().len();
+                if n > 0 {
+                    self.selected = (self.selected + 1) % n;
+                }
+            }
+            PaletteMode::ConnectKey { .. } => {}
         }
     }
 
-    /// Keyboard up/down: move selection and keep it painted in the viewport.
-    pub fn move_up_visible(&mut self, choices: &[ModelChoice], visible: usize) {
-        self.move_up(choices);
-        self.ensure_selection_visible(choices, visible);
+    pub fn move_up_visible(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        visible: usize,
+    ) {
+        self.move_up(choices, connections);
+        self.ensure_selection_visible(choices, connections, visible);
     }
 
-    pub fn move_down_visible(&mut self, choices: &[ModelChoice], visible: usize) {
-        self.move_down(choices);
-        self.ensure_selection_visible(choices, visible);
+    pub fn move_down_visible(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        visible: usize,
+    ) {
+        self.move_down(choices, connections);
+        self.ensure_selection_visible(choices, connections, visible);
     }
 
-    pub fn insert(&mut self, ch: char, choices: &[ModelChoice]) {
+    pub fn insert(&mut self, ch: char, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         self.focus_search();
         let idx = self.byte_at(self.cursor);
         self.query.insert(idx, ch);
         self.cursor += 1;
-        self.after_query_change(choices);
+        self.after_query_change(choices, connections);
     }
 
-    pub fn backspace(&mut self, choices: &[ModelChoice]) {
+    /// Insert a multi-char paste at the cursor (API key / search filter).
+    pub fn insert_str(&mut self, text: &str, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+        if text.is_empty() {
+            return;
+        }
+        self.focus_search();
+        let idx = self.byte_at(self.cursor);
+        let n = text.chars().count();
+        self.query.insert_str(idx, text);
+        self.cursor += n;
+        self.after_query_change(choices, connections);
+    }
+
+    pub fn backspace(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         if !self.search_focused {
             return;
         }
@@ -185,7 +374,7 @@ impl PaletteState {
         let end = self.byte_at(self.cursor);
         self.query.replace_range(start..end, "");
         self.cursor -= 1;
-        self.after_query_change(choices);
+        self.after_query_change(choices, connections);
     }
 
     pub fn left(&mut self) {
@@ -204,7 +393,7 @@ impl PaletteState {
         }
     }
 
-    fn after_query_change(&mut self, choices: &[ModelChoice]) {
+    fn after_query_change(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
         self.list_offset = 0;
         match self.mode {
             PaletteMode::Commands => {
@@ -212,15 +401,24 @@ impl PaletteState {
                 self.selected = commands::first_selectable(&rows);
             }
             PaletteMode::Models => {
-                self.selected = 0;
-                self.clamp_selection(choices);
+                let rows = self.model_rows(choices);
+                self.selected = first_selectable_model(&rows);
             }
+            PaletteMode::Connect | PaletteMode::ConnectPresets => {
+                self.selected = 0;
+                self.clamp_selection(choices, connections);
+            }
+            PaletteMode::ConnectKey { .. } => {}
         }
     }
 
-    /// First visible index for the scrollable list.
-    pub fn visible_offset(&self, choices: &[ModelChoice], visible: usize) -> usize {
-        let (len, vis) = self.scroll_metrics(choices, visible);
+    pub fn visible_offset(
+        &self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        visible: usize,
+    ) -> usize {
+        let (len, vis) = self.scroll_metrics(choices, connections, visible);
         if len == 0 || vis == 0 {
             return 0;
         }
@@ -248,10 +446,51 @@ impl PaletteState {
             return None;
         }
         let rows = self.model_rows(choices);
-        rows.get(self.selected).copied()
+        match rows.get(self.selected) {
+            Some(ModelRow::Model(c)) => Some(*c),
+            _ => None,
+        }
+    }
+
+    pub fn selected_connect<'a>(
+        &self,
+        connections: &'a [ConnectionInfo],
+    ) -> Option<ConnectRow<'a>> {
+        if self.mode != PaletteMode::Connect {
+            return None;
+        }
+        self.connect_rows(connections).get(self.selected).copied()
+    }
+
+    pub fn selected_preset_idx(&self) -> Option<usize> {
+        if self.mode != PaletteMode::ConnectPresets {
+            return None;
+        }
+        self.preset_indices().get(self.selected).copied()
     }
 
     pub fn selected_cmd_id(&self) -> Option<CmdId> {
         self.selected_command().map(|c| c.id)
     }
+}
+
+fn first_selectable_model(rows: &[ModelRow<'_>]) -> usize {
+    rows.iter()
+        .position(|r| r.is_selectable())
+        .unwrap_or(0)
+}
+
+fn move_model_selection(rows: &[ModelRow<'_>], current: usize, dir: isize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let n = rows.len() as isize;
+    let mut i = current as isize;
+    for _ in 0..rows.len() {
+        i = (i + dir).rem_euclid(n);
+        if rows[i as usize].is_selectable() {
+            return i as usize;
+        }
+    }
+    current.min(rows.len() - 1)
 }

@@ -90,10 +90,43 @@ pub enum AgentEvent {
         /// Pretty label for the TUI.
         display: String,
     },
+    /// Live `/models` catalog for the Switch-model picker.
+    ModelsListed {
+        models: Vec<CatalogModel>,
+    },
+    /// Catalog fetch failed.
+    ModelsListFailed(String),
+    /// `/connect` profiles changed or active provider switched.
+    ConnectionsUpdated {
+        active: String,
+        profiles: Vec<ConnectionInfo>,
+    },
     /// Informational notice (e.g. "Exa disabled: no key").
     Notice(String),
     Error(String),
     TurnFinished,
+}
+
+/// One row in the live model catalog (grouped under `group`).
+#[derive(Debug, Clone)]
+pub struct CatalogModel {
+    /// Provider model id (API).
+    pub id: String,
+    /// Pretty label.
+    pub name: String,
+    /// Secondary text (badges / short id).
+    pub detail: String,
+    /// Section header (provider or org).
+    pub group: String,
+}
+
+/// One saved provider in the `/connect` picker.
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    pub id: String,
+    pub label: String,
+    /// Short secondary line (host).
+    pub detail: String,
 }
 
 /// The channel end used to push events toward the frontend. Unbounded so the

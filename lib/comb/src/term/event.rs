@@ -40,6 +40,7 @@ pub enum KeyCode {
     Backspace,
     Tab,
     Delete,
+    Insert,
     Left,
     Right,
     Up,
@@ -81,11 +82,13 @@ pub struct Mouse {
     pub row: u16,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Event {
     Key(Key),
     Mouse(Mouse),
     Resize(u16, u16),
+    /// Bracketed paste (`\x1b[200~` … `\x1b[201~`).
+    Paste(String),
 }
 
 fn key(code: KeyCode, mods: KeyMods) -> Event {
@@ -212,6 +215,12 @@ fn parse_csi(buf: &mut Vec<u8>) -> Option<Event> {
     let final_byte = buf[end];
     let params = parse_params(&buf[2..end]);
 
+    // Bracketed paste: ESC [ 200 ~ <bytes> ESC [ 201 ~
+    // Do not drain the start marker until the end marker is present.
+    if final_byte == b'~' && params.first() == Some(&200) {
+        return parse_bracketed_paste(buf, end);
+    }
+
     let event = match final_byte {
         b'A' => Some(key(KeyCode::Up, mods_from_csi(&params, 1))),
         b'B' => Some(key(KeyCode::Down, mods_from_csi(&params, 1))),
@@ -227,6 +236,30 @@ fn parse_csi(buf: &mut Vec<u8>) -> Option<Event> {
 
     buf.drain(0..=end);
     event
+}
+
+/// Consume `\x1b[200~…\x1b[201~` into [`Event::Paste`]. `start_end` is the
+/// index of `~` in the opening CSI.
+fn parse_bracketed_paste(buf: &mut Vec<u8>, start_end: usize) -> Option<Event> {
+    const END: &[u8] = b"\x1b[201~";
+    let content_at = start_end + 1;
+    let Some(rel) = find_bytes(&buf[content_at..], END) else {
+        return None; // wait for more bytes; leave buffer intact
+    };
+    let content = &buf[content_at..content_at + rel];
+    let paste = match std::str::from_utf8(content) {
+        Ok(s) => s.to_string(),
+        Err(_) => String::from_utf8_lossy(content).into_owned(),
+    };
+    buf.drain(0..content_at + rel + END.len());
+    Some(Event::Paste(paste))
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Kitty keyboard protocol key event. Ignores key-release (`*:3`) so letters
@@ -256,6 +289,7 @@ fn parse_csi_tilde(params: &[u32]) -> Option<Event> {
     let mods = mods_from_csi(params, 0);
     let code = match id {
         1 | 7 => KeyCode::Home,
+        2 => KeyCode::Insert,
         4 | 8 => KeyCode::End,
         3 => KeyCode::Delete,
         5 => KeyCode::PageUp,
@@ -498,5 +532,27 @@ mod tests {
     fn utf8_multibyte() {
         let mut b = "→".as_bytes().to_vec();
         assert_eq!(parse(&mut b), Some(key(KeyCode::Char('→'), KeyMods::NONE)));
+    }
+
+    #[test]
+    fn bracketed_paste() {
+        let mut b = b"\x1b[200~sk-abc123\x1b[201~".to_vec();
+        assert_eq!(parse(&mut b), Some(Event::Paste("sk-abc123".into())));
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn insert_and_shift_insert() {
+        let mut b = b"\x1b[2~".to_vec();
+        assert_eq!(parse(&mut b), Some(key(KeyCode::Insert, KeyMods::NONE)));
+        let mut b = b"\x1b[2;2~".to_vec();
+        assert_eq!(parse(&mut b), Some(key(KeyCode::Insert, KeyMods::SHIFT)));
+    }
+
+    #[test]
+    fn bracketed_paste_incomplete_waits() {
+        let mut b = b"\x1b[200~partial".to_vec();
+        assert_eq!(parse(&mut b), None);
+        assert_eq!(b, b"\x1b[200~partial");
     }
 }

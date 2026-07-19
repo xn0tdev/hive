@@ -24,9 +24,12 @@ pub mod swarm;
 pub mod tools;
 mod vision_impl;
 
-pub use config::{AppConfig, ModelRef, ModelRole, Secrets};
+pub use config::{AppConfig, ModelRef, ModelRole, SearchBackend, Secrets, SidebarMode, UiConfig};
 pub use error::{CoreError, Result};
-pub use event::{AgentEvent, EventReceiver, EventSender, Renderer, SubagentLine, SubagentStatus};
+pub use event::{
+    AgentEvent, CatalogModel, ConnectionInfo, EventReceiver, EventSender, Renderer, SubagentLine,
+    SubagentStatus,
+};
 pub use message::{ContentPart, ImageSource, Message, Role, ToolCall};
 pub use provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
 pub use skill::{no_skills, NoSkills, SkillMeta, SkillSource};
@@ -35,8 +38,8 @@ pub use tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 pub use vision::{no_vision, NoVision, VisionDescriber};
 
 pub use agent::{
-    is_plan_path, plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary, Agent,
-    AgentBuilder, AgentMode, Session, UserInput, PLAN_REL_PATH,
+    discover_context_files, is_plan_path, plan_mode_check, plan_mode_tool_allowed, plan_path,
+    plan_summary, Agent, AgentBuilder, AgentMode, ContextFile, Session, UserInput, PLAN_REL_PATH,
 };
 pub use skills::DiskSkills;
 pub use swarm::new_spawner;

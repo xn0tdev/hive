@@ -2,17 +2,54 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 
 use super::{str_arg, u64_arg};
 
 const OUTPUT_CAP: usize = 60_000;
+
+fn collect_line(ctx: &ToolContext, collected: &mut String, truncated: &mut bool, line: String) {
+    ctx.emit_output(format!("{line}\n"));
+    if !*truncated {
+        if collected.len() + line.len() + 1 > OUTPUT_CAP {
+            *truncated = true;
+            collected.push_str("\n… [output truncated]\n");
+        } else {
+            collected.push_str(&line);
+            collected.push('\n');
+        }
+    }
+}
+
+async fn terminate(child: &mut Child) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // The child is its process-group leader, so a negative PID kills
+            // the shell and every process it started.
+            let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if rc != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+        child.wait().await.map(|_| ())
+    }
+
+    #[cfg(not(unix))]
+    {
+        child.kill().await
+    }
+}
 
 pub struct RunShell;
 
@@ -43,15 +80,17 @@ impl Tool for RunShell {
         };
         let timeout = u64_arg(&args, "timeout_secs");
 
-        let mut child = match Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("failed to spawn: {e}")),
         };
@@ -85,16 +124,7 @@ impl Tool for RunShell {
 
         let drain_and_wait = async {
             while let Some(line) = rx.recv().await {
-                ctx.emit_output(format!("{line}\n"));
-                if !truncated {
-                    if collected.len() + line.len() + 1 > OUTPUT_CAP {
-                        truncated = true;
-                        collected.push_str("\n… [output truncated]\n");
-                    } else {
-                        collected.push_str(&line);
-                        collected.push('\n');
-                    }
-                }
+                collect_line(ctx, &mut collected, &mut truncated, line);
             }
             child.wait().await
         };
@@ -104,12 +134,15 @@ impl Tool for RunShell {
                 match tokio::time::timeout(Duration::from_secs(secs), drain_and_wait).await {
                     Ok(st) => st,
                     Err(_) => {
-                        // timed out; the future is dropped which releases `child`, but
-                        // the process may still run — best-effort kill via pkill is not
-                        // reliable, so report the timeout clearly.
-                        return ToolResult::error(format!(
-                            "command timed out after {secs}s\n{collected}"
-                        ));
+                        let kill_error = terminate(&mut child).await.err();
+                        while let Some(line) = rx.recv().await {
+                            collect_line(ctx, &mut collected, &mut truncated, line);
+                        }
+                        let mut message = format!("command timed out after {secs}s\n{collected}");
+                        if let Some(error) = kill_error {
+                            message.push_str(&format!("\nfailed to terminate command: {error}"));
+                        }
+                        return ToolResult::error(message);
                     }
                 }
             }
@@ -121,9 +154,19 @@ impl Tool for RunShell {
                 let code = st.code().unwrap_or(-1);
                 let header = format!("exit {code}\n");
                 if collected.trim().is_empty() {
-                    ToolResult::ok(format!("{header}(no output)"))
+                    let content = format!("{header}(no output)");
+                    if st.success() {
+                        ToolResult::ok(content)
+                    } else {
+                        ToolResult::error(content)
+                    }
                 } else {
-                    ToolResult::ok(format!("{header}{collected}"))
+                    let content = format!("{header}{collected}");
+                    if st.success() {
+                        ToolResult::ok(content)
+                    } else {
+                        ToolResult::error(content)
+                    }
                 }
             }
             Err(e) => ToolResult::error(format!("wait failed: {e}\n{collected}")),
@@ -132,3 +175,65 @@ impl Tool for RunShell {
 }
 
 inventory::submit! { ToolRegistration { make: || Arc::new(RunShell) as Arc<dyn Tool> } }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{no_skills, noop_spawner, AppConfig};
+    use std::path::PathBuf;
+
+    fn context(cwd: PathBuf) -> ToolContext {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        ToolContext {
+            cwd,
+            events,
+            spawner: noop_spawner(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+            depth: 0,
+            call_id: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_is_an_error() {
+        let result = RunShell
+            .execute(
+                json!({"command": "printf nope; exit 7"}),
+                &context(PathBuf::from(".")),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result.content.starts_with("exit 7\nnope"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_descendant_processes() {
+        let marker = std::env::temp_dir().join(format!(
+            "hive-shell-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let command = format!("(sleep 2; printf leaked > '{}') & wait", marker.display());
+        let result = RunShell
+            .execute(
+                json!({"command": command, "timeout_secs": 1}),
+                &context(PathBuf::from(".")),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.starts_with("command timed out after 1s"));
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(!marker.exists(), "descendant survived the timeout");
+    }
+}

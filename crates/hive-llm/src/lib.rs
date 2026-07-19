@@ -5,7 +5,9 @@
 //! - `wire/` — request/response JSON shapes and conversions.
 //! - `stream/` — SSE delta accumulation into a finished message.
 //! - `provider/` — the concrete client(s).
+//! - [`catalog`] — `GET /models` listing + models.dev enrichment (setup / picker).
 
+pub mod catalog;
 mod provider;
 mod stream;
 mod wire;

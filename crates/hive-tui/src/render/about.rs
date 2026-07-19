@@ -113,10 +113,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     if hint_y > y {
         // Clear middle rows so the panel stays solid.
         for yy in y..hint_y {
-            buf.paint(
-                Rect::new(g.content.x, yy, g.content.width, 1),
-                panel_style,
-            );
+            buf.paint(Rect::new(g.content.x, yy, g.content.width, 1), panel_style);
         }
     }
     if hint_y >= g.content.y {
@@ -239,9 +236,12 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
+            ui: Default::default(),
         });
         a.open_about();
         a

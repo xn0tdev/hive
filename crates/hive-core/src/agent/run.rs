@@ -125,6 +125,17 @@ impl Agent {
         self.model = model.into();
     }
 
+    /// Swap the LLM HTTP client (e.g. after `/connect` switches provider).
+    pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        self.provider = provider;
+    }
+
+    /// Swap the vision describer (usually rebuilt with the new provider).
+    pub fn set_vision(&mut self, vision: Arc<dyn VisionDescriber>) {
+        self.vision = vision;
+        self.vision_cache.clear();
+    }
+
     /// Apply BUILD/PLAN for the next turn and refresh the system prompt.
     pub fn set_mode(&mut self, mode: AgentMode) {
         if self.mode == mode {

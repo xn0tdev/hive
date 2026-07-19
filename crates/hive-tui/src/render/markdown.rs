@@ -46,6 +46,13 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
             continue;
         }
 
+        // Classic ASCII `+---+` tables → same clean box-drawing layout.
+        if let Some(owned_rows) = take_ascii_table(&raw_lines, &mut i) {
+            let refs: Vec<&str> = owned_rows.iter().map(String::as_str).collect();
+            flush_table(&mut lines, &refs, theme, width);
+            continue;
+        }
+
         // GFM table: header + separator, or a run of pipe-rows (models often
         // drop the separator / insert blank lines mid-table).
         if let Some(table_rows) = take_table(&raw_lines, &mut i) {
@@ -103,6 +110,51 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
     }
 
     lines
+}
+
+/// Consume a classic ASCII bordered table (`+---+` / `| cell |`) into pipe-rows
+/// suitable for [`flush_table`]. Skips border lines; advances `i` past the block.
+fn take_ascii_table(raw_lines: &[&str], i: &mut usize) -> Option<Vec<String>> {
+    let start = *i;
+    let first = raw_lines.get(start)?.trim();
+    if !is_ascii_table_border(first) {
+        return None;
+    }
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut j = start;
+    while j < raw_lines.len() {
+        let t = raw_lines[j].trim();
+        if t.is_empty() {
+            break;
+        }
+        if is_ascii_table_border(t) {
+            j += 1;
+            continue;
+        }
+        if looks_like_table_row(t) {
+            // Normalize to a plain pipe-row (no leading/trailing spaces noise).
+            rows.push(t.to_string());
+            j += 1;
+            continue;
+        }
+        break;
+    }
+
+    if rows.len() < 2 {
+        return None;
+    }
+    *i = j;
+    Some(rows)
+}
+
+fn is_ascii_table_border(s: &str) -> bool {
+    let t = s.trim();
+    if t.len() < 3 || !t.contains('+') || !t.contains('-') {
+        return false;
+    }
+    t.chars()
+        .all(|c| c == '+' || c == '-' || c == '=' || c == '|' || c.is_whitespace())
 }
 
 /// Consume a markdown table starting at `i`, advancing `i` past it.
@@ -303,7 +355,12 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
     let body = Style::default().fg(theme.fg);
     let rule = Style::default().fg(theme.faint);
 
+    // Continuous light rules (─) + vertical │ — no ASCII `+` / heavy junctions.
     let table_w: usize = widths.iter().sum::<usize>() + sep_w * cols.saturating_sub(1);
+    let hrule = || Line::from(Span::styled("─".repeat(table_w.max(3)), rule));
+
+    let mut wrote_body = false;
+    let mut wrote_header = false;
 
     for (ri, row) in parsed.iter().enumerate() {
         if ri == 0 && header_empty {
@@ -311,6 +368,10 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
         }
         let is_header = ri == 0 && !header_empty;
         let st = if is_header { head } else { body };
+
+        if is_header && !wrote_header {
+            lines.push(hrule());
+        }
 
         // Wrap each cell into lines of at most widths[ci] display columns.
         let mut cell_lines: Vec<Vec<String>> = Vec::with_capacity(cols);
@@ -358,8 +419,15 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
         }
 
         if is_header {
-            lines.push(Line::from(Span::styled("─".repeat(table_w.max(3)), rule)));
+            lines.push(hrule());
+            wrote_header = true;
+        } else {
+            wrote_body = true;
         }
+    }
+
+    if wrote_body || wrote_header {
+        lines.push(hrule());
     }
 }
 
@@ -770,5 +838,28 @@ mod tests {
                 display_width(r)
             );
         }
+    }
+
+    #[test]
+    fn ascii_plus_tables_become_clean_rules() {
+        let md = "\
++--------+--------+
+| Check  | Status |
++--------+--------+
+| Build  | ok     |
+| Tests  | pass   |
++--------+--------+
+";
+        let out = render(md, &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("Check"));
+        assert!(t.contains("Build"));
+        assert!(t.contains('│'));
+        assert!(t.contains('─'));
+        assert!(!t.contains('+'), "ASCII + borders must not appear: {t}");
+        assert!(!t.contains("|---"), "{t}");
+        // Continuous rules, not junction glyphs.
+        assert!(!t.contains('┼'), "{t}");
+        assert!(!t.contains('┌'), "{t}");
     }
 }
