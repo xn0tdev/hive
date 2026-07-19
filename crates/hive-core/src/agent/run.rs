@@ -14,8 +14,13 @@ use crate::spawner::SubagentSpawner;
 use crate::tool::{Tool, ToolContext, ToolResult};
 use crate::vision::VisionDescriber;
 
+use super::compact::{
+    compacted_messages, estimate_tokens, format_transcript, should_compact, summarize_request,
+    MIN_MESSAGES_TO_COMPACT,
+};
 use super::mode::{
-    plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
+    multitask_mode_check, multitask_mode_tool_allowed, plan_mode_check, plan_mode_tool_allowed,
+    plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
 };
 use super::prompt::build_system_prompt;
 use super::session::Session;
@@ -64,12 +69,27 @@ impl AgentBuilder {
         depth: usize,
         spawner: Arc<dyn SubagentSpawner>,
     ) -> Agent {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.build_in(
+            events,
+            model,
+            depth,
+            spawner,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    pub fn build_in(
+        &self,
+        events: EventSender,
+        model: String,
+        depth: usize,
+        spawner: Arc<dyn SubagentSpawner>,
+        cwd: PathBuf,
+    ) -> Agent {
         let mode = AgentMode::Build;
         let system = build_system_prompt(&cwd, self.skills.as_ref(), depth > 0, mode);
         Agent {
             provider: self.provider.clone(),
-            tool_specs: tool_specs(&self.tools),
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             vision: self.vision.clone(),
@@ -82,19 +102,9 @@ impl AgentBuilder {
             cwd,
             mode,
             vision_cache: HashMap::new(),
+            last_prompt_tokens: 0,
         }
     }
-}
-
-fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
-    tools
-        .iter()
-        .map(|t| ToolSpec {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters(),
-        })
-        .collect()
 }
 
 /// One conversational agent: a provider, a tool set, and a running session.
@@ -102,7 +112,6 @@ fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: Vec<Arc<dyn Tool>>,
-    tool_specs: Vec<ToolSpec>,
     skills: Arc<dyn SkillSource>,
     vision: Arc<dyn VisionDescriber>,
     config: Arc<AppConfig>,
@@ -114,6 +123,8 @@ pub struct Agent {
     cwd: PathBuf,
     mode: AgentMode,
     vision_cache: HashMap<String, String>,
+    /// Prompt tokens from the most recent chat request (for auto-compact).
+    last_prompt_tokens: u64,
 }
 
 impl Agent {
@@ -149,18 +160,51 @@ impl Agent {
     }
 
     fn active_tool_specs(&self) -> Vec<ToolSpec> {
-        if self.depth > 0 || self.mode == AgentMode::Build {
-            return self.tool_specs.clone();
+        // Subagents always get the full BUILD tool set (no swarm fan-out).
+        if self.depth > 0 {
+            return self
+                .tools
+                .iter()
+                .filter(|t| t.name() != "spawn_swarm" && t.name() != "integrate_worktree")
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect();
         }
-        self.tools
-            .iter()
-            .filter(|t| plan_mode_tool_allowed(t.name()))
-            .map(|t| ToolSpec {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                parameters: t.parameters(),
-            })
-            .collect()
+        match self.mode {
+            AgentMode::Build => self
+                .tools
+                .iter()
+                .filter(|t| t.name() != "spawn_swarm" && t.name() != "integrate_worktree")
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+            AgentMode::Plan => self
+                .tools
+                .iter()
+                .filter(|t| plan_mode_tool_allowed(t.name()))
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+            AgentMode::Multitask => self
+                .tools
+                .iter()
+                .filter(|t| multitask_mode_tool_allowed(t.name()))
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+        }
     }
 
     pub fn usage(&self) -> Usage {
@@ -170,10 +214,91 @@ impl Agent {
     pub fn reset(&mut self) {
         self.session.reset();
         self.vision_cache.clear();
+        self.last_prompt_tokens = 0;
+    }
+
+    fn context_window(&self) -> u64 {
+        let w = self.config.agent.context_window;
+        if w == 0 {
+            crate::config::DEFAULT_CONTEXT_WINDOW
+        } else {
+            w
+        }
     }
 
     fn emit(&self, e: AgentEvent) {
         let _ = self.events.send(e);
+    }
+
+    /// Manually compact conversation history (`/compact`).
+    pub async fn compact(&mut self) -> Result<(), String> {
+        self.compact_inner(true).await
+    }
+
+    /// Auto-compact at 75% context when needed (silent no-op otherwise).
+    async fn maybe_auto_compact(&mut self) {
+        if let Err(e) = self.compact_inner(false).await {
+            // Don't stall the turn — just surface the failure.
+            self.emit(AgentEvent::Notice(e));
+        }
+    }
+
+    async fn compact_inner(&mut self, force: bool) -> Result<(), String> {
+        if self.session.messages.len() < MIN_MESSAGES_TO_COMPACT {
+            if force {
+                return Err("nothing to compact yet".into());
+            }
+            return Ok(());
+        }
+
+        let window = self.context_window();
+        let estimated = estimate_tokens(&self.session.messages);
+        let over = should_compact(self.last_prompt_tokens, window)
+            || should_compact(estimated, window);
+        if !force && !over {
+            return Ok(());
+        }
+
+        self.emit(AgentEvent::Notice("Compacting context…".into()));
+
+        let transcript = format_transcript(&self.session.messages);
+        if transcript.trim().is_empty() {
+            if force {
+                return Err("nothing to compact yet".into());
+            }
+            return Ok(());
+        }
+
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: summarize_request(&transcript),
+            tools: Vec::new(),
+            temperature: Some(0.2),
+            max_tokens: Some(2_048),
+        };
+        let mut on_delta = |_d: Delta| {};
+        let outcome = self
+            .provider
+            .chat_stream(req, &mut on_delta)
+            .await
+            .map_err(|e| format!("compact failed: {e}"))?;
+
+        self.session.add_usage(outcome.usage);
+        self.emit(AgentEvent::Usage(self.session.usage));
+
+        let summary = outcome.message.text();
+        if summary.trim().is_empty() {
+            return Err("compact failed: empty summary".into());
+        }
+
+        let system = self.session.system().to_string();
+        self.session
+            .replace_messages(compacted_messages(&system, &summary));
+        self.vision_cache.clear();
+        self.last_prompt_tokens = estimate_tokens(&self.session.messages);
+
+        self.emit(AgentEvent::Notice("Context compacted".into()));
+        Ok(())
     }
 
     /// Run one user turn to completion: stream the model, execute any tool calls
@@ -205,6 +330,11 @@ impl Agent {
                 break;
             }
 
+            // Mid-turn safe point: tool results (if any) are already in history.
+            if self.depth == 0 {
+                self.maybe_auto_compact().await;
+            }
+
             let messages = self.prepare_messages().await;
             let req = ChatRequest {
                 model: self.model.clone(),
@@ -234,6 +364,7 @@ impl Agent {
                 }
             };
 
+            self.last_prompt_tokens = outcome.usage.prompt_tokens;
             self.session.add_usage(outcome.usage);
             self.emit(AgentEvent::Usage(self.session.usage));
 
@@ -294,6 +425,12 @@ impl Agent {
             } else {
                 self.execute_tool(name, args, id).await
             }
+        } else if self.depth == 0 && self.mode == AgentMode::Multitask {
+            if let Err(msg) = multitask_mode_check(name) {
+                ToolResult::error(msg)
+            } else {
+                self.execute_tool(name, args, id).await
+            }
         } else {
             self.execute_tool(name, args, id).await
         };
@@ -339,6 +476,7 @@ impl Agent {
                     config: self.config.clone(),
                     depth: self.depth,
                     call_id: id.to_string(),
+                    isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
                 };
                 t.execute(args, &ctx).await
             }

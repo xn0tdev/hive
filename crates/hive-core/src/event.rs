@@ -116,8 +116,10 @@ pub struct CatalogModel {
     pub name: String,
     /// Secondary text (badges / short id).
     pub detail: String,
-    /// Section header (provider or org).
+    /// Section header (provider label).
     pub group: String,
+    /// `/connect` profile id this model was listed from.
+    pub connection_id: String,
 }
 
 /// One saved provider in the `/connect` picker.

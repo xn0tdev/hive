@@ -42,10 +42,19 @@ pub fn model_line(app: &crate::app::App) -> Line {
     }
     if app.has_pending_attaches() {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(
-            app.attachment_tags_line(),
-            Style::default().fg(theme.warn),
-        ));
+        for (i, a) in app.pending_attaches.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" ", Style::default().fg(theme.faint)));
+            }
+            spans.push(Span::styled(
+                "@",
+                Style::default().fg(theme.accent).add(comb::Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                a.label.clone(),
+                Style::default().fg(theme.dim),
+            ));
+        }
     }
     Line::from(spans)
 }
@@ -108,6 +117,7 @@ fn mode_chip_width(app: &crate::app::App) -> u16 {
     let label = match app.agent_mode {
         AgentMode::Plan => " PLAN ",
         AgentMode::Build => " BUILD ",
+        AgentMode::Multitask => " MULTITASK ",
     };
     label.chars().count() as u16
 }
@@ -193,6 +203,7 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),

@@ -20,7 +20,45 @@ use crate::render::tools::parse_sections;
 use crate::render::wordmark::LogoBonk;
 use crate::render::{ProjectSnapshot, SidebarSection, SidebarSections};
 use crate::theme::Theme;
-use crate::{ModelChoice, TuiInit};
+use crate::{ModelChoice, SkillChoice, TuiInit};
+
+/// One row in the composer `/` menu: built-in command or skill.
+#[derive(Debug, Clone)]
+pub enum SlashItem {
+    Command(&'static commands::CommandDef),
+    Skill(SkillChoice),
+}
+
+impl SlashItem {
+    pub fn name(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.name,
+            SlashItem::Skill(s) => s.name.as_str(),
+        }
+    }
+
+    pub fn desc(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.desc,
+            SlashItem::Skill(s) => s.description.as_str(),
+        }
+    }
+
+    pub fn hint(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.hint,
+            SlashItem::Skill(_) => "skill",
+        }
+    }
+
+    pub fn takes_arg(&self) -> bool {
+        match self {
+            SlashItem::Command(c) => c.takes_arg,
+            // Optional note after the skill name is typed manually; menu Enter runs now.
+            SlashItem::Skill(_) => false,
+        }
+    }
+}
 
 use files::AtQuery;
 use palette::PaletteState;
@@ -73,19 +111,21 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// A file or image queued for the next turn, shown as a composer tag.
+/// A file or image queued for the next turn, shown as a composer `@chip`.
 #[derive(Clone)]
 pub struct PendingAttach {
-    /// Display label without brackets, e.g. `Image #1` or `File #1`.
+    /// Path shown after `@` (project-relative when possible).
     pub label: String,
+    /// Path sent to the agent (`[Attached file: …]`).
     pub path: String,
     /// Set for image attachments (vision path unchanged).
     pub image: Option<ImageSource>,
 }
 
 impl PendingAttach {
+    /// Composer / transcript chip, e.g. `@src/main.rs`.
     pub fn tag(&self) -> String {
-        format!("[{}]", self.label)
+        format!("@{}", self.label)
     }
 }
 
@@ -119,6 +159,8 @@ pub struct App {
     pub(crate) pending_attaches: Vec<PendingAttach>,
     /// Models offered in the Switch-model picker (live catalog when Ready).
     pub(crate) model_choices: Vec<ModelChoice>,
+    /// Skills for the `/` menu (`/skill-name`).
+    pub(crate) skills: Vec<SkillChoice>,
     /// Fetch status for the live model catalog.
     pub(crate) models_catalog: ModelsCatalogState,
     /// Saved `/connect` provider profiles.
@@ -223,6 +265,7 @@ impl App {
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             model_choices: init.model_choices,
+            skills: init.skills,
             models_catalog: ModelsCatalogState::Idle,
             connections: init.connections,
             active_connection: init.active_connection,
@@ -619,11 +662,30 @@ impl App {
         Some(rest)
     }
 
-    pub fn slash_items(&self) -> Vec<&'static commands::SlashCmd> {
-        match self.slash_prefix() {
-            Some(prefix) => commands::filtered(prefix),
-            None => Vec::new(),
+    pub fn slash_items(&self) -> Vec<SlashItem> {
+        let Some(prefix) = self.slash_prefix() else {
+            return Vec::new();
+        };
+        let prefix_l = prefix.to_ascii_lowercase();
+        let mut items: Vec<SlashItem> = commands::filtered(prefix)
+            .into_iter()
+            .map(SlashItem::Command)
+            .collect();
+        for s in &self.skills {
+            if commands::is_builtin_name(&s.name) {
+                continue;
+            }
+            let name_l = s.name.to_ascii_lowercase();
+            let desc_l = s.description.to_ascii_lowercase();
+            if prefix_l.is_empty()
+                || name_l.starts_with(&prefix_l)
+                || name_l.contains(&prefix_l)
+                || desc_l.contains(&prefix_l)
+            {
+                items.push(SlashItem::Skill(s.clone()));
+            }
         }
+        items
     }
 
     /// Active `@path` query at the cursor (disabled while slash menu owns input).
@@ -677,12 +739,19 @@ impl App {
         }
     }
 
-    pub fn menu_selected(&self) -> Option<&'static commands::SlashCmd> {
+    pub fn menu_selected(&self) -> Option<SlashItem> {
         let items = self.slash_items();
         if items.is_empty() {
             return None;
         }
-        Some(items[self.menu_index.min(items.len() - 1)])
+        Some(items[self.menu_index.min(items.len() - 1)].clone())
+    }
+
+    pub fn find_skill(&self, name: &str) -> Option<&SkillChoice> {
+        let name = name.to_ascii_lowercase();
+        self.skills
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&name))
     }
 
     pub fn file_menu_selected(&mut self) -> Option<String> {
@@ -693,15 +762,28 @@ impl App {
         Some(items[self.menu_index.min(items.len() - 1)].clone())
     }
 
-    /// Replace `@query` with `` `path` `` and leave a trailing space.
+    /// Turn `@query` into a pending `@file` chip (removes the typed mention).
     pub fn complete_at_file(&mut self, rel: &str) {
         let Some(q) = self.at_mention() else {
             return;
         };
         let end = self.input.cursor;
-        let insert = format!("`{rel}` ");
-        self.input.replace_chars(q.at, end, &insert);
-        self.reset_menu();
+        self.input.replace_chars(q.at, end, "");
+        // Collapse a double space left when `@…` sat mid-sentence.
+        let v = self.input.value.clone();
+        if let Some(i) = v.find("  ") {
+            let chars: Vec<char> = v.chars().collect();
+            if i + 1 < chars.len() {
+                self.input.replace_chars(i, i + 2, " ");
+            }
+        }
+        match self.attach_rel(rel) {
+            Ok(_) => self.reset_menu(),
+            Err(e) => {
+                self.flash(e);
+                self.reset_menu();
+            }
+        }
     }
 
     pub fn reset_menu(&mut self) {
@@ -777,31 +859,65 @@ impl App {
             .join(" ")
     }
 
+    /// Attach a project-relative path from the `@` picker.
+    pub fn attach_rel(&mut self, rel: &str) -> Result<String, String> {
+        let rel = rel.trim().trim_start_matches("./");
+        if rel.is_empty() {
+            return Err("empty path".into());
+        }
+        let abs = std::path::Path::new(&self.cwd).join(rel);
+        self.attach_path_inner(&abs, rel)
+    }
+
     /// Attach a path: images become vision sources; other files are path notes.
     pub fn attach_path(&mut self, path: &str) -> Result<String, String> {
         let path = path.trim();
         if path.is_empty() {
             return Err("paste a file path to attach".into());
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        let is_image = is_image_path(path);
-        let n = self.pending_attaches.len() + 1;
-        let (label, image) = if is_image {
-            let data = base64_encode(&bytes);
-            (
-                format!("Image #{n}"),
-                Some(ImageSource::Base64 {
-                    media_type: media_type_for(path),
-                    data,
-                }),
-            )
+        let abs = std::path::Path::new(path);
+        let abs = if abs.is_absolute() {
+            abs.to_path_buf()
         } else {
-            (format!("File #{n}"), None)
+            std::path::Path::new(&self.cwd).join(abs)
         };
-        let tag = format!("[{label}]");
+        let label = abs
+            .strip_prefix(&self.cwd)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| {
+                abs.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| abs.to_string_lossy().into_owned())
+            });
+        self.attach_path_inner(&abs, &label)
+    }
+
+    fn attach_path_inner(
+        &mut self,
+        abs: &std::path::Path,
+        label: &str,
+    ) -> Result<String, String> {
+        let bytes =
+            std::fs::read(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        let is_image = is_image_path(abs.to_string_lossy().as_ref());
+        let image = if is_image {
+            Some(ImageSource::Base64 {
+                media_type: media_type_for(abs.to_string_lossy().as_ref()),
+                data: base64_encode(&bytes),
+            })
+        } else {
+            None
+        };
+        let label = label.trim().trim_start_matches("./").to_string();
+        let path = label.clone();
+        let tag = format!("@{label}");
+        // Skip duplicates (same path already queued).
+        if self.pending_attaches.iter().any(|a| a.path == path) {
+            return Ok(tag);
+        }
         self.pending_attaches.push(PendingAttach {
             label,
-            path: path.to_string(),
+            path,
             image,
         });
         Ok(tag)
@@ -989,6 +1105,7 @@ impl App {
                         display: m.name,
                         detail: m.detail,
                         group: m.group,
+                        connection_id: m.connection_id,
                     })
                     .collect();
                 self.models_catalog = ModelsCatalogState::Ready;
@@ -1377,6 +1494,7 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
@@ -1473,6 +1591,8 @@ mod tests {
         assert_eq!(a.agent_mode, AgentMode::Build);
         a.toggle_agent_mode();
         assert_eq!(a.agent_mode, AgentMode::Plan);
+        a.toggle_agent_mode();
+        assert_eq!(a.agent_mode, AgentMode::Multitask);
         a.toggle_agent_mode();
         assert_eq!(a.agent_mode, AgentMode::Build);
     }

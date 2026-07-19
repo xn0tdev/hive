@@ -236,6 +236,7 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),

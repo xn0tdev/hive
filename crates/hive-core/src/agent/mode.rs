@@ -1,4 +1,4 @@
-//! BUILD vs PLAN agent modes.
+//! BUILD / PLAN / MULTITASK agent modes.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,8 @@ pub enum AgentMode {
     Build,
     /// Research + write/update `.hive/Plan.md` only — no project edits or shell.
     Plan,
+    /// Orchestrator: split work into parallel subagents; almost no coding itself.
+    Multitask,
 }
 
 impl AgentMode {
@@ -20,13 +22,16 @@ impl AgentMode {
         match self {
             AgentMode::Build => "BUILD",
             AgentMode::Plan => "PLAN",
+            AgentMode::Multitask => "MULTITASK",
         }
     }
 
+    /// Tab cycle: BUILD → PLAN → MULTITASK → BUILD.
     pub fn toggle(self) -> Self {
         match self {
             AgentMode::Build => AgentMode::Plan,
-            AgentMode::Plan => AgentMode::Build,
+            AgentMode::Plan => AgentMode::Multitask,
+            AgentMode::Multitask => AgentMode::Build,
         }
     }
 }
@@ -82,6 +87,34 @@ pub fn plan_mode_check(name: &str, path: Option<&str>, cwd: &Path) -> Result<(),
     Ok(())
 }
 
+/// Tools the orchestrator may call in MULTITASK mode (no project edits/shell).
+pub fn multitask_mode_tool_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "glob"
+            | "grep"
+            | "web_search"
+            | "web_get_contents"
+            | "read_skill"
+            | "spawn_subagent"
+            | "spawn_swarm"
+            | "integrate_worktree"
+    )
+}
+
+/// Gate a tool call in MULTITASK mode for the main agent.
+pub fn multitask_mode_check(name: &str) -> Result<(), String> {
+    if multitask_mode_tool_allowed(name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}` is not available in MULTITASK — spawn subagents to implement, or switch to BUILD"
+        ))
+    }
+}
+
 /// Pull a short summary from plan markdown (first `##` heading, else first line).
 pub fn plan_summary(body: &str) -> String {
     for line in body.lines() {
@@ -133,5 +166,25 @@ mod tests {
     fn summary_prefers_h2() {
         let body = "# Title\n\n## First step\n\nDo things\n";
         assert_eq!(plan_summary(body), "First step");
+    }
+
+    #[test]
+    fn mode_cycles_three_ways() {
+        assert_eq!(AgentMode::Build.toggle(), AgentMode::Plan);
+        assert_eq!(AgentMode::Plan.toggle(), AgentMode::Multitask);
+        assert_eq!(AgentMode::Multitask.toggle(), AgentMode::Build);
+        assert_eq!(AgentMode::Multitask.label(), "MULTITASK");
+    }
+
+    #[test]
+    fn multitask_blocks_coding_tools() {
+        assert!(multitask_mode_check("run_shell").is_err());
+        assert!(multitask_mode_check("write_file").is_err());
+        assert!(multitask_mode_check("edit_file").is_err());
+        assert!(multitask_mode_check("verify_project").is_err());
+        assert!(multitask_mode_check("spawn_swarm").is_ok());
+        assert!(multitask_mode_check("spawn_subagent").is_ok());
+        assert!(multitask_mode_check("integrate_worktree").is_ok());
+        assert!(multitask_mode_check("read_file").is_ok());
     }
 }

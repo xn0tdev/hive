@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::ModelRole;
@@ -13,6 +14,10 @@ pub struct SubagentTask {
     pub model_role: ModelRole,
     /// Recursion depth of the agent that will run this task.
     pub depth: usize,
+    /// When true, run inside an isolated git worktree (MULTITASK).
+    pub isolate_worktree: bool,
+    /// Optional fixed cwd (usually set by the swarm after creating a worktree).
+    pub cwd: Option<PathBuf>,
 }
 
 /// Result of running a subagent to completion.

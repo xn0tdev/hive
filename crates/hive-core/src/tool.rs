@@ -53,6 +53,8 @@ pub struct ToolContext {
     pub depth: usize,
     /// Correlates streamed `ToolOutput` events with the running tool card.
     pub call_id: String,
+    /// When true, spawned workers get isolated git worktrees (MULTITASK).
+    pub isolate_worktrees: bool,
 }
 
 impl ToolContext {

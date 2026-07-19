@@ -341,14 +341,14 @@ fn handle_key(
         }
         KeyCode::Enter if slash_menu => {
             // Commands with an argument get completed; the rest run at once.
-            if let Some(cmd) = app.menu_selected() {
-                if cmd.takes_arg {
+            if let Some(item) = app.menu_selected() {
+                if item.takes_arg() {
                     complete_selected(app);
                     composer_activity = true;
                 } else {
                     app.input.take();
                     app.reset_menu();
-                    return handle_slash(app, cmd.name, input_tx);
+                    return handle_slash(app, item.name(), input_tx);
                 }
             }
         }
@@ -680,11 +680,11 @@ fn copy_last_answer(app: &mut App) {
 /// Complete slash command or `@file` mention from the floating menu.
 fn complete_selected(app: &mut App) {
     if !app.slash_items().is_empty() {
-        if let Some(cmd) = app.menu_selected() {
-            let text = if cmd.takes_arg {
-                format!("/{} ", cmd.name)
+        if let Some(item) = app.menu_selected() {
+            let text = if item.takes_arg() {
+                format!("/{} ", item.name())
             } else {
-                format!("/{}", cmd.name)
+                format!("/{}", item.name())
             };
             app.input.value = text;
             app.input.end();
@@ -768,12 +768,53 @@ fn handle_slash(app: &mut App, cmd: &str, input_tx: &UnboundedSender<InputComman
         return false;
     }
 
-    let Some(def) = commands::resolve(name) else {
-        app.notice(format!("unknown command: /{name}  — {UNKNOWN_HINT}"));
-        return false;
+    if let Some(def) = commands::resolve(name) {
+        return run_command(app, def.id, arg, input_tx);
+    }
+
+    if let Some(skill) = app.find_skill(name).cloned() {
+        return invoke_skill(app, &skill, arg, input_tx);
+    }
+
+    app.notice(format!("unknown command: /{name}  — {UNKNOWN_HINT}"));
+    false
+}
+
+/// Run a skill: show `/name` in the transcript and send the skill body to the agent.
+fn invoke_skill(
+    app: &mut App,
+    skill: &crate::SkillChoice,
+    note: &str,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    let display = if note.is_empty() {
+        format!("/{}", skill.name)
+    } else {
+        format!("/{} {}", skill.name, note)
     };
 
-    run_command(app, def.id, arg, input_tx)
+    let mut agent_text = format!(
+        "The user invoked skill `{}` via the /{} command. \
+Follow the skill instructions below immediately — do not ask whether to use it. \
+You may call `read_skill` again if needed, but the full skill is already included.\n\n\
+# Skill: {}\n\n{}\n",
+        skill.name, skill.name, skill.name, skill.content
+    );
+    if !note.is_empty() {
+        agent_text.push_str("\n## User note\n");
+        agent_text.push_str(note);
+        agent_text.push('\n');
+    }
+
+    app.push_user(display);
+    app.flash(format!("Skill · {}", skill.name));
+    let mode = app.agent_mode;
+    let _ = input_tx.send(InputCommand::User {
+        text: agent_text,
+        images: Vec::new(),
+        mode,
+    });
+    false
 }
 
 fn run_command(
@@ -789,6 +830,10 @@ fn run_command(
             let _ = input_tx.send(InputCommand::Clear);
             app.flash("New chat");
         }
+        CmdId::Compact => {
+            let _ = input_tx.send(InputCommand::Compact);
+            app.flash("Compacting…");
+        }
         CmdId::Model => {
             if arg.is_empty() {
                 app.open_model_picker(input_tx);
@@ -797,6 +842,7 @@ fn run_command(
                 let _ = input_tx.send(InputCommand::SetModel {
                     id: arg.to_string(),
                     display,
+                    connection_id: None,
                 });
             }
         }
@@ -974,10 +1020,21 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 .palette
                 .as_ref()
                 .and_then(|p| p.selected_model(&app.model_choices))
-                .map(|c| (c.key.clone(), c.display.clone()));
+                .map(|c| {
+                    (
+                        c.key.clone(),
+                        c.display.clone(),
+                        c.connection_id.clone(),
+                    )
+                });
             app.close_palette();
-            if let Some((id, display)) = picked {
-                let _ = input_tx.send(InputCommand::SetModel { id, display });
+            if let Some((id, display, connection_id)) = picked {
+                let connection_id = (!connection_id.is_empty()).then_some(connection_id);
+                let _ = input_tx.send(InputCommand::SetModel {
+                    id,
+                    display,
+                    connection_id,
+                });
                 app.flash("Switching model…");
             }
             false
@@ -1141,14 +1198,17 @@ mod tests {
                     display: "Default".into(),
                     detail: "default".into(),
                     group: "Test".into(),
+                    connection_id: String::new(),
                 },
                 crate::ModelChoice {
                     key: "fast".into(),
                     display: "Fast".into(),
                     detail: "fast".into(),
                     group: "Test".into(),
+                    connection_id: String::new(),
                 },
             ],
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
@@ -1247,11 +1307,47 @@ mod tests {
         }
         assert!(!activate_palette(&mut app, &tx));
         match rx.try_recv() {
-            Ok(InputCommand::SetModel { id, display }) => {
+            Ok(InputCommand::SetModel {
+                id,
+                display,
+                connection_id,
+            }) => {
                 assert_eq!(id, "default");
                 assert_eq!(display, "Default");
+                assert!(connection_id.is_none());
             }
             other => panic!("expected SetModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_menu_lists_skills_and_invokes() {
+        let mut app = test_app();
+        app.skills.push(crate::SkillChoice {
+            name: "read-tweet".into(),
+            description: "Fetch and summarize a tweet URL".into(),
+            content: "1. Open the URL\n2. Summarize\n".into(),
+        });
+        app.input.value = "/read".into();
+        app.input.cursor = app.input.value.chars().count();
+        let items = app.slash_items();
+        assert!(
+            items.iter().any(|i| i.name() == "read-tweet"),
+            "items={:?}",
+            items.iter().map(|i| i.name().to_string()).collect::<Vec<_>>()
+        );
+        assert!(items.iter().any(|i| i.desc().contains("summarize")));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!handle_slash(&mut app, "read-tweet please", &tx));
+        match rx.try_recv() {
+            Ok(InputCommand::User { text, .. }) => {
+                assert!(text.contains("Skill: read-tweet"));
+                assert!(text.contains("Open the URL"));
+                assert!(text.contains("User note"));
+                assert!(text.contains("please"));
+            }
+            other => panic!("expected User with skill body, got {other:?}"),
         }
     }
 
@@ -1263,6 +1359,19 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(InputCommand::Clear)));
         assert!(handle_slash(&mut app, "exit", &tx));
         assert!(handle_slash(&mut app, "quit", &tx));
+    }
+
+    #[test]
+    fn slash_models_alias_opens_picker() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!handle_slash(&mut app, "models", &tx));
+        assert!(app.palette_open());
+        assert!(matches!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(crate::app::palette::PaletteMode::Models)
+        ));
+        assert!(matches!(rx.try_recv(), Ok(InputCommand::FetchModels)));
     }
 
     #[test]
@@ -1418,6 +1527,7 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: vec![],
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: dir.to_string_lossy().into(),
@@ -1431,8 +1541,10 @@ mod tests {
         let items = app.file_menu_items();
         assert!(items.iter().any(|p| p == "src/hello.rs"), "items={items:?}");
         app.complete_at_file("src/hello.rs");
-        assert_eq!(app.input.value, "look `src/hello.rs` ");
+        assert_eq!(app.input.value.trim_end(), "look");
         assert!(app.at_mention().is_none());
+        assert!(app.has_pending_attaches());
+        assert_eq!(app.attachment_tags_line(), "@src/hello.rs");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1443,7 +1555,7 @@ mod tests {
         std::fs::write(&path, [0x89, 0x50, 0x4e, 0x47]).unwrap();
         let mut app = test_app();
         let tag = app.attach_path(path.to_str().unwrap()).unwrap();
-        assert_eq!(tag, "[Image #1]");
+        assert_eq!(tag, "@hive-tui-attach-test.png");
         assert!(app.has_pending_attaches());
         assert!(commands::resolve("image").is_none());
 

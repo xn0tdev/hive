@@ -616,6 +616,7 @@ mod tests {
             model: "m".into(),
             model_display: "Model".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),

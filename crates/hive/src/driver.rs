@@ -11,8 +11,8 @@ use hive_core::provider::LlmProvider;
 use hive_core::vision::VisionDescriber;
 use hive_core::{Agent, DescribeVision, UserInput};
 use hive_llm::catalog::{
-    enrich_models, fetch_models_dev, group_by_id_prefix, list_provider_models,
-    models_dev_hint_for_base, provider_label_for_base, ModelCard,
+    enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
+    provider_label_for_base, ModelCard,
 };
 use hive_llm::FireworksProvider;
 use hive_tui::InputCommand;
@@ -32,7 +32,20 @@ pub async fn run(
                     .run_turn(UserInput { text, images, mode }, interrupt.clone())
                     .await;
             }
-            InputCommand::SetModel { id, display } => {
+            InputCommand::SetModel {
+                id,
+                display,
+                connection_id,
+            } => {
+                if let Some(cid) = connection_id.as_deref().filter(|c| !c.is_empty()) {
+                    if cid != cfg.connections.active {
+                        if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, cid).await {
+                            let _ =
+                                events.send(AgentEvent::Notice(format!("connect failed: {e}")));
+                            continue;
+                        }
+                    }
+                }
                 let (id, display) = resolve_model(&cfg, &id, &display);
                 agent.set_model(id.clone());
                 if let Err(e) = crate::config::patch_model(&id, &display) {
@@ -102,6 +115,11 @@ pub async fn run(
             }
             InputCommand::Clear => {
                 agent.reset();
+            }
+            InputCommand::Compact => {
+                if let Err(e) = agent.compact().await {
+                    let _ = events.send(AgentEvent::Notice(e));
+                }
             }
             InputCommand::SaveUi(ui) => {
                 if let Err(e) = crate::config::patch_ui(&ui) {
@@ -176,27 +194,70 @@ fn resolve_model(cfg: &AppConfig, id: &str, display: &str) -> (String, String) {
 }
 
 async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
-    let base = cfg.provider.base_url.as_str();
-    let key = cfg.secrets.provider_api_key.as_str();
-    if key.is_empty() {
-        let _ = events.send(AgentEvent::ModelsListFailed(
-            "no provider API key — set one in config or env".into(),
-        ));
+    let catalog = fetch_models_dev().await.ok();
+    let mut models = Vec::new();
+    let mut errors = Vec::new();
+
+    let mut targets: Vec<(String, String, String, String)> = cfg
+        .connections
+        .profiles
+        .iter()
+        .filter_map(|(id, p)| {
+            let key = cfg
+                .secrets
+                .connection_keys
+                .get(id)
+                .cloned()
+                .filter(|k| !k.is_empty())?;
+            let label = if p.label.trim().is_empty() {
+                provider_label_for_base(&p.base_url).to_string()
+            } else {
+                p.label.clone()
+            };
+            Some((id.clone(), label, p.base_url.clone(), key))
+        })
+        .collect();
+
+    // No profiles / no keys on profiles — fall back to active [provider].
+    if targets.is_empty() {
+        let key = cfg.secrets.provider_api_key.clone();
+        if key.is_empty() {
+            let _ = events.send(AgentEvent::ModelsListFailed(
+                "no provider API key — set one in config or env".into(),
+            ));
+            return;
+        }
+        let base = cfg.provider.base_url.clone();
+        let label = active_provider_label(cfg, &base);
+        let id = if cfg.connections.active.is_empty() {
+            "default".into()
+        } else {
+            cfg.connections.active.clone()
+        };
+        targets.push((id, label, base, key));
+    }
+
+    for (conn_id, label, base, key) in targets {
+        match list_provider_models(&base, &key).await {
+            Ok(remote) => {
+                let hint = models_dev_hint_for_base(&base);
+                let cards = enrich_models(&remote, catalog.as_ref(), hint);
+                models.extend(catalog_rows(&label, &conn_id, &cards));
+            }
+            Err(e) => errors.push(format!("{label}: {e}")),
+        }
+    }
+
+    if models.is_empty() {
+        let msg = if errors.is_empty() {
+            "no models returned".into()
+        } else {
+            errors.join("; ")
+        };
+        let _ = events.send(AgentEvent::ModelsListFailed(msg));
         return;
     }
 
-    let remote = match list_provider_models(base, key).await {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = events.send(AgentEvent::ModelsListFailed(e.to_string()));
-            return;
-        }
-    };
-
-    let catalog = fetch_models_dev().await.ok();
-    let hint = models_dev_hint_for_base(base);
-    let cards = enrich_models(&remote, catalog.as_ref(), hint);
-    let mut models = catalog_rows(base, &cards);
     models.sort_by(|a, b| {
         a.group
             .cmp(&b.group)
@@ -206,23 +267,26 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
     let _ = events.send(AgentEvent::ModelsListed { models });
 }
 
-fn catalog_rows(base_url: &str, cards: &[ModelCard]) -> Vec<CatalogModel> {
-    let provider = provider_label_for_base(base_url);
-    let split = group_by_id_prefix(base_url);
+/// One section header for `/model`: active connection label, else host → known name.
+fn active_provider_label(cfg: &AppConfig, base_url: &str) -> String {
+    cfg.connections
+        .profiles
+        .get(&cfg.connections.active)
+        .map(|p| p.label.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| provider_label_for_base(base_url).to_string())
+}
+
+fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<CatalogModel> {
     cards
         .iter()
-        .map(|c| {
-            let group = if split {
-                c.id.split('/').next().unwrap_or(provider).to_string()
-            } else {
-                provider.to_string()
-            };
-            CatalogModel {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                detail: c.badges(),
-                group,
-            }
+        .map(|c| CatalogModel {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            detail: c.badges(),
+            group: group.to_string(),
+            connection_id: connection_id.to_string(),
         })
         .collect()
 }

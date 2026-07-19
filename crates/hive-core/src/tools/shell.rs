@@ -192,6 +192,7 @@ mod tests {
             config: Arc::new(AppConfig::default()),
             depth: 0,
             call_id: "test".into(),
+            isolate_worktrees: false,
         }
     }
 

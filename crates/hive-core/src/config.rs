@@ -287,6 +287,8 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
     pub provider_api_key: String,
+    /// Per-profile keys (`/connect` id → API key) for multi-provider `/model`.
+    pub connection_keys: std::collections::HashMap<String, String>,
     pub exa_api_key: Option<String>,
     pub perplexity_api_key: Option<String>,
 }
@@ -313,6 +315,25 @@ pub struct ConnectionsConfig {
     pub profiles: BTreeMap<String, ConnectionProfile>,
 }
 
+/// Default model context window (tokens) when unset in config.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
+/// Agent runtime knobs (context window, compaction).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Model context window in tokens. Auto-compact fires at 75% of this.
+    pub context_window: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        AgentConfig {
+            context_window: DEFAULT_CONTEXT_WINDOW,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
@@ -324,6 +345,9 @@ pub struct AppConfig {
     pub perplexity: PerplexityConfig,
     pub swarm: SwarmConfig,
     pub ui: UiConfig,
+    /// Agent loop settings (context window / compact).
+    #[serde(default)]
+    pub agent: AgentConfig,
     /// Reserved for multi-provider support.
     #[serde(default)]
     pub connections: ConnectionsConfig,

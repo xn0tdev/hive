@@ -13,7 +13,7 @@ use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
 use hive_core::{all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills};
 use hive_llm::FireworksProvider;
-use hive_tui::{ModelChoice, TuiInit};
+use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 
 use crate::config;
 use crate::driver;
@@ -51,6 +51,18 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         cfg.secrets.provider_api_key.clone(),
     ));
     let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
+    let skill_choices: Vec<SkillChoice> = skills
+        .list()
+        .into_iter()
+        .filter_map(|m| {
+            let content = skills.read(&m.name)?;
+            Some(SkillChoice {
+                name: m.name,
+                description: m.description,
+                content,
+            })
+        })
+        .collect();
     let vision: Arc<dyn VisionDescriber> = Arc::new(DescribeVision::new(
         provider.clone(),
         cfg.models.default.id().to_string(),
@@ -81,12 +93,14 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         display: default_display.clone(),
         detail: String::new(),
         group: "Configured".into(),
+        connection_id: cfg.connections.active.clone(),
     }];
 
     let tui_init = TuiInit {
         model: default_model,
         model_display: default_display,
         model_choices,
+        skills: skill_choices,
         connections: config::connection_infos(&cfg),
         active_connection: cfg.connections.active.clone(),
         cwd: cwd.display().to_string(),

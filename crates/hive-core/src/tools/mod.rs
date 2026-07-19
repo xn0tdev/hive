@@ -16,12 +16,10 @@ mod skill;
 mod web;
 
 /// Build fresh instances of every registered tool, sorted by name.
+/// Mode gating (BUILD hides `spawn_swarm` / `integrate_worktree`) happens in the agent.
 pub fn all_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = inventory::iter::<ToolRegistration>()
         .map(|r| (r.make)())
-        // Fan-out swarm stays off; single-subagent launch (`spawn_subagent`,
-        // `verify_project`) is available so the main agent can author prompts.
-        .filter(|t| t.name() != "spawn_swarm")
         .collect();
     tools.sort_by(|a, b| a.name().cmp(b.name()));
     tools
@@ -62,11 +60,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_tools_offers_single_subagent_launch() {
+    fn all_tools_offers_delegate_suite() {
         let tools = all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"verify_project"));
         assert!(names.contains(&"spawn_subagent"));
-        assert!(!names.contains(&"spawn_swarm"));
+        assert!(names.contains(&"spawn_swarm"));
+        assert!(names.contains(&"integrate_worktree"));
     }
 }

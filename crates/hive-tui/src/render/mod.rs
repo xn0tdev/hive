@@ -26,6 +26,7 @@ mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;
 mod toast;
+pub(crate) mod two_col;
 mod transcript;
 
 pub use sidebar::{clamp_width, ProjectSnapshot, SidebarSection, SidebarSections};
@@ -238,6 +239,6 @@ fn input_height(app: &mut App, band_width: u16) -> u16 {
     // Persist wrap width so Up/Down between frames use the same soft-wrap.
     app.input.text_cols = input_box::text_cols(band_width);
     // text rows + one padding row above and below, inside the strip
-    let tag = u16::from(app.has_pending_attaches() && !app.input.is_empty());
+    let tag = u16::from(app.has_pending_attaches());
     app.input.visible_line_count(app.input.text_cols) as u16 + 2 + tag
 }

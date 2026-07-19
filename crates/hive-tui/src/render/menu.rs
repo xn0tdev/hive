@@ -4,7 +4,7 @@
 use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
 use crate::app::files::MAX_MENU_ROWS;
-use crate::app::App;
+use crate::app::{App, SlashItem};
 
 pub fn height(app: &mut App) -> u16 {
     let slash_n = app.slash_items().len();
@@ -52,34 +52,46 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
     let w = area.width as usize;
     buf.paint(area, Style::default().bg(panel_bg));
 
-    let name_w = items
-        .iter()
-        .take(MAX_MENU_ROWS)
-        .map(|c| 1 + c.name.chars().count())
-        .max()
-        .unwrap_or(0);
-    let hint_w = items
-        .iter()
-        .take(MAX_MENU_ROWS)
-        .map(|c| c.hint.chars().count())
-        .max()
-        .unwrap_or(0);
+    let window = window_start(selected, items.len(), MAX_MENU_ROWS);
+    let visible = &items[window..items.len().min(window + MAX_MENU_ROWS)];
 
-    let left = 2 + name_w + 2 + hint_w + 2;
+    let name_w = visible
+        .iter()
+        .map(|c| 1 + c.name().chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(28);
+    let tag_w = visible
+        .iter()
+        .map(|c| c.hint().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(5);
+
+    // `/name` · tag · description — give description the remaining width.
+    let left = 2 + name_w + 2 + tag_w + 2;
     let desc_avail = w.saturating_sub(left + 1);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(items.len().min(MAX_MENU_ROWS) + 1);
-    for (i, cmd) in items.iter().take(MAX_MENU_ROWS).enumerate() {
-        let is_sel = i == selected;
+    let mut lines: Vec<Line> = Vec::with_capacity(visible.len() + 1);
+    for (i, item) in visible.iter().enumerate() {
+        let idx = window + i;
+        let is_sel = idx == selected;
         let bg = if is_sel { theme.sel_bg } else { panel_bg };
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
-        let hint_fg = if is_sel { theme.sel_fg } else { theme.faint };
+        let tag_fg = if is_sel {
+            theme.sel_fg
+        } else if matches!(item, SlashItem::Skill(_)) {
+            theme.accent
+        } else {
+            theme.faint
+        };
         let desc_fg = if is_sel { theme.sel_fg } else { theme.faint };
 
-        let name = format!("/{}", cmd.name);
+        let name = ellipsize(&format!("/{}", item.name()), name_w);
         let name_pad = name_w.saturating_sub(name.chars().count());
-        let hint_pad = hint_w.saturating_sub(cmd.hint.chars().count());
-        let desc = ellipsize(cmd.desc, desc_avail);
+        let tag = item.hint();
+        let tag_pad = tag_w.saturating_sub(tag.chars().count());
+        let desc = ellipsize(item.desc(), desc_avail);
         let tail = w.saturating_sub(left + desc.chars().count());
 
         lines.push(Line::from(vec![
@@ -89,14 +101,24 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
                 Style::default().fg(name_fg).bg(bg).add(Modifier::BOLD),
             ),
             Span::styled(" ".repeat(name_pad + 2), Style::default().bg(bg)),
-            Span::styled(cmd.hint.to_string(), Style::default().fg(hint_fg).bg(bg)),
-            Span::styled(" ".repeat(hint_pad + 2), Style::default().bg(bg)),
+            Span::styled(tag.to_string(), Style::default().fg(tag_fg).bg(bg)),
+            Span::styled(" ".repeat(tag_pad + 2), Style::default().bg(bg)),
             Span::styled(desc, Style::default().fg(desc_fg).bg(bg)),
             Span::styled(" ".repeat(tail), Style::default().bg(bg)),
         ]));
     }
     if items.len() > MAX_MENU_ROWS {
-        lines.push(more_line(w, panel_bg, theme.faint));
+        let more = if window + MAX_MENU_ROWS < items.len() {
+            format!(
+                "  ↓ {} more",
+                items.len() - (window + MAX_MENU_ROWS)
+            )
+        } else if window > 0 {
+            format!("  ↑ {} above", window)
+        } else {
+            "  ↓ more".into()
+        };
+        lines.push(more_line_text(&more, w, panel_bg, theme.faint));
     }
 
     buf.set_lines(area, &lines, 0);
@@ -161,10 +183,16 @@ fn window_start(selected: usize, total: usize, max_rows: usize) -> usize {
 }
 
 fn more_line(w: usize, bg: Color, fg: Color) -> Line {
-    Line::from(Span::styled(
-        format!("{:<w$}", "  ↓ more"),
-        Style::default().fg(fg).bg(bg),
-    ))
+    more_line_text("  ↓ more", w, bg, fg)
+}
+
+fn more_line_text(text: &str, w: usize, bg: Color, fg: Color) -> Line {
+    let clipped = ellipsize(text, w);
+    let pad = w.saturating_sub(clipped.chars().count());
+    Line::from(vec![
+        Span::styled(clipped, Style::default().fg(fg).bg(bg)),
+        Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+    ])
 }
 
 fn ellipsize(s: &str, max: usize) -> String {

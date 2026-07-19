@@ -245,7 +245,7 @@ fn draw_modes(buf: &mut Buffer, area: Rect, theme: &Theme, bg: Color) -> Option<
     );
     y += 1;
     for line in wrap(
-        "Full YOLO — the agent is free to run tools and ship. Nothing extra in the way.",
+        "You code — the agent runs tools and ships. Can spawn one helper when useful.",
         area.width as usize,
     ) {
         put(
@@ -265,7 +265,33 @@ fn draw_modes(buf: &mut Buffer, area: Rect, theme: &Theme, bg: Color) -> Option<
         area.x,
         y,
         area.width,
-        "Toggle anytime with Tab in the chat.",
+        "MULTITASK",
+        Style::default().fg(theme.multitask).add(Modifier::BOLD),
+        bg,
+    );
+    y += 1;
+    for line in wrap(
+        "Orchestrator — splits work into parallel subagents in git worktrees, then merges.",
+        area.width as usize,
+    ) {
+        put(
+            buf,
+            area.x,
+            y,
+            area.width,
+            &line,
+            Style::default().fg(theme.faint),
+            bg,
+        );
+        y += 1;
+    }
+    y += 1;
+    put(
+        buf,
+        area.x,
+        y,
+        area.width,
+        "Toggle anytime with Tab: BUILD → PLAN → MULTITASK.",
         Style::default().fg(theme.dim),
         bg,
     );
@@ -314,21 +340,22 @@ fn draw_provider(
 
     for (y, (row, p)) in (list_top..list_bottom).zip(PRESETS.iter().enumerate().skip(start)) {
         let selected = row == state.provider_idx;
-        let style = if selected {
-            Style::default().fg(theme.sel_fg).bg(theme.sel_bg)
+        let row_bg = if selected { theme.sel_bg } else { bg };
+        let name_fg = if selected { theme.sel_fg } else { theme.fg };
+        let detail_fg = if selected { theme.sel_fg } else { theme.faint };
+        let host = if p.is_custom {
+            ""
         } else {
-            Style::default().fg(theme.fg).bg(bg)
+            crate::render::two_col::host_hint(p.base_url)
         };
-        let mark = if selected { "› " } else { "  " };
-        put(
-            buf,
-            area.x,
-            y,
-            area.width,
-            &truncate(&format!("{mark}{}", p.label), area.width as usize),
-            style,
-            if selected { theme.sel_bg } else { bg },
-        );
+        let (left, right, gap) =
+            crate::render::two_col::layout_label_host(p.label, host, area.width as usize);
+        let line = Line::from(vec![
+            Span::styled(left, Style::default().fg(name_fg).bg(row_bg)),
+            Span::styled(" ".repeat(gap), Style::default().bg(row_bg)),
+            Span::styled(right, Style::default().fg(detail_fg).bg(row_bg)),
+        ]);
+        crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, row_bg);
     }
 
     let detail_y = area.bottom().saturating_sub(2 + detail_h).max(list_bottom);
@@ -356,9 +383,9 @@ fn draw_provider(
         );
     }
     let footer = if state.can_use_existing_provider() {
-        "u use existing  ·  enter configure"
+        "u use existing  ·  enter / paste key"
     } else {
-        "↑↓ choose  ·  enter / → key"
+        "↑↓ choose  ·  enter / →  ·  paste key"
     };
     center(
         buf,

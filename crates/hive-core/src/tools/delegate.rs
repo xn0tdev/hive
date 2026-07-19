@@ -1,7 +1,7 @@
 //! Delegation tools: hand work to subagents through the injected
 //! `SubagentSpawner`. The main agent authors each subagent's prompt;
 //! `verify_project` is a ready checker role, `spawn_subagent` is general.
-//! Fan-out `spawn_swarm` stays registered but filtered out of `all_tools()`.
+//! `spawn_swarm` + worktrees are for MULTITASK. `integrate_worktree` merges a worker.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::config::ModelRole;
 use crate::spawner::SubagentTask;
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
+use crate::worktree;
 
 use super::str_arg;
 
@@ -24,6 +25,24 @@ Your final message is the entire return value.";
 /// Combine the ready-checker role with the orchestrator-authored brief.
 pub(crate) fn build_verify_prompt(task: &str) -> String {
     format!("{VERIFY_ROLE}\n\n## Your task\n{}", task.trim())
+}
+
+fn make_task(
+    id: String,
+    label: String,
+    prompt: String,
+    depth: usize,
+    isolate: bool,
+) -> SubagentTask {
+    SubagentTask {
+        id,
+        label,
+        prompt,
+        model_role: ModelRole::Default,
+        depth,
+        isolate_worktree: isolate,
+        cwd: None,
+    }
 }
 
 /// Spawn the dedicated project-verification subagent (cargo check / review).
@@ -81,13 +100,13 @@ build/lint/review pass."
             );
         };
 
-        let st = SubagentTask {
-            id: format!("verify_{}", uuid::Uuid::new_v4().simple()),
-            label: VERIFY_LABEL.to_string(),
-            prompt: build_verify_prompt(task),
-            model_role: ModelRole::Default,
-            depth: ctx.depth + 1,
-        };
+        let st = make_task(
+            format!("verify_{}", uuid::Uuid::new_v4().simple()),
+            VERIFY_LABEL.to_string(),
+            build_verify_prompt(task),
+            ctx.depth + 1,
+            false,
+        );
 
         let outcome = ctx.spawner.spawn(st).await;
         match outcome.result {
@@ -107,7 +126,8 @@ impl Tool for SpawnSubagent {
 
     fn description(&self) -> &str {
         "Spawn one subagent to complete a focused task end-to-end and return its result. \
-You write the full task prompt yourself with all needed context."
+You write the full task prompt yourself with all needed context. In MULTITASK the worker \
+runs in an isolated git worktree."
     }
 
     fn parameters(&self) -> Value {
@@ -138,13 +158,14 @@ You write the full task prompt yourself with all needed context."
             ));
         }
 
-        let st = SubagentTask {
-            id: format!("sub_{}", uuid::Uuid::new_v4().simple()),
-            label: truncate_label(task, 44),
-            prompt: task.to_string(),
-            model_role: ModelRole::Default,
-            depth: ctx.depth + 1,
-        };
+        let id = format!("sub_{}", uuid::Uuid::new_v4().simple());
+        let st = make_task(
+            id,
+            truncate_label(task, 44),
+            task.to_string(),
+            ctx.depth + 1,
+            ctx.isolate_worktrees,
+        );
 
         let outcome = ctx.spawner.spawn(st).await;
         match outcome.result {
@@ -163,8 +184,9 @@ impl Tool for SpawnSwarm {
     }
 
     fn description(&self) -> &str {
-        "Spawn many subagents at once to work in parallel. Each task runs independently and returns its result. \
-Great for fan-out work (e.g. investigate N files, implement N independent pieces)."
+        "Spawn many subagents at once to work in parallel (MULTITASK). Each task runs in an \
+isolated git worktree and returns its result plus a branch id for `integrate_worktree`. \
+Great for fan-out work across independent features."
     }
 
     fn parameters(&self) -> Value {
@@ -182,6 +204,11 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
+        if !ctx.isolate_worktrees {
+            return ToolResult::error(
+                "spawn_swarm is only available in MULTITASK mode — switch with Tab",
+            );
+        }
         let Some(arr) = args.get("tasks").and_then(|v| v.as_array()) else {
             return ToolResult::error("missing 'tasks' array");
         };
@@ -206,13 +233,14 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
             if prompt.trim().is_empty() {
                 continue;
             }
-            tasks.push(SubagentTask {
-                id: format!("sub_{}", uuid::Uuid::new_v4().simple()),
-                label: truncate_label(&prompt, 44),
+            let id = format!("sub_{}", uuid::Uuid::new_v4().simple());
+            tasks.push(make_task(
+                id,
+                truncate_label(&prompt, 44),
                 prompt,
-                model_role: ModelRole::Default,
-                depth: ctx.depth + 1,
-            });
+                ctx.depth + 1,
+                true,
+            ));
         }
 
         if tasks.is_empty() {
@@ -223,6 +251,7 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
         let mut out = String::new();
         for (i, o) in outcomes.iter().enumerate() {
             out.push_str(&format!("### Subagent {}\n", i + 1));
+            out.push_str(&format!("id: `{}`\n\n", o.id));
             match &o.result {
                 Ok(s) => out.push_str(s),
                 Err(e) => out.push_str(&format!("(failed: {e})")),
@@ -230,6 +259,49 @@ Great for fan-out work (e.g. investigate N files, implement N independent pieces
             out.push_str("\n\n");
         }
         ToolResult::ok(out)
+    }
+}
+
+/// Merge a Multitask worker branch into the main checkout.
+pub struct IntegrateWorktree;
+
+#[async_trait]
+impl Tool for IntegrateWorktree {
+    fn name(&self) -> &str {
+        "integrate_worktree"
+    }
+
+    fn description(&self) -> &str {
+        "Merge a MULTITASK worker's git branch into the main checkout and remove its worktree. \
+Pass the worker `id` from spawn_swarm / spawn_subagent results (e.g. `sub_…`)."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Worker id from the spawn result (e.g. sub_abc123)."
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
+        if ctx.depth > 0 {
+            return ToolResult::error("integrate_worktree is only for the main MULTITASK agent");
+        }
+        let Some(id) = str_arg(&args, "id").map(str::trim).filter(|s| !s.is_empty()) else {
+            return ToolResult::error("missing 'id'");
+        };
+        // Allow ids with or without hive/ prefix confusion — strip accidental branch prefix.
+        let id = id.strip_prefix("hive/").unwrap_or(id);
+        match worktree::integrate(&ctx.cwd, id) {
+            Ok(msg) => ToolResult::ok(msg),
+            Err(e) => ToolResult::error(e),
+        }
     }
 }
 
@@ -246,6 +318,7 @@ fn truncate_label(s: &str, max: usize) -> String {
 inventory::submit! { ToolRegistration { make: || Arc::new(VerifyProject) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(SpawnSubagent) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(SpawnSwarm) as Arc<dyn Tool> } }
+inventory::submit! { ToolRegistration { make: || Arc::new(IntegrateWorktree) as Arc<dyn Tool> } }
 
 #[cfg(test)]
 mod tests {

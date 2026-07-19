@@ -435,6 +435,7 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 
 /// User message: a full-width gray strip like the input bar — one tinted
 /// padding row above and below, text rows in the middle, lightly inset.
+/// `@path` chips keep the accent `@` so attachments read like the composer.
 fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let bg = theme.strip;
@@ -443,7 +444,7 @@ fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
 
     let raw: Vec<Line> = text
         .split('\n')
-        .map(|l| Line::from(Span::styled(l.to_string(), body)))
+        .map(|l| Line::from(style_user_line(l, theme, bg)))
         .collect();
     let wrapped = wrap::wrap_lines(raw, width.saturating_sub(4));
 
@@ -463,6 +464,57 @@ fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
     }));
     out.push(pad_row());
     out
+}
+
+fn style_user_line(text: &str, theme: &crate::theme::Theme, bg: Color) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some(at) = rest.find('@') else {
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default().fg(theme.fg).bg(bg),
+            ));
+            break;
+        };
+        if at > 0 {
+            spans.push(Span::styled(
+                rest[..at].to_string(),
+                Style::default().fg(theme.fg).bg(bg),
+            ));
+        }
+        let after = &rest[at + 1..];
+        let end = after
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, _)| i)
+            .unwrap_or(after.len());
+        let label = &after[..end];
+        if label.is_empty() {
+            spans.push(Span::styled(
+                "@",
+                Style::default().fg(theme.fg).bg(bg),
+            ));
+            rest = after;
+            continue;
+        }
+        spans.push(Span::styled(
+            "@",
+            Style::default().fg(theme.accent).bg(bg).add(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default().fg(theme.dim).bg(bg),
+        ));
+        rest = &after[end..];
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(
+            String::new(),
+            Style::default().fg(theme.fg).bg(bg),
+        ));
+    }
+    spans
 }
 
 fn indent(lines: Vec<Line>) -> Vec<Line> {
@@ -541,6 +593,7 @@ mod tests {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),

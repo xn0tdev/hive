@@ -25,8 +25,21 @@ pub struct ModelChoice {
     pub display: String,
     /// Secondary text (badges / short id).
     pub detail: String,
-    /// Section header (provider or org).
+    /// Section header (provider label).
     pub group: String,
+    /// `/connect` profile id — switching model may activate this provider.
+    pub connection_id: String,
+}
+
+/// A skill exposed in the `/` composer menu (`/skill-name`).
+#[derive(Debug, Clone)]
+pub struct SkillChoice {
+    /// Slash + `read_skill` name.
+    pub name: String,
+    /// One-line description for the `/` menu.
+    pub description: String,
+    /// Full `SKILL.md` body injected when the skill is invoked.
+    pub content: String,
 }
 
 /// Everything the TUI needs to know at startup.
@@ -37,6 +50,8 @@ pub struct TuiInit {
     pub model_display: String,
     /// Seed rows for the Switch-model picker (replaced by live catalog).
     pub model_choices: Vec<ModelChoice>,
+    /// Skills available via `/name` in the composer.
+    pub skills: Vec<SkillChoice>,
     /// Saved `/connect` providers.
     pub connections: Vec<ConnectionInfo>,
     /// Active connection profile id.
@@ -60,6 +75,8 @@ pub enum InputCommand {
     SetModel {
         id: String,
         display: String,
+        /// When set, activate this `/connect` profile before applying the model.
+        connection_id: Option<String>,
     },
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,
@@ -82,6 +99,8 @@ pub enum InputCommand {
         id: String,
     },
     Clear,
+    /// Compress agent conversation history (keeps task continuity).
+    Compact,
     /// Persist UI prefs into `~/.config/hive/config.toml`.
     SaveUi(UiConfig),
 }

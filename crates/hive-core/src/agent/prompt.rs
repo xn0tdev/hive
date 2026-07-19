@@ -55,6 +55,13 @@ When done, briefly say the plan is ready (the TUI shows a Plan.md card).\n\n",
 - After exploration, note remaining assumptions in the plan and keep going.\n\
 - Stay inside the user's intent — do not expand scope into a redesign unless asked.\n\n",
         );
+    } else if mode == AgentMode::Multitask && !subagent {
+        p.push_str(
+            "- You orchestrate — do not implement features yourself.\n\
+- Split independent work into clear tasks; spawn subagents; wait for their results.\n\
+- After workers finish, integrate their branches with `integrate_worktree`.\n\
+- Only ask the user when blocked on a real ambiguity tools cannot resolve.\n\n",
+        );
     } else {
         p.push_str(
             "- Use tools immediately; do not ask for permission between ordinary steps.\n\
@@ -129,7 +136,10 @@ serializing needlessly.\n\
         p.push_str("## Skills available\n");
         p.push_str(
             "Each skill is a set of instructions you can load with the `read_skill` tool when relevant. \
-Read a skill IMMEDIATELY when its description matches the task, then follow it.\n",
+Read a skill IMMEDIATELY when its description matches the task, then follow it.\n\
+Users may also invoke a skill with `/skill-name` (optionally with a short note). \
+When they do, the skill body is already in the user message — follow it immediately; \
+do not ask whether to use it.\n",
         );
         for s in skill_list {
             p.push_str(&format!("- `{}`: {}\n", s.name, s.description));
@@ -147,16 +157,33 @@ Stay in the assigned scope; do not expand into orchestrator-level work.\n\n",
     } else if mode == AgentMode::Build {
         p.push_str("## Subagents\n");
         p.push_str(
-            "You are the orchestrator: when you launch a subagent, you write its prompt.\n\
+            "You do the work yourself. When helpful you may launch a helper:\n\
 - `verify_project`: ready checker. Pass a freeform `prompt` you author \
 (what to check, scope, how to report).\n\
-- `spawn_subagent`: general focused worker. Pass a self-contained `task` prompt you author.\n\
-Do not use fan-out swarm tools — they are unavailable. Prefer doing work yourself unless \
-parallelism or an independent check clearly helps.\n\n",
+- `spawn_subagent`: one focused worker. Pass a self-contained `task` prompt you author.\n\
+Fan-out (`spawn_swarm`) is unavailable in BUILD — switch to MULTITASK for parallel workers.\n\
+Prefer doing work yourself unless an independent check clearly helps.\n\n",
         );
         p.push_str("## Existing plan\n");
         p.push_str(&format!(
             "If `{PLAN_REL_PATH}` exists, follow it unless the user asks otherwise.\n\n",
+        ));
+    } else if mode == AgentMode::Multitask {
+        p.push_str("## MULTITASK mode\n");
+        p.push_str(
+            "You are the orchestrator. You do NOT implement code yourself.\n\
+- Split the user's request into independent tasks (different features / files).\n\
+- Call `spawn_swarm` with those tasks (or `spawn_subagent` for a single worker).\n\
+- Each worker runs in an isolated git worktree so they do not clash.\n\
+- You write each worker's full prompt with all needed context.\n\
+- Wait for results, then call `integrate_worktree` with each worker id/branch to merge.\n\
+- If integrate reports conflicts, describe them clearly — do not silently force merges.\n\
+- Read/search tools are available so you can inspect the repo before splitting work.\n\
+Forbidden for you: `write_file`, `edit_file`, `run_shell`, `verify_project`.\n\n",
+        );
+        p.push_str("## Existing plan\n");
+        p.push_str(&format!(
+            "If `{PLAN_REL_PATH}` exists, use it to decide how to split work.\n\n",
         ));
     }
 
