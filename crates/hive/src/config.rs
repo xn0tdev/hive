@@ -65,10 +65,6 @@ model = "sonar"
 max_concurrent = 200
 max_depth = 2
 
-[agent]
-# Auto-/compact when a request uses ≥75% of this window (tokens).
-context_window = 128000
-
 [ui]
 theme = "gray"
 setup_complete = false
@@ -420,9 +416,6 @@ model = "sonar"
 [swarm]
 max_concurrent = 200
 max_depth = 2
-
-[agent]
-context_window = 128000
 
 [ui]
 theme = "gray"

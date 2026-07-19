@@ -316,7 +316,7 @@ pub struct ConnectionsConfig {
 }
 
 /// Default model context window (tokens) when unset in config.
-pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 
 /// Agent runtime knobs (context window, compaction).
 #[derive(Debug, Clone, Deserialize)]
