@@ -1,4 +1,5 @@
-//! Shell execution tool: runs a command via `sh -c`, streaming output live.
+//! Shell execution tool: runs a command via the platform shell
+//! (`sh -c` on Unix, `cmd.exe /C` on Windows), streaming output live.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -60,14 +61,16 @@ impl Tool for RunShell {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command non-interactively in the working directory. Output is streamed live. Executes immediately without confirmation."
+        "Run a shell command non-interactively in the working directory \
+(Unix: `sh -c`, Windows: `cmd.exe /C`). Output is streamed live. \
+Executes immediately without confirmation."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "The shell command to run (via `sh -c`)."},
+                "command": {"type": "string", "description": "The shell command to run (platform shell: sh -c / cmd /C)."},
                 "timeout_secs": {"type": "integer", "description": "Optional timeout in seconds; the process is killed if exceeded."}
             },
             "required": ["command"]
@@ -80,15 +83,23 @@ impl Tool for RunShell {
         };
         let timeout = u64_arg(&args, "timeout_secs");
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(&ctx.cwd)
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(command);
+            c.process_group(0);
+            c
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd.exe");
+            c.args(["/C", command]);
+            c
+        };
+        cmd.current_dir(&ctx.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(unix)]
-        cmd.process_group(0);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
