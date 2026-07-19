@@ -124,6 +124,7 @@ async fn auto_compacts_mid_turn_and_finishes() {
         .run_turn(
             UserInput::from("please echo hi"),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
     assert_eq!(text, "done");
@@ -150,6 +151,7 @@ async fn manual_compact_replaces_history() {
         .run_turn(
             UserInput::from("seed"),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
 

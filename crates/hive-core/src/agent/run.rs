@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
@@ -30,6 +30,26 @@ pub struct UserInput {
     pub text: String,
     pub images: Vec<ImageSource>,
     pub mode: AgentMode,
+}
+
+/// Mid-turn follow-up staged by the TUI (double-Enter → next tool round).
+pub type FollowUpSlot = Arc<Mutex<Option<UserInput>>>;
+
+fn take_follow_up(slot: &FollowUpSlot) -> Option<UserInput> {
+    slot.lock().ok().and_then(|mut g| g.take())
+}
+
+fn push_user_input(session: &mut Session, input: UserInput) {
+    let mut parts: Vec<ContentPart> = Vec::new();
+    if !input.text.is_empty() {
+        parts.push(ContentPart::Text(input.text));
+    }
+    for img in input.images {
+        parts.push(ContentPart::Image(img));
+    }
+    if !parts.is_empty() {
+        session.push(Message::user_parts(parts));
+    }
 }
 
 impl From<String> for UserInput {
@@ -283,8 +303,10 @@ impl Agent {
             .await
             .map_err(|e| format!("compact failed: {e}"))?;
 
+        self.last_prompt_tokens = outcome.usage.prompt_tokens;
         self.session.add_usage(outcome.usage);
         self.emit(AgentEvent::Usage(self.session.usage));
+        self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
 
         let summary = outcome.message.text();
         if summary.trim().is_empty() {
@@ -304,23 +326,21 @@ impl Agent {
     /// Run one user turn to completion: stream the model, execute any tool calls
     /// (immediately, no confirmation), and repeat until the model stops calling
     /// tools. Returns the final assistant text.
-    pub async fn run_turn(&mut self, input: UserInput, interrupt: Arc<AtomicBool>) -> String {
+    ///
+    /// `follow_up`: optional mid-turn inject from the TUI (second Enter). Applied
+    /// before the next model call — after the current tool batch finishes.
+    pub async fn run_turn(
+        &mut self,
+        input: UserInput,
+        interrupt: Arc<AtomicBool>,
+        follow_up: FollowUpSlot,
+    ) -> String {
         if self.depth == 0 {
             self.set_mode(input.mode);
         }
         self.emit(AgentEvent::TurnStarted);
 
-        // Assemble the user message (text + any images).
-        let mut parts: Vec<ContentPart> = Vec::new();
-        if !input.text.is_empty() {
-            parts.push(ContentPart::Text(input.text));
-        }
-        for img in input.images {
-            parts.push(ContentPart::Image(img));
-        }
-        if !parts.is_empty() {
-            self.session.push(Message::user_parts(parts));
-        }
+        push_user_input(&mut self.session, input);
 
         let mut final_text = String::new();
 
@@ -332,6 +352,9 @@ impl Agent {
 
             // Mid-turn safe point: tool results (if any) are already in history.
             if self.depth == 0 {
+                if let Some(fu) = take_follow_up(&follow_up) {
+                    push_user_input(&mut self.session, fu);
+                }
                 self.maybe_auto_compact().await;
             }
 
@@ -367,6 +390,7 @@ impl Agent {
             self.last_prompt_tokens = outcome.usage.prompt_tokens;
             self.session.add_usage(outcome.usage);
             self.emit(AgentEvent::Usage(self.session.usage));
+            self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
 
             let assistant_text = outcome.message.text();
             let tool_calls = outcome.message.tool_calls.clone();
@@ -378,6 +402,13 @@ impl Agent {
             }
 
             if tool_calls.is_empty() {
+                // Final reply — but a double-Enter follow-up means continue.
+                if self.depth == 0 {
+                    if let Some(fu) = take_follow_up(&follow_up) {
+                        push_user_input(&mut self.session, fu);
+                        continue;
+                    }
+                }
                 break;
             }
 
@@ -394,6 +425,13 @@ impl Agent {
             }
         }
 
+        // Don't drop a staged follow-up if we exited on interrupt/error.
+        if self.depth == 0 {
+            if let Some(fu) = take_follow_up(&follow_up) {
+                push_user_input(&mut self.session, fu);
+            }
+        }
+
         self.emit(AgentEvent::TurnFinished);
         final_text
     }
@@ -402,7 +440,8 @@ impl Agent {
     /// text. Used by subagents.
     pub async fn run_headless(&mut self, prompt: impl Into<String>) -> String {
         let interrupt = Arc::new(AtomicBool::new(false));
-        self.run_turn(UserInput::from(prompt.into()), interrupt)
+        let follow_up: FollowUpSlot = Arc::new(Mutex::new(None));
+        self.run_turn(UserInput::from(prompt.into()), interrupt, follow_up)
             .await
     }
 

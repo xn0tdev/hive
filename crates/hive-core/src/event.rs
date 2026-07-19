@@ -55,7 +55,10 @@ pub enum AgentEvent {
         ok: bool,
         summary: String,
     },
+    /// Cumulative session usage (prompt/completion totals for this chat).
     Usage(Usage),
+    /// Tokens in the latest prompt — approx. how full the context window is.
+    ContextTokens(u64),
     SubagentSpawned {
         id: String,
         label: String,

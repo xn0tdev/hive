@@ -9,7 +9,7 @@ use hive_core::config::{AppConfig, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
 use hive_core::provider::LlmProvider;
 use hive_core::vision::VisionDescriber;
-use hive_core::{Agent, DescribeVision, UserInput};
+use hive_core::{Agent, DescribeVision, FollowUpSlot, UserInput};
 use hive_llm::catalog::{
     enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
     provider_label_for_base, ModelCard,
@@ -22,14 +22,23 @@ pub async fn run(
     mut input_rx: UnboundedReceiver<InputCommand>,
     events: EventSender,
     interrupt: Arc<AtomicBool>,
+    follow_up: FollowUpSlot,
     mut cfg: Arc<AppConfig>,
 ) {
     while let Some(cmd) = input_rx.recv().await {
         match cmd {
             InputCommand::User { text, images, mode } => {
                 interrupt.store(false, Ordering::Relaxed);
+                // Drop any stale mid-turn inject from a previous turn.
+                if let Ok(mut g) = follow_up.lock() {
+                    *g = None;
+                }
                 agent
-                    .run_turn(UserInput { text, images, mode }, interrupt.clone())
+                    .run_turn(
+                        UserInput { text, images, mode },
+                        interrupt.clone(),
+                        follow_up.clone(),
+                    )
                     .await;
             }
             InputCommand::SetModel {

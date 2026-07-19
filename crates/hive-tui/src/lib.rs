@@ -61,6 +61,8 @@ pub struct TuiInit {
     pub version: String,
     /// Chat / sidebar prefs from `[ui]` in config.toml.
     pub ui: UiConfig,
+    /// Model context window size (`[agent].context_window`).
+    pub context_window: u64,
 }
 
 /// Messages the TUI sends to the agent driver.

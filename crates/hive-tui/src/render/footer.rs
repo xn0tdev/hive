@@ -1,4 +1,4 @@
-//! Footer content: `model · tokens` and the working directory. Exposed as
+//! Footer content: `model · context` and the working directory. Exposed as
 //! reusable lines so both the bottom bar and the centered landing can use them.
 //! BUILD/PLAN chip sits on the model row (right), under the input strip.
 //! While a turn is running, a compact 5-cube ping-pong wave sits just left of
@@ -24,7 +24,8 @@ const WORKING_GLYPH_THRESHOLD: f32 = 0.45;
 /// Gap between the cubes and the mode chip (columns).
 const WORKING_CHIP_GAP: u16 = 1;
 
-/// `model · tokens · attachments` as a single line (no activity chrome).
+/// `model · context · attachments` as a single line (no activity chrome).
+/// Session spend lives in the project sidebar.
 pub fn model_line(app: &crate::app::App) -> Line {
     let theme = &app.theme;
     let mut spans = Vec::new();
@@ -33,13 +34,11 @@ pub fn model_line(app: &crate::app::App) -> Line {
         app.model_display.clone(),
         Style::default().fg(theme.dim),
     ));
-    if app.usage.total_tokens > 0 {
-        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(
-            format_tokens(app.usage.total_tokens),
-            Style::default().fg(theme.faint),
-        ));
-    }
+    spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
+    spans.push(Span::styled(
+        format_context(app.context_tokens, app.context_window),
+        Style::default().fg(theme.faint),
+    ));
     if app.has_pending_attaches() {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
         for (i, a) in app.pending_attaches.iter().enumerate() {
@@ -174,11 +173,17 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-fn format_tokens(n: u64) -> String {
+/// `used / window` for the context meter in the footer.
+fn format_context(used: u64, window: u64) -> String {
+    let window = window.max(1);
+    format!("{} / {}", short_tokens(used), short_tokens(window))
+}
+
+fn short_tokens(n: u64) -> String {
     if n >= 1000 {
-        format!("{:.1}k tokens", n as f64 / 1000.0)
+        format!("{:.1}k", n as f64 / 1000.0)
     } else {
-        format!("{n} tokens")
+        n.to_string()
     }
 }
 
@@ -212,6 +217,7 @@ mod tests {
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
         })
     }
 
@@ -337,13 +343,13 @@ mod tests {
     fn model_line_stays_clean_when_idle_or_running() {
         let mut a = app();
         let idle = line_text(&model_line(&a));
-        assert_eq!(idle, "Kimi 2.6", "{idle}");
+        assert_eq!(idle, "Kimi 2.6 · 0 / 128.0k", "{idle}");
         assert_eq!(working_glyph_count(&idle), 0, "{idle}");
 
         a.apply(AgentEvent::TurnStarted);
         a.spinner = 4;
         let running = line_text(&model_line(&a));
-        assert_eq!(running, "Kimi 2.6", "{running}");
+        assert_eq!(running, "Kimi 2.6 · 0 / 128.0k", "{running}");
         assert!(!running.contains("Working"), "{running}");
         assert_eq!(working_glyph_count(&running), 0, "{running}");
     }

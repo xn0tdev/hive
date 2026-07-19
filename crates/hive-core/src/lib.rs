@@ -44,7 +44,7 @@ pub use vision::{no_vision, NoVision, VisionDescriber};
 pub use agent::{
     discover_context_files, is_plan_path, multitask_mode_check, multitask_mode_tool_allowed,
     plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary, Agent, AgentBuilder,
-    AgentMode, ContextFile, Session, UserInput, PLAN_REL_PATH,
+    AgentMode, ContextFile, FollowUpSlot, Session, UserInput, PLAN_REL_PATH,
 };
 pub use skills::DiskSkills;
 pub use swarm::new_spawner;

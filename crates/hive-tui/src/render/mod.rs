@@ -126,7 +126,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
 
     app.refresh_project();
 
-    // On wide screens, reserve a right project sidebar; chat stays in a left band.
+    // On wide screens, reserve a right project sidebar; chat fills/centers the rest.
     let side_w = sidebar::width_for(
         area.width,
         app.sidebar_open,
@@ -135,8 +135,10 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     );
     let gap: u16 = if side_w > 0 { 2 } else { 0 };
     let chat_avail = area.width.saturating_sub(side_w).saturating_sub(gap);
+    // No hard 88-col ceiling — use the band left of the sidebar (with modest pad),
+    // then center the column so leftover space isn't a dead left margin.
     let inner_w = if side_w > 0 {
-        chat_avail.saturating_sub(2).clamp(40, 88)
+        chat_avail.saturating_sub(4).max(40).min(chat_avail)
     } else {
         area.width.saturating_sub(6).max(20).min(area.width)
     };
@@ -148,7 +150,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         input_height(app, inner_w)
     };
     let ix = if side_w > 0 {
-        area.x + 2
+        area.x + chat_avail.saturating_sub(inner_w) / 2
     } else {
         area.x + (area.width - inner_w) / 2
     };
@@ -157,8 +159,10 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     // model row) on the last two rows, then input, transcript above.
     // Working cubes sit just left of the mode chip on the model row.
     let footer_y = area.bottom().saturating_sub(2);
+    let follow_h: u16 = if !special && app.has_follow_up() { 1 } else { 0 };
     let input_y = footer_y.saturating_sub(input_h);
-    let transcript_h = input_y.saturating_sub(area.y);
+    let follow_y = input_y.saturating_sub(follow_h);
+    let transcript_h = follow_y.saturating_sub(area.y);
     let transcript = Rect::new(ix, area.y, inner_w, transcript_h);
     let band = |y: u16, h: u16| Rect::new(ix, y, inner_w, h);
 
@@ -173,6 +177,9 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         app.back_hit = None;
         app.build_hit = None;
+        if follow_h > 0 {
+            input_box::draw_follow_up(f, band(follow_y, follow_h), app);
+        }
         input_box::draw(f, band(input_y, input_h), app);
         // Full band width: text flush left with strip, chip flush right.
         footer::draw_with_mode(f, band(footer_y, 2), app);
@@ -192,10 +199,15 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Menu overlay, drawn last so it layers over the transcript, its bottom
-    // edge flush with the input's top. If it can't fit it clips at the top.
+    // edge flush with the follow-up banner (or input) top.
     if menu_h > 0 {
-        let top = input_y.saturating_sub(menu_h).max(area.y);
-        menu::draw(f.buffer(), Rect::new(ix, top, inner_w, input_y - top), app);
+        let menu_bottom = if follow_h > 0 { follow_y } else { input_y };
+        let top = menu_bottom.saturating_sub(menu_h).max(area.y);
+        menu::draw(
+            f.buffer(),
+            Rect::new(ix, top, inner_w, menu_bottom - top),
+            app,
+        );
     }
 
     // Active chat: same x as the chat column, y on the very bottom screen row.

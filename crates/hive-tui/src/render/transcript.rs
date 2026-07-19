@@ -600,6 +600,7 @@ mod tests {
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
         })
     }
 

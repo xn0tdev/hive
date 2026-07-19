@@ -346,89 +346,98 @@ fn flush_table(lines: &mut Vec<Line>, rows: &[&str], theme: &Theme, width: usize
         }
     }
 
-    let sep_w = 3; // " │ "
-    let width = width.max(8);
-    let widths = fit_columns(&natural, cols, sep_w, width);
+    // Full box grid: `│ pad content pad │` per cell; chrome eats verticals + pad.
+    // Every cell is clamped to its column width so `│` always sits under `┬`/`┼`.
+    const PAD: usize = 1;
+    let chrome = (cols + 1) + cols * (2 * PAD); // │…│…│ + padding spaces
+    let width = width.max(chrome + cols);
+    let content_budget = width.saturating_sub(chrome).max(cols);
+    let widths = fit_columns(&natural, cols, 0, content_budget);
 
-    let dim = Style::default().fg(theme.dim);
+    // One style for the whole frame so junctions read as continuous lines.
+    let chrome_st = Style::default().fg(theme.dim);
     let head = Style::default().fg(theme.heading).add(Modifier::BOLD);
     let body = Style::default().fg(theme.fg);
-    let rule = Style::default().fg(theme.faint);
 
-    // Continuous light rules (─) + vertical │ — no ASCII `+` / heavy junctions.
-    let table_w: usize = widths.iter().sum::<usize>() + sep_w * cols.saturating_sub(1);
-    let hrule = || Line::from(Span::styled("─".repeat(table_w.max(3)), rule));
-
-    let mut wrote_body = false;
-    let mut wrote_header = false;
-
-    for (ri, row) in parsed.iter().enumerate() {
-        if ri == 0 && header_empty {
-            continue;
+    let border = |left: char, mid: char, right: char| -> Line {
+        let mut s = String::new();
+        s.push(left);
+        for (i, w) in widths.iter().enumerate() {
+            if i > 0 {
+                s.push(mid);
+            }
+            s.push_str(&"─".repeat(w + 2 * PAD));
         }
-        let is_header = ri == 0 && !header_empty;
+        s.push(right);
+        Line::from(Span::styled(s, chrome_st))
+    };
+
+    let visible: Vec<&Vec<String>> = parsed
+        .iter()
+        .enumerate()
+        .filter(|(ri, _)| !(*ri == 0 && header_empty))
+        .map(|(_, r)| r)
+        .collect();
+    if visible.is_empty() {
+        return;
+    }
+
+    lines.push(border('┌', '┬', '┐'));
+
+    for (vi, row) in visible.iter().enumerate() {
+        let is_header = vi == 0 && !header_empty;
         let st = if is_header { head } else { body };
 
-        if is_header && !wrote_header {
-            lines.push(hrule());
-        }
-
-        // Wrap each cell into lines of at most widths[ci] display columns.
         let mut cell_lines: Vec<Vec<String>> = Vec::with_capacity(cols);
         let mut row_h = 1usize;
         for (ci, w) in widths.iter().enumerate() {
             let cell = row.get(ci).map(String::as_str).unwrap_or("");
+            // Always wrap to column width (no overflow that shifts later `│`).
             let wrapped = wrap_cell(cell, *w);
             row_h = row_h.max(wrapped.len().max(1));
             cell_lines.push(wrapped);
         }
 
         for li in 0..row_h {
-            let mut spans = Vec::new();
+            let mut spans = vec![Span::styled("│", chrome_st)];
             for (ci, w) in widths.iter().enumerate() {
-                if ci > 0 {
-                    spans.push(Span::styled(" │ ", dim));
-                }
+                spans.push(Span::styled(" ".repeat(PAD), chrome_st));
                 let piece = cell_lines[ci].get(li).map(String::as_str).unwrap_or("");
-                if is_header {
-                    let mut text = piece.to_string();
-                    let pad = w.saturating_sub(display_width(&text));
-                    text.push_str(&" ".repeat(pad));
-                    spans.push(Span::styled(text, st));
-                } else if piece.is_empty() {
-                    spans.push(Span::styled(" ".repeat(*w), body));
-                } else if row_h == 1 {
-                    // Single-line cell: inline emphasis, but no code-chip
-                    // backgrounds — they look like crooked row highlights.
-                    let raw = row.get(ci).map(String::as_str).unwrap_or("");
-                    let mut cell_spans = inline_flat(raw, theme);
-                    let pad = w.saturating_sub(spans_width(&cell_spans));
-                    if pad > 0 {
-                        cell_spans.push(Span::styled(" ".repeat(pad), body));
-                    }
-                    spans.extend(cell_spans);
-                } else {
-                    // Wrapped: pieces are already demarkdowned plain text.
-                    let mut text = piece.to_string();
-                    let pad = w.saturating_sub(display_width(&text));
-                    text.push_str(&" ".repeat(pad));
-                    spans.push(Span::styled(text, body));
-                }
+                // Plain padded text keeps column geometry exact (styled inline
+                // can disagree with wrap width when markdown markers differ).
+                let text = pad_to_width(piece, *w);
+                spans.push(Span::styled(text, st));
+                spans.push(Span::styled(" ".repeat(PAD), chrome_st));
+                spans.push(Span::styled("│", chrome_st));
             }
             lines.push(Line::from(spans));
         }
 
-        if is_header {
-            lines.push(hrule());
-            wrote_header = true;
-        } else {
-            wrote_body = true;
+        if vi + 1 < visible.len() {
+            lines.push(border('├', '┼', '┤'));
         }
     }
 
-    if wrote_body || wrote_header {
-        lines.push(hrule());
+    lines.push(border('└', '┴', '┘'));
+}
+
+/// Truncate/pad by display width so a cell is exactly `width` columns.
+fn pad_to_width(s: &str, width: usize) -> String {
+    let width = width.max(1);
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        out.push(ch);
+        w += cw;
     }
+    if w < width {
+        out.push_str(&" ".repeat(width - w));
+    }
+    out
 }
 
 /// Shrink natural column widths so `sum + seps` fits in `budget`.
@@ -614,11 +623,6 @@ fn find_double(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// Inline markdown without code backgrounds (for table cells).
-fn inline_flat(text: &str, theme: &Theme) -> Vec<Span> {
-    inline_with(text, theme, false)
-}
-
 fn inline(text: &str, theme: &Theme) -> Vec<Span> {
     inline_with(text, theme, true)
 }
@@ -755,9 +759,9 @@ mod tests {
                 r
             );
         }
-        // Rule under header spans full table width (not just first col).
+        // Top border spans full table width (not just first col).
         let plain = text(&out);
-        let rule = plain.lines().find(|l| l.starts_with('─')).unwrap();
+        let rule = plain.lines().find(|l| l.starts_with('┌')).unwrap();
         assert!(display_width(rule) >= display_width(&rows[0]));
     }
 
@@ -841,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn ascii_plus_tables_become_clean_rules() {
+    fn ascii_plus_tables_become_box_grid() {
         let md = "\
 +--------+--------+
 | Check  | Status |
@@ -855,11 +859,30 @@ mod tests {
         assert!(t.contains("Check"));
         assert!(t.contains("Build"));
         assert!(t.contains('│'));
-        assert!(t.contains('─'));
+        assert!(t.contains('┌'), "full box grid top: {t}");
+        assert!(t.contains('┼'), "row/col junctions: {t}");
+        assert!(t.contains('└'), "full box grid bottom: {t}");
         assert!(!t.contains('+'), "ASCII + borders must not appear: {t}");
         assert!(!t.contains("|---"), "{t}");
-        // Continuous rules, not junction glyphs.
-        assert!(!t.contains('┼'), "{t}");
-        assert!(!t.contains('┌'), "{t}");
+    }
+
+    #[test]
+    fn gfm_table_uses_full_box_grid() {
+        let md = "\
+| Имя | Возраст |
+|-----|---------|
+| Анна | 28 |
+| Борис | 34 |
+";
+        let out = render(md, &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains('┌') && t.contains('┬') && t.contains('┐'), "{t}");
+        assert!(t.contains('├') && t.contains('┼') && t.contains('┤'), "{t}");
+        assert!(t.contains('└') && t.contains('┴') && t.contains('┘'), "{t}");
+        // No floating rules without junctions.
+        assert!(!t.lines().any(|l| {
+            let t = l.trim();
+            !t.is_empty() && t.chars().all(|c| c == '─')
+        }));
     }
 }

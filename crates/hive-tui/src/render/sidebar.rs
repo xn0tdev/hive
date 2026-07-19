@@ -325,6 +325,15 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         ]),
         None,
     ));
+    // Session spend (footer shows context fill instead).
+    let session = format_session_tokens(app.usage.total_tokens);
+    lines.push((
+        Line::from(vec![
+            Span::styled("· ", Style::default().fg(theme.faint)),
+            Span::styled(session, Style::default().fg(theme.dim)),
+        ]),
+        None,
+    ));
 
     let collapsible = app.ui.sidebar_collapse_sections;
 
@@ -488,7 +497,8 @@ fn file_line(f: &ChangedFile, app: &App, width: usize) -> Line {
     let theme = &app.theme;
     let stats = format_stats(f);
     let stats_w = stats.chars().count();
-    let name_budget = width.saturating_sub(stats_w.saturating_add(1));
+    // gap before stats + trailing pad so `-N` isn't flush against the panel edge
+    let name_budget = width.saturating_sub(stats_w.saturating_add(2));
     let name = truncate(&f.path, name_budget);
     let pad = name_budget.saturating_sub(name.chars().count());
 
@@ -524,6 +534,7 @@ fn file_line(f: &ChangedFile, app: &App, width: usize) -> Line {
             ));
         }
     }
+    spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
@@ -561,6 +572,17 @@ fn format_token_count(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         format!("{n}")
+    }
+}
+
+fn format_session_tokens(n: u64) -> String {
+    if n == 0 {
+        return "0 session".into();
+    }
+    if n >= 1000 {
+        format!("{:.1}k session", n as f64 / 1000.0)
+    } else {
+        format!("{n} session")
     }
 }
 
@@ -623,6 +645,7 @@ mod tests {
             theme: "gray".into(),
             version: "0".into(),
             ui: Default::default(),
+            context_window: 128_000,
         })
     }
 

@@ -122,6 +122,20 @@ pub struct PendingAttach {
     pub image: Option<ImageSource>,
 }
 
+/// Follow-up typed while a turn is running — sent after `TurnFinished`.
+#[derive(Clone)]
+pub struct QueuedFollowUp {
+    /// Text shown in the transcript when flushed.
+    pub display: String,
+    /// Payload for the agent (may include `[Attached file: …]` notes).
+    pub text: String,
+    /// Composer text restored on ↑ (without `@chip` prefix).
+    pub composer: String,
+    /// Attachments restored on ↑ / re-queued on Enter.
+    pub attaches: Vec<PendingAttach>,
+    pub mode: AgentMode,
+}
+
 impl PendingAttach {
     /// Composer / transcript chip, e.g. `@src/main.rs`.
     pub fn tag(&self) -> String {
@@ -149,6 +163,10 @@ pub struct App {
     pub(crate) cwd: String,
     pub(crate) version: String,
     pub(crate) usage: Usage,
+    /// Tokens in the latest prompt (context fill).
+    pub(crate) context_tokens: u64,
+    /// Configured context window size.
+    pub(crate) context_window: u64,
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
@@ -157,6 +175,8 @@ pub struct App {
     pub(crate) transcript_max_scroll: usize,
     /// Files / images queued for the next user message (shown as tags).
     pub(crate) pending_attaches: Vec<PendingAttach>,
+    /// Follow-up waiting for the current turn to finish.
+    pub(crate) follow_up: Option<QueuedFollowUp>,
     /// Models offered in the Switch-model picker (live catalog when Ready).
     pub(crate) model_choices: Vec<ModelChoice>,
     /// Skills for the `/` menu (`/skill-name`).
@@ -259,11 +279,14 @@ impl App {
             cwd: init.cwd,
             version: init.version,
             usage: Usage::default(),
+            context_tokens: 0,
+            context_window: init.context_window.max(1),
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
+            follow_up: None,
             model_choices: init.model_choices,
             skills: init.skills,
             models_catalog: ModelsCatalogState::Idle,
@@ -832,8 +855,10 @@ impl App {
         self.blocks.clear();
         self.blocks.push(Block::Welcome);
         self.usage = Usage::default();
+        self.context_tokens = 0;
         self.scroll_from_bottom = 0;
         self.pending_attaches.clear();
+        self.follow_up = None;
         self.input.clear();
         self.reset_menu();
         self.close_palette();
@@ -849,6 +874,53 @@ impl App {
 
     pub fn has_pending_attaches(&self) -> bool {
         !self.pending_attaches.is_empty()
+    }
+
+    pub fn has_follow_up(&self) -> bool {
+        self.follow_up.is_some()
+    }
+
+    /// Queue (or replace) a follow-up while the agent is busy.
+    pub fn queue_follow_up(&mut self, fu: QueuedFollowUp) {
+        self.follow_up = Some(fu);
+        self.flash("Follow-up queued · Enter again → next step");
+    }
+
+    /// Pull the queued follow-up into the composer for editing (↑).
+    pub fn recall_follow_up(&mut self) -> bool {
+        let Some(fu) = self.follow_up.take() else {
+            return false;
+        };
+        self.pending_attaches = fu.attaches;
+        self.agent_mode = fu.mode;
+        self.input.value = fu.composer;
+        self.input.end();
+        self.reset_menu();
+        self.flash("Edit follow-up · Enter to re-queue");
+        true
+    }
+
+    /// Clear a queued follow-up without sending.
+    pub fn clear_follow_up(&mut self) -> bool {
+        if self.follow_up.take().is_some() {
+            self.flash("Follow-up cleared");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One-line preview for the banner above the input.
+    pub fn follow_up_preview(&self, max_chars: usize) -> Option<String> {
+        let fu = self.follow_up.as_ref()?;
+        let t = fu.display.replace('\n', " ");
+        let t = t.trim();
+        if t.chars().count() <= max_chars {
+            return Some(t.to_string());
+        }
+        let mut s: String = t.chars().take(max_chars.saturating_sub(1)).collect();
+        s.push('…');
+        Some(s)
     }
 
     pub fn attachment_tags_line(&self) -> String {
@@ -1058,6 +1130,10 @@ impl App {
             }
             AgentEvent::Usage(u) => {
                 self.usage = u;
+                true
+            }
+            AgentEvent::ContextTokens(n) => {
+                self.context_tokens = n;
                 true
             }
             AgentEvent::SubagentSpawned { id, label, prompt } => {
@@ -1501,6 +1577,7 @@ mod tests {
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
         })
     }
 

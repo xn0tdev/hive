@@ -3,7 +3,7 @@
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
@@ -11,7 +11,9 @@ use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::vision::VisionDescriber;
-use hive_core::{all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills};
+use hive_core::{
+    all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills, FollowUpSlot,
+};
 use hive_llm::FireworksProvider;
 use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 
@@ -45,6 +47,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
     let interrupt = Arc::new(AtomicBool::new(false));
+    let follow_up: FollowUpSlot = Arc::new(Mutex::new(None));
 
     let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
         cfg.provider.base_url.clone(),
@@ -107,19 +110,31 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         theme: cfg.ui.theme.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         ui: cfg.ui.clone(),
+        context_window: cfg.agent.context_window,
     };
 
     install_panic_hook();
 
     let driver_interrupt = interrupt.clone();
+    let driver_follow_up = follow_up.clone();
     let driver_cfg = cfg.clone();
     let driver_events = event_tx.clone();
     tokio::spawn(async move {
-        driver::run(agent, input_rx, driver_events, driver_interrupt, driver_cfg).await;
+        driver::run(
+            agent,
+            input_rx,
+            driver_events,
+            driver_interrupt,
+            driver_follow_up,
+            driver_cfg,
+        )
+        .await;
     });
 
-    tokio::task::spawn_blocking(move || hive_tui::run(tui_init, event_rx, input_tx, interrupt))
-        .await??;
+    tokio::task::spawn_blocking(move || {
+        hive_tui::run(tui_init, event_rx, input_tx, interrupt, follow_up)
+    })
+    .await??;
 
     Ok(())
 }

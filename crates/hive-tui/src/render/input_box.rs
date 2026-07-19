@@ -20,6 +20,29 @@ pub fn text_cols(band_width: u16) -> usize {
         .saturating_sub(PROMPT_COLS as u16) as usize
 }
 
+/// Dark strip above the composer: queued follow-up waiting for the turn.
+pub fn draw_follow_up(f: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let theme = &app.theme;
+    // Slightly darker than the input strip so it reads as a separate band.
+    let bg = theme.code_bg;
+    f.buffer().paint(area, Style::default().bg(bg));
+    let max = area.width.saturating_sub(4) as usize;
+    let Some(preview) = app.follow_up_preview(max.saturating_sub(12)) else {
+        return;
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            " follow-up  ",
+            Style::default().fg(theme.faint).bg(bg).add(Modifier::ITALIC),
+        ),
+        Span::styled(preview, Style::default().fg(theme.dim).bg(bg)),
+    ]);
+    f.buffer().set_line(area.x, area.y, &line, area.width);
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let theme = &app.theme;
     let bg = theme.strip;
@@ -47,7 +70,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     // Prompt + text first (caret stays on top); @chips sit under the message.
     let mut lines: Vec<Line> = Vec::new();
     if app.input.is_empty() {
-        let placeholder = if app.running {
+        let placeholder = if app.has_follow_up() {
+            "Enter again → next step · ↑ edit"
+        } else if app.running {
             "Add a follow-up"
         } else if app.has_pending_attaches() {
             "Describe what to do with the attachment(s)"
@@ -290,6 +315,7 @@ mod tests {
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
         })
     }
 

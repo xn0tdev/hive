@@ -106,7 +106,10 @@ async fn runs_tool_then_answers() {
     );
 
     let interrupt = Arc::new(AtomicBool::new(false));
-    let final_text = agent.run_turn(UserInput::from("hi"), interrupt).await;
+    let follow_up = Arc::new(std::sync::Mutex::new(None));
+    let final_text = agent
+        .run_turn(UserInput::from("hi"), interrupt, follow_up)
+        .await;
     assert_eq!(final_text, "all done");
 
     let mut saw_tool_started = false;
