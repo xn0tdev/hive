@@ -600,7 +600,7 @@ mod tests {
     }
 
     fn panel_bg() -> Color {
-        Color::Rgb(0x26, 0x26, 0x26)
+        Color::Rgb(0x32, 0x32, 0x32)
     }
 
     #[test]
