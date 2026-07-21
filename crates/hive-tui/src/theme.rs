@@ -22,7 +22,7 @@ pub struct Theme {
     pub plan: Color,
     /// BUILD mode chip background (cool / blue).
     pub build: Color,
-    /// MULTITASK mode chip background (muted violet).
+    /// MULTITASK mode chip background (soft lilac).
     pub multitask: Color,
     /// Subtle background strip for the input bar and user messages.
     pub strip: Color,
@@ -52,7 +52,7 @@ impl Theme {
             warn: rgb(0xc9, 0xb4, 0x7f),
             plan: rgb(0xc4, 0x8a, 0x3a),
             build: rgb(0x5a, 0x8f, 0xb0),
-            multitask: rgb(0x8a, 0x7a, 0xb0),
+            multitask: rgb(0xb4, 0xa4, 0xd4),
             strip: rgb(0x26, 0x26, 0x26),
             code_fg: rgb(0xbd, 0xbd, 0xbd),
             code_bg: rgb(0x1c, 0x1c, 0x1c),
