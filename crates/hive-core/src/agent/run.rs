@@ -207,6 +207,30 @@ impl Agent {
         self.provider = provider;
     }
 
+    pub fn provider_clone(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
+    }
+
+    pub fn tools_clone(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools.clone()
+    }
+
+    pub fn skills_clone(&self) -> Arc<dyn SkillSource> {
+        self.skills.clone()
+    }
+
+    pub fn config_clone(&self) -> Arc<AppConfig> {
+        self.config.clone()
+    }
+
+    pub fn spawner_clone(&self) -> Arc<dyn SubagentSpawner> {
+        self.spawner.clone()
+    }
+
+    pub fn events_clone(&self) -> EventSender {
+        self.events.clone()
+    }
+
     /// Apply MAKE/PLAN for the next turn and refresh the system prompt.
     pub fn set_mode(&mut self, mode: AgentMode) {
         if self.mode == mode {

@@ -514,11 +514,14 @@ dependencies = [
  "hive-core",
  "hive-llm",
  "hive-tui",
+ "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
