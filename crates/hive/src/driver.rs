@@ -1,5 +1,7 @@
 //! Agent driver: consumes `InputCommand`s from the TUI and runs turns.
 
+use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -8,8 +10,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use hive_core::config::{AppConfig, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
 use hive_core::provider::LlmProvider;
-use hive_core::vision::VisionDescriber;
-use hive_core::{Agent, DescribeVision, FollowUpSlot, UserInput};
+use hive_core::{Agent, FollowUpSlot, TerminalHandle, UserInput};
 use hive_llm::catalog::{
     enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
     provider_label_for_base, ModelCard,
@@ -23,9 +24,22 @@ pub async fn run(
     events: EventSender,
     interrupt: Arc<AtomicBool>,
     follow_up: FollowUpSlot,
+    terminal: TerminalHandle,
     mut cfg: Arc<AppConfig>,
 ) {
-    while let Some(cmd) = input_rx.recv().await {
+    let mut pending = VecDeque::new();
+    'commands: loop {
+        let cmd = match pending.pop_front() {
+            Some(command) => command,
+            None => match input_rx.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
+        let cmd = match handle_terminal_command(cmd, &terminal, &events).await {
+            Ok(()) => continue,
+            Err(command) => command,
+        };
         match cmd {
             InputCommand::User { text, images, mode } => {
                 interrupt.store(false, Ordering::Relaxed);
@@ -33,33 +47,44 @@ pub async fn run(
                 if let Ok(mut g) = follow_up.lock() {
                     *g = None;
                 }
-                agent
-                    .run_turn(
-                        UserInput { text, images, mode },
-                        interrupt.clone(),
-                        follow_up.clone(),
-                    )
-                    .await;
+                let turn = agent.run_turn(
+                    UserInput { text, images, mode },
+                    interrupt.clone(),
+                    follow_up.clone(),
+                );
+                if drive_turn(
+                    turn,
+                    &mut input_rx,
+                    &terminal,
+                    &events,
+                    &mut pending,
+                    interrupt.as_ref(),
+                )
+                .await
+                .is_none()
+                {
+                    break 'commands;
+                }
             }
             InputCommand::SetModel {
                 id,
                 display,
                 connection_id,
+                vision,
             } => {
                 if let Some(cid) = connection_id.as_deref().filter(|c| !c.is_empty()) {
                     if cid != cfg.connections.active {
                         if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, cid).await {
-                            let _ =
-                                events.send(AgentEvent::Notice(format!("connect failed: {e}")));
+                            let _ = events.send(AgentEvent::Notice(format!("connect failed: {e}")));
                             continue;
                         }
                     }
                 }
                 let (id, display) = resolve_model(&cfg, &id, &display);
                 agent.set_model(id.clone());
+                agent.set_vision_capable(vision);
                 if let Err(e) = crate::config::patch_model(&id, &display) {
-                    let _ =
-                        events.send(AgentEvent::Notice(format!("could not save model: {e}")));
+                    let _ = events.send(AgentEvent::Notice(format!("could not save model: {e}")));
                 }
                 let _ = events.send(AgentEvent::ModelChanged {
                     id: id.clone(),
@@ -93,7 +118,8 @@ pub async fn run(
                     &model_id,
                     &model_name,
                 ) {
-                    let _ = events.send(AgentEvent::Notice(format!("could not save provider: {e}")));
+                    let _ =
+                        events.send(AgentEvent::Notice(format!("could not save provider: {e}")));
                     continue;
                 }
                 if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, &id).await {
@@ -123,6 +149,7 @@ pub async fn run(
                 }
             }
             InputCommand::Clear => {
+                terminal.shutdown();
                 agent.reset();
             }
             InputCommand::Compact => {
@@ -134,6 +161,108 @@ pub async fn run(
                 if let Err(e) = crate::config::patch_ui(&ui) {
                     let _ =
                         events.send(AgentEvent::Notice(format!("could not save settings: {e}")));
+                }
+            }
+            InputCommand::TerminalAttach { .. }
+            | InputCommand::TerminalDetach { .. }
+            | InputCommand::TerminalInput { .. }
+            | InputCommand::TerminalResize { .. }
+            | InputCommand::TerminalStop { .. } => {
+                unreachable!("terminal command was not consumed by the router")
+            }
+        }
+    }
+    terminal.shutdown();
+}
+
+async fn handle_terminal_command(
+    command: InputCommand,
+    terminal: &TerminalHandle,
+    events: &EventSender,
+) -> Result<(), InputCommand> {
+    match command {
+        InputCommand::TerminalAttach { id } => {
+            report_terminal_result(&id, terminal.request_attach(&id), events);
+            Ok(())
+        }
+        InputCommand::TerminalDetach { id } => {
+            report_terminal_result(&id, terminal.request_detach(&id), events);
+            // Hand geometry back to the agent at a stable default size.
+            let _ = terminal
+                .resize(
+                    &id,
+                    hive_core::DEFAULT_ROWS,
+                    hive_core::DEFAULT_COLS,
+                )
+                .await;
+            Ok(())
+        }
+        InputCommand::TerminalInput { id, input } => {
+            let result = terminal.write_user(&id, input.into_bytes()).await;
+            report_terminal_result(&id, result, events);
+            Ok(())
+        }
+        InputCommand::TerminalResize { id, rows, cols } => {
+            let result = terminal.resize(&id, rows, cols).await;
+            report_terminal_result(&id, result, events);
+            Ok(())
+        }
+        InputCommand::TerminalStop { id } => {
+            let manager = terminal.clone();
+            let stop_id = id.clone();
+            let result = tokio::task::spawn_blocking(move || manager.stop(&stop_id))
+                .await
+                .map_err(|error| {
+                    hive_core::TerminalError::Io(format!("terminal stop task failed: {error}"))
+                })
+                .and_then(|result| result);
+            report_terminal_result(&id, result, events);
+            Ok(())
+        }
+        other => Err(other),
+    }
+}
+
+fn report_terminal_result<T>(
+    id: &str,
+    result: Result<T, hive_core::TerminalError>,
+    events: &EventSender,
+) {
+    if let Err(error) = result {
+        let _ = events.send(AgentEvent::TerminalError {
+            id: id.to_string(),
+            message: error.to_string(),
+        });
+    }
+}
+
+async fn drive_turn<F, T>(
+    turn: F,
+    input_rx: &mut UnboundedReceiver<InputCommand>,
+    terminal: &TerminalHandle,
+    events: &EventSender,
+    pending: &mut VecDeque<InputCommand>,
+    interrupt: &AtomicBool,
+) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(turn);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut turn => return Some(result),
+            command = input_rx.recv() => {
+                let Some(command) = command else {
+                    interrupt.store(true, Ordering::Relaxed);
+                    terminal.shutdown();
+                    let _ = turn.await;
+                    return None;
+                };
+                if let Err(command) =
+                    handle_terminal_command(command, terminal, events).await
+                {
+                    pending.push_back(command);
                 }
             }
         }
@@ -156,12 +285,11 @@ async fn apply_connection(
     ));
     let model_id = cfg.models.default.id().to_string();
     let model_display = cfg.models.default.display_name().to_string();
-    let vision: Arc<dyn VisionDescriber> =
-        Arc::new(DescribeVision::new(provider.clone(), model_id.clone()));
 
     agent.set_provider(provider);
-    agent.set_vision(vision);
     agent.set_model(model_id.clone());
+    // Vision flag comes from the live catalog on the next /model pick.
+    agent.set_vision_capable(false);
 
     emit_connections(cfg, events);
     let _ = events.send(AgentEvent::ModelChanged {
@@ -296,6 +424,49 @@ fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<Ca
             detail: c.badges(),
             group: group.to_string(),
             connection_id: connection_id.to_string(),
+            vision: c.vision,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_command_is_handled_while_turn_runs() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let terminal = hive_core::TerminalManager::new(events.clone());
+        let started = terminal
+            .start("cat", std::path::Path::new("."))
+            .await
+            .unwrap();
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        input_tx
+            .send(InputCommand::TerminalAttach {
+                id: started.id.clone(),
+            })
+            .unwrap();
+        let mut pending = std::collections::VecDeque::new();
+        let interrupt = AtomicBool::new(false);
+
+        let completed = drive_turn(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                "done"
+            },
+            &mut input_rx,
+            &terminal,
+            &events,
+            &mut pending,
+            &interrupt,
+        )
+        .await;
+
+        assert_eq!(completed, Some("done"));
+        let read = terminal.read(&started.id, None, None).await.unwrap();
+        assert_eq!(read.session.controller, hive_core::TerminalController::User);
+        terminal.shutdown();
+    }
 }

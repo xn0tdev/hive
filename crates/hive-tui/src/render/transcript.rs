@@ -5,14 +5,30 @@ use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
 
 use hive_core::event::{SubagentLine, SubagentStatus};
 
-use crate::app::state::{Block as UiBlock, ChatView, SubagentCard, ToolCard, ToolStatus};
-use crate::app::App;
-use crate::render::tools::{format_tool_secs, plan_card_lines, subagent_card_lines, tool_lines};
+use crate::app::state::{
+    AssistantResponseRow, AssistantRowHit, AssistantRowJoin, Block as UiBlock, ChatView,
+    SubagentCard, ToolCard, ToolStatus,
+};
+use crate::app::{App, MdRows};
+use crate::render::tools::{
+    format_tool_secs, mode_switch_card_lines, plan_card_lines, subagent_card_lines,
+    terminal_card_lines, tool_lines,
+};
 use crate::render::{markdown, wrap};
+
+struct BuiltAssistantRow {
+    line_idx: usize,
+    block: usize,
+    response_row: usize,
+    text: String,
+    join_before: AssistantRowJoin,
+}
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.is_empty() {
         app.click_hits.clear();
+        app.assistant_row_hits.clear();
+        app.assistant_rows.clear();
         app.set_transcript_max_scroll(0);
         return;
     }
@@ -21,7 +37,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     buf.paint(area, Style::default());
 
     let width = area.width.max(1) as usize;
-    let (all, heads) = build(app, width);
+    let content_width = width.saturating_sub(2);
+    if app.assistant_selection.is_some() && app.assistant_selection_width != content_width {
+        app.assistant_selection = None;
+    }
+    app.assistant_selection_width = content_width;
+    let (all, heads, assistant_rows) = build(app, width);
     let total = all.len();
     // Top-down with one blank row of breathing room under the top edge.
     let target = Rect {
@@ -43,8 +64,58 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
                 .push((target.y + (line_idx - scroll) as u16, block_idx));
         }
     }
+    app.assistant_rows.clear();
+    app.assistant_row_hits.clear();
+    for row in assistant_rows {
+        if row.line_idx >= scroll && row.line_idx < scroll + target.height as usize {
+            app.assistant_row_hits.push(AssistantRowHit {
+                block: row.block,
+                response_row: row.response_row,
+                screen_row: target.y + (row.line_idx - scroll) as u16,
+                x: target.x.saturating_add(2),
+                text: row.text.clone(),
+                join_before: row.join_before,
+            });
+        }
+        app.assistant_rows.push(AssistantResponseRow {
+            line_idx: row.line_idx,
+            block: row.block,
+            response_row: row.response_row,
+            text: row.text,
+            join_before: row.join_before,
+        });
+    }
 
     buf.set_lines(target, &all, scroll);
+    paint_assistant_selection(buf, app);
+    app.transcript_hit = Some(target);
+}
+
+fn assistant_line_text(line: &Line) -> String {
+    let rendered: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect();
+    rendered
+        .strip_prefix("  ")
+        .unwrap_or(rendered.as_str())
+        .to_string()
+}
+
+fn paint_assistant_selection(buf: &mut Buffer, app: &App) {
+    for hit in &app.assistant_row_hits {
+        let Some((start, end)) = app.assistant_selected_cols(hit.block, hit.response_row) else {
+            continue;
+        };
+        let start = u16::try_from(start).unwrap_or(u16::MAX);
+        let end = u16::try_from(end).unwrap_or(u16::MAX);
+        for x in hit.x.saturating_add(start)..hit.x.saturating_add(end) {
+            if let Some(cell) = buf.cell_mut(x, hit.screen_row) {
+                cell.style = cell.style.bg(app.theme.assistant_selection_bg);
+            }
+        }
+    }
 }
 
 /// Brighter shimmer for the live Thinking header — readable at a glance.
@@ -79,20 +150,25 @@ pub fn lines(app: &mut App, width: usize) -> Vec<Line> {
 
 /// Like `lines`, but also reports which line index holds each expandable
 /// header (thought / subagent) with its block index for mouse hit-testing.
-fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
+fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<BuiltAssistantRow>) {
     if matches!(app.view, ChatView::Subagent(_)) {
         // Clone the card snapshot so we can still use `app` mutably for caches.
         if let Some(card) = app.viewed_subagent().cloned() {
-            return (subagent_chat_lines(&card, app, width), Vec::new());
+            return (
+                subagent_chat_lines(&card, app, width),
+                Vec::new(),
+                Vec::new(),
+            );
         }
         // Stale id (cleared chat) — fall through to main.
     }
     if matches!(app.view, ChatView::Plan) {
-        return (plan_preview_lines(app, width), Vec::new());
+        return (plan_preview_lines(app, width), Vec::new(), Vec::new());
     }
 
     let mut out: Vec<Line> = Vec::new();
     let mut heads: Vec<(usize, usize)> = Vec::new();
+    let mut assistant_rows: Vec<BuiltAssistantRow> = Vec::new();
     let n = app.blocks.len();
 
     for i in 0..n {
@@ -113,6 +189,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
             .iter()
             .skip(i + 1)
             .any(|b| matches!(b, UiBlock::Plan(_)));
+        let has_later_terminal = app
+            .blocks
+            .iter()
+            .skip(i + 1)
+            .any(|b| matches!(b, UiBlock::Terminal(_)));
 
         match &app.blocks[i] {
             // The greeting only lives on the landing screen (the ASCII wordmark);
@@ -132,10 +213,37 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
                     let body = markdown::plain(&text, &theme);
                     indent(wrap::wrap_lines(body, content_w))
                 } else {
-                    app.md_cache.lines(&text, content_w, || {
+                    let rows = app.md_cache.rows(&text, content_w, || {
                         let body = markdown::render(&text, &theme, content_w);
-                        indent(wrap::wrap_lines(body, content_w))
-                    })
+                        let wrapped = wrap::wrap_lines_with_joins(body, content_w);
+                        let joins = wrapped
+                            .iter()
+                            .map(|row| match row.join_before {
+                                wrap::WrapJoin::Hard => AssistantRowJoin::Hard,
+                                wrap::WrapJoin::SoftSpace => AssistantRowJoin::SoftSpace,
+                                wrap::WrapJoin::SoftNone => AssistantRowJoin::SoftNone,
+                            })
+                            .collect();
+                        MdRows {
+                            lines: indent(wrapped.into_iter().map(|row| row.line).collect()),
+                            joins,
+                        }
+                    });
+                    let start = out.len();
+                    for (response_row, line) in rows.lines.iter().enumerate() {
+                        assistant_rows.push(BuiltAssistantRow {
+                            line_idx: start + response_row,
+                            block: i,
+                            response_row,
+                            text: assistant_line_text(line),
+                            join_before: rows
+                                .joins
+                                .get(response_row)
+                                .copied()
+                                .unwrap_or(AssistantRowJoin::Hard),
+                        });
+                    }
+                    rows.lines
                 };
                 if streaming {
                     push_caret(&mut wrapped, theme.accent);
@@ -177,16 +285,34 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
             UiBlock::Subagent(card) => {
                 let show_hint = !has_later_subagent;
                 let card = card.clone();
-                // Title sits after the top pad row of the soft strip.
-                heads.push((out.len() + 1, i));
-                out.extend(subagent_card_lines(&card, app, width, show_hint));
+                let hovered = app.hover_block == Some(i);
+                // Every row of the soft strip is hover/click — not just the title.
+                let start = out.len();
+                out.extend(subagent_card_lines(&card, app, width, show_hint, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
                 out.push(Line::from(""));
             }
             UiBlock::Plan(card) => {
                 let show_hint = !has_later_plan;
                 let card = card.clone();
-                heads.push((out.len() + 1, i));
-                out.extend(plan_card_lines(&card, app, width, show_hint));
+                let hovered = app.hover_block == Some(i);
+                let start = out.len();
+                out.extend(plan_card_lines(&card, app, width, show_hint, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
+                out.push(Line::from(""));
+            }
+            UiBlock::Terminal(card) => {
+                let show_hint = !has_later_terminal;
+                let hovered = app.hover_block == Some(i);
+                let start = out.len();
+                out.extend(terminal_card_lines(card, app, width, show_hint, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
                 out.push(Line::from(""));
             }
             UiBlock::Tool(card) => {
@@ -205,6 +331,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
                 if !next_is_tool {
                     out.push(Line::from(""));
                 }
+            }
+            UiBlock::ModeSwitch(card) => {
+                let card = card.clone();
+                out.extend(mode_switch_card_lines(&card, app, width));
+                out.push(Line::from(""));
             }
             UiBlock::Notice(s) => {
                 let s = s.clone();
@@ -233,24 +364,19 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>) {
         }
     }
 
-    (out, heads)
+    (out, heads, assistant_rows)
 }
 
 /// Markdown preview of Plan.md with section cursor / selection highlights.
 fn plan_preview_lines(app: &mut App, width: usize) -> Vec<Line> {
+    use crate::render::tools::{layout_plan_body, paint_highlights, MarkTone};
+
     let theme = app.theme.clone();
     let body = app
         .plan_card()
         .map(|c| c.body.clone())
-        .unwrap_or_else(|| "_No plan yet._".into());
-    let content_w = width.saturating_sub(2);
-    let mut rendered = app.md_cache.lines(&body, content_w, || {
-        let body_md = markdown::render(&body, &theme, content_w);
-        indent(wrap::wrap_lines(body_md, content_w))
-    });
+        .unwrap_or_default();
 
-    // Highlight selected / cursor sections by painting matching source lines.
-    // Map is approximate: paint status header + hint under the title.
     let mut out = Vec::new();
     out.push(Line::from(vec![
         Span::raw("  "),
@@ -259,30 +385,37 @@ fn plan_preview_lines(app: &mut App, width: usize) -> Vec<Line> {
             Style::default().fg(theme.fg).add(Modifier::BOLD),
         ),
         Span::styled(
-            "  space select · ↑↓ · b build".to_string(),
+            "  drag · comment · MARK · click to edit · SEND".to_string(),
             Style::default().fg(theme.faint),
         ),
     ]));
     out.push(Line::from(""));
 
-    // Section list for clear selection UI (source of truth for cursor).
-    if !app.plan_view.sections.is_empty() {
-        for (i, sec) in app.plan_view.sections.iter().enumerate() {
-            let on_cursor = i == app.plan_view.cursor;
-            let selected = app.plan_view.selected.contains(&i);
-            let mark = if selected { "●" } else { "○" };
-            let mut style = Style::default().fg(if selected { theme.plan } else { theme.dim });
-            if on_cursor {
-                style = style.bg(theme.strip).fg(theme.fg).add(Modifier::BOLD);
-            }
-            out.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{mark} "), style),
-                Span::styled(sec.title.clone(), style),
-            ]));
-        }
-        out.push(Line::from(""));
+    let body_line0 = out.len();
+    let (mut rendered, spans) = layout_plan_body(&body, width, &theme);
+
+    let mut ranges: Vec<(usize, usize, MarkTone)> = app
+        .plan_view
+        .corrections
+        .iter()
+        .map(|c| {
+            let tone = if c.note.trim().is_empty() {
+                MarkTone::Pending
+            } else {
+                MarkTone::Noted
+            };
+            (c.start, c.end, tone)
+        })
+        .collect();
+    if let Some((a, b)) = app.plan_view.drag_range() {
+        ranges.push((a, b, MarkTone::Pending));
     }
+    if !ranges.is_empty() {
+        paint_highlights(&mut rendered, &spans, &body, &ranges, &theme);
+    }
+
+    app.plan_view.body_line0 = body_line0;
+    app.plan_view.row_spans = spans.iter().map(|s| (s.start, s.end)).collect();
 
     out.append(&mut rendered);
     out
@@ -1012,6 +1145,202 @@ mod tests {
     }
 
     #[test]
+    fn finished_assistant_registers_selectable_rows_without_changing_text() {
+        use crate::app::state::Block;
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: "selectable answer".into(),
+            streaming: false,
+        });
+
+        let first = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        assert!(first.text().contains("selectable answer"));
+        assert!(!a.assistant_row_hits.is_empty());
+        assert!(a
+            .assistant_row_hits
+            .iter()
+            .all(|hit| hit.text.contains("selectable answer")));
+
+        let second = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        assert_eq!(first.text(), second.text());
+    }
+
+    #[test]
+    fn assistant_selection_uses_graphite_bg_and_preserves_markdown_fg() {
+        use crate::app::state::Block;
+        use comb::{render, Color, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: "`hello` world".into(),
+            streaming: false,
+        });
+
+        let before = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let hit = a
+            .assistant_row_hits
+            .first()
+            .cloned()
+            .expect("assistant row hit");
+        assert!(a.start_assistant_selection(hit.x, hit.screen_row));
+        assert!(a.update_assistant_selection(hit.x + 4, hit.screen_row));
+        let graphite = Color::Rgb(0x34, 0x34, 0x34);
+        assert_eq!(a.theme.assistant_selection_bg, graphite);
+
+        let after = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        assert_eq!(
+            before.text(),
+            after.text(),
+            "selection must not change glyphs"
+        );
+        for x in hit.x..=hit.x + 4 {
+            let before_cell = before.get(x, hit.screen_row).expect("original cell");
+            let selected_cell = after.get(x, hit.screen_row).expect("selected cell");
+            assert_eq!(
+                selected_cell.style.bg,
+                Some(graphite),
+                "selected bg at x={x}"
+            );
+            assert_eq!(
+                selected_cell.style.fg, before_cell.style.fg,
+                "selection must preserve markdown foreground at x={x}"
+            );
+            assert_eq!(
+                selected_cell.style.mods, before_cell.style.mods,
+                "selection must preserve markdown modifiers at x={x}"
+            );
+        }
+        assert_ne!(
+            after
+                .get(hit.x + 6, hit.screen_row)
+                .expect("unselected cell")
+                .style
+                .bg,
+            Some(graphite),
+            "selection must not tint neighboring cells"
+        );
+    }
+
+    #[test]
+    fn streaming_assistant_is_not_selectable() {
+        use crate::app::state::Block;
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: "still streaming".into(),
+            streaming: true,
+        });
+
+        let _ = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        assert!(a.assistant_row_hits.is_empty());
+    }
+
+    #[test]
+    fn scrolling_extends_active_selection_across_offscreen_rows() {
+        use crate::app::state::Block;
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: (0..20)
+                .map(|i| format!("line {i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            streaming: false,
+        });
+
+        let _ = render(Size::new(50, 12), |f| crate::render::draw(f, &mut a));
+        let first = a.assistant_row_hits.first().cloned().expect("first row");
+        let last = a.assistant_row_hits.last().cloned().expect("last row");
+        assert!(a.start_assistant_selection(last.x + last.text.len() as u16 - 1, last.screen_row));
+        assert!(a.update_assistant_selection(first.x, first.screen_row));
+        assert!(a.assistant_selection_active());
+
+        // One bottom viewport row is the transcript's trailing spacer, so move
+        // by two to push the selected last response row out of view.
+        a.scroll_up(2);
+        let _ = render(Size::new(50, 12), |f| crate::render::draw(f, &mut a));
+        assert!(a.assistant_selection_active());
+
+        let new_first = a
+            .assistant_row_hits
+            .first()
+            .cloned()
+            .expect("new first row");
+        assert!(new_first.response_row < first.response_row);
+        assert!(a.update_assistant_selection(new_first.x, new_first.screen_row));
+
+        let selected = a
+            .finish_assistant_selection(new_first.x, new_first.screen_row)
+            .expect("selection across scrolled rows");
+        let expected = (new_first.response_row..=last.response_row)
+            .map(|i| format!("line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(selected, expected);
+    }
+
+    #[test]
+    fn scrolling_past_response_clamps_selection_to_its_start() {
+        use crate::app::state::Block;
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: (0..30)
+                .map(|i| format!("old {i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            streaming: false,
+        });
+        a.blocks.push(Block::Assistant {
+            text: (0..20)
+                .map(|i| format!("new {i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            streaming: false,
+        });
+
+        let _ = render(Size::new(50, 12), |f| crate::render::draw(f, &mut a));
+        let selected_block = 1;
+        let visible: Vec<_> = a
+            .assistant_row_hits
+            .iter()
+            .filter(|hit| hit.block == selected_block)
+            .cloned()
+            .collect();
+        let first = visible.first().expect("first selected row");
+        let last = visible.last().expect("last selected row");
+        assert!(a.start_assistant_selection(last.x + last.text.len() as u16 - 1, last.screen_row));
+        assert!(a.update_assistant_selection(first.x, first.screen_row));
+
+        a.scroll_up(usize::MAX);
+        let _ = render(Size::new(50, 12), |f| crate::render::draw(f, &mut a));
+        assert!(a
+            .assistant_row_hits
+            .iter()
+            .all(|hit| hit.block != selected_block));
+        let release = a.assistant_row_hits.first().cloned().expect("release row");
+        let selected = a
+            .finish_assistant_selection(release.x, release.screen_row)
+            .expect("selection clamped to response start");
+
+        let expected = (0..20)
+            .map(|i| format!("new {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(selected, expected);
+    }
+
+    #[test]
     fn plan_card_opens_preview() {
         use hive_core::event::AgentEvent;
 
@@ -1031,9 +1360,9 @@ mod tests {
             .expect("plan block");
         a.activate_expandable_at(idx);
         assert!(a.in_plan_view());
-        assert!(!a.plan_view.sections.is_empty());
         let preview = tool_text(&mut a, 72);
-        assert!(preview.contains("space select"), "{preview}");
+        assert!(preview.contains("drag"), "{preview}");
+        assert!(preview.contains("MARK"), "{preview}");
         assert!(preview.contains("Ship it"), "{preview}");
     }
 }

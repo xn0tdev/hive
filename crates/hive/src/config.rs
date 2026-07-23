@@ -41,12 +41,6 @@ default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast"
 # [connections]
 # active = "default"
 
-[vision]
-# Models that natively accept images. Everything else uses the vision fallback.
-capable = [
-    "accounts/fireworks/routers/kimi-k2p6-fast",
-]
-
 [search]
 backend = "exa"
 
@@ -350,8 +344,6 @@ fn backend_str(b: SearchBackend) -> &'static str {
 }
 
 fn format_setup_toml(choices: &SetupChoices) -> String {
-    let capable = format!("    \"{}\",\n", toml_escape(&choices.default.id));
-
     let provider_key_line = choices
         .provider_api_key
         .as_deref()
@@ -397,10 +389,6 @@ default = {{ id = "{def_id}", name = "{def_name}" }}
 # [connections]
 # active = "default"
 
-[vision]
-capable = [
-{capable}]
-
 [search]
 backend = "{backend}"
 
@@ -430,7 +418,6 @@ sidebar_width = 34
         provider_key = provider_key_line,
         def_id = toml_escape(&choices.default.id),
         def_name = toml_escape(&choices.default.name),
-        capable = capable,
         backend = backend_str(choices.search_backend),
         exa_key = exa_key_line,
         pplx_key = pplx_key_line,
@@ -825,7 +812,6 @@ mod tests {
         assert_eq!(cfg.perplexity.api_key.as_deref(), Some("pplx-key"));
         assert!(cfg.ui.setup_complete);
         assert_eq!(cfg.ui.theme, "gray");
-        assert!(cfg.vision.capable.iter().any(|m| m == "model/a"));
     }
 
     #[test]

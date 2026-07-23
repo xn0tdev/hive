@@ -1,59 +1,71 @@
 //! Plan.md card in the main transcript — same soft strip as subagent cards.
 
-use comb::{Line, Modifier, Span, Style};
+use comb::{Color, Line, Modifier, Span, Style};
 
-use crate::app::state::{PlanCard, PlanSection, PlanStatus};
+use crate::app::state::{PlanCard, PlanStatus};
 use crate::app::App;
 use crate::render::tools::strip::{soft_bg_line, soft_bg_pad};
-use crate::render::tools::tool_card::format_tool_secs;
+use crate::theme::Theme;
 
 pub(crate) fn plan_card_lines(
     card: &PlanCard,
     app: &App,
     width: usize,
     show_hint: bool,
+    hovered: bool,
 ) -> Vec<Line> {
     let theme = &app.theme;
-    let bg = theme.strip;
-    let (icon, icon_fg) = match card.status {
-        PlanStatus::Writing => (app.spinner_char().to_string(), theme.plan),
-        PlanStatus::Ready => ("▸".to_string(), theme.plan),
+    let bg: Color = if hovered {
+        theme.strip_hover
+    } else {
+        theme.strip
     };
 
     let mut title_spans = vec![
         Span::raw("  "),
-        Span::styled(format!("{icon} "), Style::default().fg(icon_fg)),
         Span::styled(
             "Plan.md".to_string(),
             Style::default().fg(theme.fg).add(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" · {}", format_tool_secs(card.secs())),
-            Style::default().fg(theme.dim),
-        ),
     ];
+    if matches!(card.status, PlanStatus::Writing) {
+        title_spans.push(Span::styled(
+            format!("  {}", app.spinner_char()),
+            Style::default().fg(theme.dim),
+        ));
+    }
     if show_hint {
         title_spans.push(Span::styled(
-            "  click to open",
-            Style::default().fg(theme.faint),
+            "  click to open plan",
+            Style::default().fg(if hovered { theme.dim } else { theme.faint }),
         ));
     }
 
-    let detail = if card.summary.is_empty() {
+    // Revised plans carry an `UPDATED` chip in the true top-right corner of the
+    // strip (the top pad row), above the title.
+    let top_row = if card.revised {
+        badge_row("UPDATED", bg, theme, width)
+    } else {
+        soft_bg_pad(bg, width)
+    };
+
+    // Same left indent as the title ("  ") — not deeper — and trim so a
+    // model-provided leading space doesn't show as a mysterious gap.
+    let detail = if card.summary.trim().is_empty() {
         match card.status {
             PlanStatus::Writing => "writing plan…".to_string(),
             PlanStatus::Ready => "ready".to_string(),
         }
     } else {
-        card.summary.clone()
+        card.summary.trim().to_string()
     };
 
     vec![
-        soft_bg_pad(bg, width),
+        top_row,
         soft_bg_line(Line::from(title_spans), bg, width),
         soft_bg_line(
             Line::from(vec![
-                Span::raw("    "),
+                Span::raw("  "),
                 Span::styled(detail, Style::default().fg(theme.dim)),
             ]),
             bg,
@@ -63,78 +75,24 @@ pub(crate) fn plan_card_lines(
     ]
 }
 
-/// Parse selectable sections: `##` headings and top-level list items.
-pub(crate) fn parse_sections(body: &str) -> Vec<PlanSection> {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut sections = Vec::new();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let raw = lines[i];
-        let t = raw.trim();
-        let indent = raw.len() - raw.trim_start().len();
-        let is_h2 = t.starts_with("## ") && !t.starts_with("###");
-        let is_list = indent == 0 && is_list_item(t);
-        if is_h2 || is_list {
-            let title = if is_h2 {
-                t.trim_start_matches('#').trim().to_string()
-            } else {
-                strip_list_marker(t).to_string()
-            };
-            let start = i;
-            i += 1;
-            while i < lines.len() {
-                let nraw = lines[i];
-                let n = nraw.trim();
-                let nindent = nraw.len() - nraw.trim_start().len();
-                if n.starts_with("## ") && !n.starts_with("###") {
-                    break;
-                }
-                if !is_h2 && nindent == 0 && is_list_item(n) {
-                    break;
-                }
-                i += 1;
-            }
-            sections.push(PlanSection {
-                title,
-                start_line: start,
-                end_line: i,
-            });
-        } else {
-            i += 1;
-        }
-    }
-    sections
-}
+/// Top pad row of the strip with a right-aligned chip badge (e.g. `UPDATED`).
+///
+/// Unlike [`soft_bg_line`], the badge keeps its own chip background instead of
+/// being washed with the strip colour, so it reads as a distinct corner marker.
+fn badge_row(label: &str, bg: Color, theme: &Theme, width: usize) -> Line {
+    let badge_text = format!(" {label} ");
+    let badge_style = Style::default()
+        .fg(theme.sel_fg)
+        .bg(theme.plan)
+        .add(Modifier::BOLD);
+    let badge_w = badge_text.chars().count();
 
-fn is_list_item(t: &str) -> bool {
-    let t = t.trim();
-    if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
-        return true;
-    }
-    let bytes = t.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    i > 0 && i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' '
-}
-
-fn strip_list_marker(t: &str) -> &str {
-    let t = t.trim();
-    for prefix in ["- ", "* ", "+ "] {
-        if let Some(rest) = t.strip_prefix(prefix) {
-            return rest.trim();
-        }
-    }
-    let bytes = t.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' ' {
-        return t[i + 2..].trim();
-    }
-    t
+    // Right-align the badge; keep it visible even when the row is too narrow.
+    let gap = width.saturating_sub(badge_w);
+    Line::from(vec![
+        Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+        Span::styled(badge_text, badge_style),
+    ])
 }
 
 #[cfg(test)]
@@ -142,11 +100,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_h2_sections() {
-        let body = "# Title\n\n## Alpha\n\ndetail\n\n## Beta\n\n- item\n";
-        let s = parse_sections(body);
-        assert_eq!(s.len(), 2);
-        assert_eq!(s[0].title, "Alpha");
-        assert_eq!(s[1].title, "Beta");
+    fn badge_is_right_aligned_with_its_own_chip_bg() {
+        let theme = Theme::gray();
+        let line = badge_row("UPDATED", theme.strip, &theme, 40);
+
+        let text: String = line.spans.iter().map(|s| s.content.as_str()).collect();
+        assert!(text.trim_end().ends_with("UPDATED"), "badge sits in the corner: {text:?}");
+        assert_eq!(text.chars().count(), 40, "row spans the full strip width");
+
+        // The badge keeps the plan chip colour rather than the strip wash.
+        let badge = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("UPDATED"))
+            .expect("badge span");
+        assert_eq!(badge.style.bg, Some(theme.plan));
+        assert_ne!(theme.plan, theme.strip);
+    }
+
+    #[test]
+    fn badge_still_shows_when_row_is_too_narrow_to_right_align() {
+        let theme = Theme::gray();
+        let line = badge_row("UPDATED", theme.strip, &theme, 4);
+        let text: String = line.spans.iter().map(|s| s.content.as_str()).collect();
+        assert!(text.contains("UPDATED"), "badge never dropped: {text:?}");
     }
 }

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::io;
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -49,6 +50,27 @@ async fn terminate(child: &mut Child) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         child.kill().await
+    }
+}
+
+/// Ensures the process group dies if the tool future is cancelled (Esc).
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.id() {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+        let _ = self.0.start_kill();
+    }
+}
+
+impl KillOnDrop {
+    fn inner(&mut self) -> &mut Child {
+        &mut self.0
     }
 }
 
@@ -101,13 +123,14 @@ Executes immediately without confirmation."
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = match cmd.spawn() {
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("failed to spawn: {e}")),
         };
+        let mut child = KillOnDrop(child);
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.inner().stdout.take();
+        let stderr = child.inner().stderr.take();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         if let Some(out) = stdout {
@@ -132,12 +155,28 @@ Executes immediately without confirmation."
 
         let mut collected = String::new();
         let mut truncated = false;
+        let interrupt = ctx.interrupt.clone();
 
         let drain_and_wait = async {
-            while let Some(line) = rx.recv().await {
-                collect_line(ctx, &mut collected, &mut truncated, line);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = async {
+                        while !interrupt.load(Ordering::Relaxed) {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    } => {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+                    }
+                    line = rx.recv() => {
+                        match line {
+                            Some(line) => collect_line(ctx, &mut collected, &mut truncated, line),
+                            None => break,
+                        }
+                    }
+                }
             }
-            child.wait().await
+            child.inner().wait().await
         };
 
         let status = match timeout {
@@ -145,7 +184,7 @@ Executes immediately without confirmation."
                 match tokio::time::timeout(Duration::from_secs(secs), drain_and_wait).await {
                     Ok(st) => st,
                     Err(_) => {
-                        let kill_error = terminate(&mut child).await.err();
+                        let kill_error = terminate(child.inner()).await.err();
                         while let Some(line) = rx.recv().await {
                             collect_line(ctx, &mut collected, &mut truncated, line);
                         }
@@ -180,6 +219,13 @@ Executes immediately without confirmation."
                     }
                 }
             }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                let _ = terminate(child.inner()).await;
+                while let Some(line) = rx.recv().await {
+                    collect_line(ctx, &mut collected, &mut truncated, line);
+                }
+                ToolResult::error(format!("interrupted\n{collected}"))
+            }
             Err(e) => ToolResult::error(format!("wait failed: {e}\n{collected}")),
         }
     }
@@ -192,6 +238,7 @@ mod tests {
     use super::*;
     use crate::{no_skills, noop_spawner, AppConfig};
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     fn context(cwd: PathBuf) -> ToolContext {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
@@ -201,9 +248,12 @@ mod tests {
             spawner: noop_spawner(),
             skills: no_skills(),
             config: Arc::new(AppConfig::default()),
+            terminal: None,
+            vision: false,
             depth: 0,
             call_id: "test".into(),
             isolate_worktrees: false,
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -247,5 +297,35 @@ mod tests {
         assert!(result.content.starts_with("command timed out after 1s"));
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(!marker.exists(), "descendant survived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupt_kills_running_command() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let ctx = ToolContext {
+            cwd: PathBuf::from("."),
+            events,
+            spawner: noop_spawner(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+            terminal: None,
+            vision: false,
+            depth: 0,
+            call_id: "test".into(),
+            isolate_worktrees: false,
+            interrupt: interrupt.clone(),
+        };
+        let flag = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            flag.store(true, Ordering::Relaxed);
+        });
+        let result = RunShell
+            .execute(json!({"command": "sleep 30"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("interrupted"), "{}", result.content);
     }
 }

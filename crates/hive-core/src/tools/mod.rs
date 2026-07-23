@@ -11,12 +11,15 @@ use crate::tool::{Tool, ToolRegistration};
 
 mod delegate;
 mod files;
+mod mode;
+mod plan;
 mod shell;
 mod skill;
+mod terminal;
 mod web;
 
 /// Build fresh instances of every registered tool, sorted by name.
-/// Mode gating (BUILD hides `spawn_swarm` / `integrate_worktree`) happens in the agent.
+/// Mode gating (MAKE hides `spawn_swarm` / `integrate_worktree`) happens in the agent.
 pub fn all_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = inventory::iter::<ToolRegistration>()
         .map(|r| (r.make)())
@@ -67,5 +70,8 @@ mod tests {
         assert!(names.contains(&"spawn_subagent"));
         assert!(names.contains(&"spawn_swarm"));
         assert!(names.contains(&"integrate_worktree"));
+        assert!(names.contains(&"write_plan"));
+        assert!(names.contains(&"delete_path"));
+        assert!(names.contains(&"switch_mode"));
     }
 }

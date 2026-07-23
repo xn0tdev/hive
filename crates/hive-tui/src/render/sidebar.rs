@@ -1,6 +1,6 @@
 //! Right-hand project panel on wide terminals: name, branch, Context,
-//! Sub agents (running + completed, with tokens), then Changes (+green / -red).
-//! Body sections are click-to-collapse.
+//! Sub agents, Terminals, then changed file paths.
+//! Body sections are click-to-collapse; agent/terminal rows open their views.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 use hive_core::event::SubagentStatus;
-use hive_core::SidebarMode;
+use hive_core::{SidebarMode, TerminalProcessState};
 
-use crate::app::state::SubagentCard;
+use crate::app::state::{SubagentCard, TerminalCard};
 use crate::app::App;
 
 /// Collapsible sidebar body sections.
@@ -19,7 +19,15 @@ use crate::app::App;
 pub enum SidebarSection {
     Context,
     Subagents,
+    Terminals,
     Changes,
+}
+
+/// Clickable row in the sidebar (opens a dedicated view).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarItem {
+    Subagent(String),
+    Terminal(String),
 }
 
 /// In-memory expand/collapse flags for sidebar sections.
@@ -27,6 +35,7 @@ pub enum SidebarSection {
 pub struct SidebarSections {
     pub context: bool,
     pub subagents: bool,
+    pub terminals: bool,
     pub changes: bool,
 }
 
@@ -35,6 +44,7 @@ impl Default for SidebarSections {
         Self {
             context: true,
             subagents: true,
+            terminals: true,
             changes: true,
         }
     }
@@ -45,6 +55,7 @@ impl SidebarSections {
         match section {
             SidebarSection::Context => self.context = !self.context,
             SidebarSection::Subagents => self.subagents = !self.subagents,
+            SidebarSection::Terminals => self.terminals = !self.terminals,
             SidebarSection::Changes => self.changes = !self.changes,
         }
     }
@@ -53,6 +64,7 @@ impl SidebarSections {
         match section {
             SidebarSection::Context => self.context,
             SidebarSection::Subagents => self.subagents,
+            SidebarSection::Terminals => self.terminals,
             SidebarSection::Changes => self.changes,
         }
     }
@@ -242,13 +254,15 @@ pub fn available(term_width: u16) -> bool {
     term_width >= MIN_TERM_WIDTH
 }
 
-/// Draw the project panel. Records `app.sidebar_toggle_hit` for the hide control (`›`)
-/// and `app.sidebar_section_hits` for collapsible section headers.
+/// Draw the project panel. Records `app.sidebar_toggle_hit` for the hide control (`›`),
+/// `app.sidebar_section_hits` for collapsible headers, and `app.sidebar_item_hits` for
+/// clickable subagent / terminal rows.
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if area.width < 12 || area.height < 4 {
         app.sidebar_toggle_hit = None;
         app.sidebar_resize_hit = None;
         app.sidebar_section_hits.clear();
+        app.sidebar_item_hits.clear();
         return;
     }
     // Opaque fill so collapsing width / shorter file lists cannot bleed.
@@ -305,14 +319,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         height: area.height.saturating_sub(1),
     };
 
-    // Logical lines + which (if any) section header they are, for hit-testing
-    // after clip to the visible body.
-    let mut lines: Vec<(Line, Option<SidebarSection>)> = Vec::new();
+    // Logical lines + optional section / item tags for hit-testing after clip.
+    let mut lines: Vec<(Line, Option<SidebarSection>, Option<SidebarItem>)> = Vec::new();
     lines.push((
         Line::from(Span::styled(
             truncate(&snap.name, w),
             Style::default().fg(theme.fg).add(Modifier::BOLD),
         )),
+        None,
         None,
     ));
     lines.push((
@@ -324,6 +338,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             ),
         ]),
         None,
+        None,
     ));
     // Session spend (footer shows context fill instead).
     let session = format_session_tokens(app.usage.total_tokens);
@@ -333,12 +348,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             Span::styled(session, Style::default().fg(theme.dim)),
         ]),
         None,
+        None,
     ));
 
     let collapsible = app.ui.sidebar_collapse_sections;
 
     // Context — project instruction files injected into the system prompt.
-    lines.push((Line::from(""), None));
+    lines.push((Line::from(""), None, None));
     let ctx_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Context);
     lines.push((
         section_header("Context", ctx_open, collapsible, theme),
@@ -347,11 +363,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         } else {
             None
         },
+        None,
     ));
     if ctx_open {
         if app.context_files.is_empty() {
             lines.push((
                 Line::from(Span::styled("none", Style::default().fg(theme.faint))),
+                None,
                 None,
             ));
         } else {
@@ -367,15 +385,16 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
                         Style::default().fg(theme.dim),
                     )),
                     None,
+                    None,
                 ));
             }
         }
     }
 
-    // Sub agents sit above Changes so a long file list cannot push them out.
+    // Sub agents / Terminals sit above Changes so a long file list cannot push them out.
     let agents = app.sidebar_subagents();
     if !agents.is_empty() {
-        lines.push((Line::from(""), None));
+        lines.push((Line::from(""), None, None));
         let open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Subagents);
         lines.push((
             section_header("Sub agents", open, collapsible, theme),
@@ -384,15 +403,44 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             } else {
                 None
             },
+            None,
         ));
         if open {
             for card in agents {
-                lines.push((agent_line(card, app, w), None));
+                lines.push((
+                    agent_line(card, app, w),
+                    None,
+                    Some(SidebarItem::Subagent(card.id.clone())),
+                ));
             }
         }
     }
 
-    lines.push((Line::from(""), None));
+    let terminals = app.sidebar_terminals();
+    if !terminals.is_empty() {
+        lines.push((Line::from(""), None, None));
+        let open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Terminals);
+        lines.push((
+            section_header("Terminals", open, collapsible, theme),
+            if collapsible {
+                Some(SidebarSection::Terminals)
+            } else {
+                None
+            },
+            None,
+        ));
+        if open {
+            for card in terminals {
+                lines.push((
+                    terminal_line(card, app, w),
+                    None,
+                    Some(SidebarItem::Terminal(card.id.clone())),
+                ));
+            }
+        }
+    }
+
+    lines.push((Line::from(""), None, None));
     let ch_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Changes);
     lines.push((
         section_header("Changes", ch_open, collapsible, theme),
@@ -401,6 +449,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         } else {
             None
         },
+        None,
     ));
     if ch_open {
         if snap.files.is_empty() {
@@ -410,30 +459,33 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
                     Style::default().fg(theme.faint),
                 )),
                 None,
+                None,
             ));
         } else {
             for f in &snap.files {
-                lines.push((file_line(f, app, w), None));
+                lines.push((file_line(f, app, w), None, None));
             }
         }
     }
 
-    let draw_lines: Vec<Line> = lines.iter().map(|(l, _)| l.clone()).collect();
+    let draw_lines: Vec<Line> = lines.iter().map(|(l, _, _)| l.clone()).collect();
     buf.set_lines(body, &draw_lines, 0);
 
     app.sidebar_section_hits.clear();
+    app.sidebar_item_hits.clear();
     let visible = body.height as usize;
-    for (i, (_, section)) in lines.iter().enumerate().take(visible) {
+    for (i, (_, section, item)) in lines.iter().enumerate().take(visible) {
+        let rect = Rect {
+            x: body.x,
+            y: body.y + i as u16,
+            width: body.width,
+            height: 1,
+        };
         if let Some(sec) = section {
-            app.sidebar_section_hits.push((
-                Rect {
-                    x: body.x,
-                    y: body.y + i as u16,
-                    width: body.width,
-                    height: 1,
-                },
-                *sec,
-            ));
+            app.sidebar_section_hits.push((rect, *sec));
+        }
+        if let Some(item) = item {
+            app.sidebar_item_hits.push((rect, item.clone()));
         }
     }
 }
@@ -463,6 +515,7 @@ fn section_header(
 /// Collapsed affordance on the far right — click `‹` to reopen the panel.
 pub fn draw_collapsed_toggle(buf: &mut Buffer, area: Rect, app: &mut App) {
     app.sidebar_section_hits.clear();
+    app.sidebar_item_hits.clear();
     app.sidebar_resize_hit = None;
     if app.ui.sidebar_mode != SidebarMode::Auto {
         app.sidebar_toggle_hit = None;
@@ -495,47 +548,9 @@ pub fn draw_collapsed_toggle(buf: &mut Buffer, area: Rect, app: &mut App) {
 
 fn file_line(f: &ChangedFile, app: &App, width: usize) -> Line {
     let theme = &app.theme;
-    let stats = format_stats(f);
-    let stats_w = stats.chars().count();
-    // gap before stats + trailing pad so `-N` isn't flush against the panel edge
-    let name_budget = width.saturating_sub(stats_w.saturating_add(2));
-    let name = truncate(&f.path, name_budget);
-    let pad = name_budget.saturating_sub(name.chars().count());
-
-    let mut spans = vec![
-        Span::styled(name, Style::default().fg(theme.dim)),
-        Span::raw(" ".repeat(pad.saturating_add(1))),
-    ];
-    if f.untracked && f.added == 0 && f.deleted == 0 {
-        spans.push(Span::styled(
-            "+new".to_string(),
-            Style::default().fg(theme.add_fg),
-        ));
-    } else {
-        if f.added > 0 {
-            spans.push(Span::styled(
-                format!("+{}", f.added),
-                Style::default().fg(theme.add_fg),
-            ));
-        }
-        if f.deleted > 0 {
-            if f.added > 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(
-                format!("-{}", f.deleted),
-                Style::default().fg(theme.del_fg),
-            ));
-        }
-        if f.added == 0 && f.deleted == 0 {
-            spans.push(Span::styled(
-                "·".to_string(),
-                Style::default().fg(theme.faint),
-            ));
-        }
-    }
-    spans.push(Span::raw(" "));
-    Line::from(spans)
+    let name = truncate(&f.path, width);
+    let fg = if f.untracked { theme.add_fg } else { theme.dim };
+    Line::from(Span::styled(name, Style::default().fg(fg)))
 }
 
 fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
@@ -550,17 +565,64 @@ fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
     };
     let name = truncate(label, name_budget);
     let pad = name_budget.saturating_sub(name.chars().count());
+    let hovered = matches!(
+        &app.hover_sidebar_item,
+        Some(SidebarItem::Subagent(id)) if id == &card.id
+    );
 
-    let name_fg = match card.status {
-        SubagentStatus::Running => theme.fg,
-        SubagentStatus::Done => theme.dim,
-        SubagentStatus::Failed => theme.err,
+    // Idle: gray (clickable hint). Hover: bright. Failed stays red until hover.
+    let name_fg = if hovered {
+        theme.fg
+    } else if card.status == SubagentStatus::Failed {
+        theme.err
+    } else {
+        theme.dim
     };
 
     Line::from(vec![
         Span::styled(name, Style::default().fg(name_fg)),
         Span::raw(" ".repeat(pad.saturating_add(1))),
         Span::styled(tokens, Style::default().fg(theme.faint)),
+    ])
+}
+
+fn terminal_line(card: &TerminalCard, app: &App, width: usize) -> Line {
+    let theme = &app.theme;
+    let meta = match &card.process {
+        TerminalProcessState::Running => format!("{:.0}s", card.secs()),
+        TerminalProcessState::Exited { code: 0 } => format!("{:.1}s", card.secs()),
+        TerminalProcessState::Exited { code } => format!("e{code}"),
+        TerminalProcessState::Failed { .. } => "fail".into(),
+    };
+    let meta_w = meta.chars().count();
+    let name_budget = width.saturating_sub(meta_w.saturating_add(1));
+    let label = if card.command.trim().is_empty() {
+        "terminal"
+    } else {
+        card.command.trim()
+    };
+    let name = truncate(label, name_budget);
+    let pad = name_budget.saturating_sub(name.chars().count());
+    let hovered = matches!(
+        &app.hover_sidebar_item,
+        Some(SidebarItem::Terminal(id)) if id == &card.id
+    );
+
+    // Idle: gray (clickable hint). Hover: bright. Failed/nonzero stays red until hover.
+    let name_fg = if hovered {
+        theme.fg
+    } else {
+        match &card.process {
+            TerminalProcessState::Exited { code } if *code != 0 => theme.err,
+            TerminalProcessState::Failed { .. } => theme.err,
+            _ => theme.dim,
+        }
+    };
+
+    Line::from(vec![
+        Span::styled(name, Style::default().fg(name_fg)),
+        Span::raw(" ".repeat(pad.saturating_add(1))),
+        Span::styled(meta, Style::default().fg(theme.faint)),
     ])
 }
 
@@ -584,26 +646,6 @@ fn format_session_tokens(n: u64) -> String {
     } else {
         format!("{n} session")
     }
-}
-
-fn format_stats(f: &ChangedFile) -> String {
-    if f.untracked && f.added == 0 && f.deleted == 0 {
-        return "+new".into();
-    }
-    let mut s = String::new();
-    if f.added > 0 {
-        s.push_str(&format!("+{}", f.added));
-    }
-    if f.deleted > 0 {
-        if !s.is_empty() {
-            s.push(' ');
-        }
-        s.push_str(&format!("-{}", f.deleted));
-    }
-    if s.is_empty() {
-        s.push('·');
-    }
-    s
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -684,6 +726,29 @@ mod tests {
         assert!(text.contains("Checking project"), "{text}");
         assert!(text.contains("1.5k"), "{text}");
         assert_eq!(card.status, SubagentStatus::Running);
+    }
+
+    #[test]
+    fn terminal_line_brightens_on_hover() {
+        let mut app = test_app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "theme-installer".into(),
+            rows: 12,
+            cols: 40,
+        });
+        let idle_fg = {
+            let card = app.sidebar_terminals()[0];
+            terminal_line(card, &app, 34).spans[0].style.fg
+        };
+        assert_eq!(idle_fg, Some(app.theme.dim));
+
+        app.hover_sidebar_item = Some(SidebarItem::Terminal("term-1".into()));
+        let hover_fg = {
+            let card = app.sidebar_terminals()[0];
+            terminal_line(card, &app, 34).spans[0].style.fg
+        };
+        assert_eq!(hover_fg, Some(app.theme.fg));
     }
 
     #[test]
@@ -806,6 +871,54 @@ mod tests {
         assert!(
             !app.sidebar_section_hits.is_empty(),
             "section headers should be clickable"
+        );
+    }
+
+    #[test]
+    fn sidebar_shows_terminals_and_records_item_hits() {
+        let mut app = test_app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "theme-installer".into(),
+            rows: 12,
+            cols: 40,
+        });
+        app.apply(AgentEvent::SubagentSpawned {
+            id: "s1".into(),
+            label: "Reviewing".into(),
+            prompt: "review".into(),
+        });
+
+        let mut buf = Buffer::blank(Size::new(40, 20));
+        draw(&mut buf, Rect::new(0, 0, 34, 20), &mut app);
+        let text = buf.text();
+
+        assert!(text.contains("Sub agents"), "{text}");
+        assert!(text.contains("Terminals"), "{text}");
+        assert!(text.contains("theme-installer"), "{text}");
+        assert!(text.contains("Reviewing"), "{text}");
+
+        let sub_at = text.find("Sub agents").expect("Sub agents");
+        let term_at = text.find("Terminals").expect("Terminals");
+        let changes_at = text.find("Changes").expect("Changes");
+        assert!(
+            sub_at < term_at && term_at < changes_at,
+            "section order Sub agents → Terminals → Changes"
+        );
+
+        assert!(
+            app.sidebar_item_hits
+                .iter()
+                .any(|(_, item)| matches!(item, SidebarItem::Terminal(id) if id == "term-1")),
+            "terminal row should be clickable: {:?}",
+            app.sidebar_item_hits
+        );
+        assert!(
+            app.sidebar_item_hits
+                .iter()
+                .any(|(_, item)| matches!(item, SidebarItem::Subagent(id) if id == "s1")),
+            "subagent row should be clickable: {:?}",
+            app.sidebar_item_hits
         );
     }
 }

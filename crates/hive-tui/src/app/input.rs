@@ -210,7 +210,7 @@ impl InputState {
         }
         if len == 0 {
             1
-        } else if len % w == 0 {
+        } else if len.is_multiple_of(w) {
             len / w + 1
         } else {
             len.div_ceil(w)

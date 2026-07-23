@@ -12,7 +12,6 @@ use hive_core::provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, Usage};
 use hive_core::skill::no_skills;
 use hive_core::spawner::noop_spawner;
 use hive_core::tool::{Tool, ToolContext, ToolResult};
-use hive_core::vision::no_vision;
 use hive_core::{AgentBuilder, UserInput};
 
 struct CompactAwareProvider {
@@ -116,7 +115,6 @@ async fn auto_compacts_mid_turn_and_finishes() {
         }),
         tools: vec![Arc::new(EchoTool)],
         skills: no_skills(),
-        vision: no_vision(),
         config: Arc::new(cfg),
     };
     let mut agent = builder.build(tx, "m".into(), 0, noop_spawner());
@@ -143,7 +141,6 @@ async fn manual_compact_replaces_history() {
         }),
         tools: vec![Arc::new(EchoTool)],
         skills: no_skills(),
-        vision: no_vision(),
         config: Arc::new(cfg),
     };
     let mut agent = builder.build(tx, "m".into(), 0, noop_spawner());

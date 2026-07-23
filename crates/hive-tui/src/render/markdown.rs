@@ -649,7 +649,18 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
             if let Some(j) = find(&chars, i + 1, '`') {
                 flush(&mut buf, &mut spans, base);
                 let content: String = chars[i + 1..j].iter().collect();
-                spans.push(Span::styled(format!(" {content} "), code));
+                let lead = content.len() - content.trim_start().len();
+                let trail = content.len() - content.trim_end().len();
+                if lead > 0 {
+                    spans.push(Span::styled(content[..lead].to_string(), base));
+                }
+                spans.push(Span::styled(
+                    format!(" {} ", &content[lead..content.len() - trail]),
+                    code,
+                ));
+                if trail > 0 {
+                    spans.push(Span::styled(content[content.len() - trail..].to_string(), base));
+                }
                 i = j + 1;
                 continue;
             }
@@ -884,5 +895,32 @@ mod tests {
             let t = l.trim();
             !t.is_empty() && t.chars().all(|c| c == '─')
         }));
+    }
+
+    #[test]
+    fn inline_code_trim_whitespace_outside_bg() {
+        let theme = Theme::gray();
+        let spans = inline_with("`  firectl signin  `", &theme, true);
+        // Leading whitespace must be a separate base span (no bg).
+        let lead = spans.iter().find(|s| s.content.starts_with(' ')
+            && !s.content.starts_with("  firectl"));
+        assert!(
+            lead.is_some_and(|s| s.style.bg.is_none()),
+            "leading ws must not have code_bg: {spans:?}"
+        );
+        // The code chip itself keeps code_bg but only on the trimmed text + pad.
+        let chip = spans.iter().find(|s| s.content.contains("firectl"));
+        assert!(
+            chip.is_some_and(|s| s.style.bg == Some(theme.code_bg)),
+            "code text must have code_bg: {spans:?}"
+        );
+        // Trailing whitespace must also be outside the bg.
+        let trail = spans.iter().find(|s| {
+            s.content.chars().all(|c| c == ' ') && s.style.bg.is_none()
+        });
+        assert!(
+            trail.is_some(),
+            "trailing ws must be a separate no-bg span: {spans:?}"
+        );
     }
 }

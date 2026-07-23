@@ -1,5 +1,16 @@
 //! Geometry: positions, sizes, and rectangles in terminal cells.
 
+/// Horizontal placement of content inside a fixed-width band.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Align {
+    #[default]
+    Start,
+    /// Centered; odd leftover column goes on the right. Use an even band width
+    /// (see [`crate::chip_cols`]) when labels include even-length words.
+    Center,
+    End,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Pos {
     pub x: u16,

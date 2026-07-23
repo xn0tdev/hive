@@ -2,3 +2,17 @@
 **/*.rs.bk
 *.log
 .env
+
+# Transient agent working state (plan-mode scratch, checkpoints)
+.hive/Plan.md
+.hive/checkpoints/
+
+# Skill scratch space
+docs/superpowers/
+.superpowers/
+
+# Stray media files
+*.mp4
+*.jpg
+*.jpeg
+*.png

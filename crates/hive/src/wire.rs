@@ -10,10 +10,7 @@ use anyhow::Result;
 use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
-use hive_core::vision::VisionDescriber;
-use hive_core::{
-    all_tools, new_spawner, AgentBuilder, DescribeVision, DiskSkills, FollowUpSlot,
-};
+use hive_core::{all_tools, new_spawner, AgentBuilder, DiskSkills, FollowUpSlot};
 use hive_llm::FireworksProvider;
 use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 
@@ -46,6 +43,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
 
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let terminal = hive_core::TerminalManager::new(event_tx.clone());
     let interrupt = Arc::new(AtomicBool::new(false));
     let follow_up: FollowUpSlot = Arc::new(Mutex::new(None));
 
@@ -66,17 +64,12 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
             })
         })
         .collect();
-    let vision: Arc<dyn VisionDescriber> = Arc::new(DescribeVision::new(
-        provider.clone(),
-        cfg.models.default.id().to_string(),
-    ));
     let tools = all_tools();
 
     let builder = AgentBuilder {
         provider: provider.clone(),
         tools,
         skills: skills.clone(),
-        vision: vision.clone(),
         config: cfg.clone(),
     };
 
@@ -89,7 +82,13 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
 
     let default_model = cfg.models.default.id().to_string();
     let default_display = cfg.models.default.display_name().to_string();
-    let agent = builder.build(event_tx.clone(), default_model.clone(), 0, spawner);
+    let agent = builder.build_with_terminal(
+        event_tx.clone(),
+        default_model.clone(),
+        0,
+        spawner,
+        terminal.clone(),
+    );
 
     let model_choices = vec![ModelChoice {
         key: default_model.clone(),
@@ -97,6 +96,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         detail: String::new(),
         group: "Configured".into(),
         connection_id: cfg.connections.active.clone(),
+        vision: false,
     }];
 
     let tui_init = TuiInit {
@@ -126,6 +126,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
             driver_events,
             driver_interrupt,
             driver_follow_up,
+            terminal,
             driver_cfg,
         )
         .await;

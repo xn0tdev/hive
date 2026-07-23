@@ -27,7 +27,7 @@ pub fn is_git_repo(repo: &Path) -> bool {
 pub fn create(repo: &Path, id: &str) -> Result<(PathBuf, String), String> {
     if !is_git_repo(repo) {
         return Err(
-            "MULTITASK needs a git repository — initialize git or switch to BUILD".into(),
+            "MULTITASK needs a git repository — initialize git or switch to MAKE".into(),
         );
     }
     let path = worktree_path(repo, id);

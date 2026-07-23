@@ -105,25 +105,6 @@ impl Default for ModelsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct VisionConfig {
-    /// Models that natively accept image inputs. Anything not listed here goes
-    /// through the describe-and-inject fallback.
-    pub capable: Vec<String>,
-}
-
-impl Default for VisionConfig {
-    fn default() -> Self {
-        VisionConfig {
-            capable: vec![
-                "accounts/fireworks/models/kimi-k2p6".to_string(),
-                "accounts/fireworks/routers/kimi-k2p6-fast".to_string(),
-            ],
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
@@ -339,7 +320,6 @@ impl Default for AgentConfig {
 pub struct AppConfig {
     pub provider: ProviderConfig,
     pub models: ModelsConfig,
-    pub vision: VisionConfig,
     pub search: SearchConfig,
     pub exa: ExaConfig,
     pub perplexity: PerplexityConfig,
@@ -377,10 +357,6 @@ impl AppConfig {
             return r.display_name().to_string();
         }
         short_model_id(id).to_string()
-    }
-
-    pub fn is_vision_capable(&self, model: &str) -> bool {
-        self.vision.capable.iter().any(|m| m == model)
     }
 }
 

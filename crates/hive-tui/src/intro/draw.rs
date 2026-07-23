@@ -239,8 +239,8 @@ fn draw_modes(buf: &mut Buffer, area: Rect, theme: &Theme, bg: Color) -> Option<
         area.x,
         y,
         area.width,
-        "BUILD",
-        Style::default().fg(theme.build).add(Modifier::BOLD),
+        "MAKE",
+        Style::default().fg(theme.make).add(Modifier::BOLD),
         bg,
     );
     y += 1;
@@ -291,7 +291,7 @@ fn draw_modes(buf: &mut Buffer, area: Rect, theme: &Theme, bg: Color) -> Option<
         area.x,
         y,
         area.width,
-        "Toggle anytime with Tab: BUILD → PLAN → MULTITASK.",
+        "Toggle anytime with Tab: MAKE → PLAN → MULTITASK.",
         Style::default().fg(theme.dim),
         bg,
     );

@@ -1,8 +1,4 @@
-//! Borderless tinted input strip: → prompt, placeholder, hardware cursor.
-//! Long lines soft-wrap within the strip width so the band can grow.
-//! In subagent view the strip becomes a clickable `← back` button (no caret).
-//! In plan preview: `← back` + `Build`, or an amend composer when sections
-//! are selected.
+//! Main / home composer + follow-up banner + mode chip.
 
 use comb::{Frame, Line, Modifier, Rect, Span, Style};
 use hive_core::AgentMode;
@@ -11,7 +7,6 @@ use crate::app::input::PROMPT_COLS;
 use crate::app::App;
 
 const PROMPT: &str = "→ ";
-const BACK: &str = "← back";
 
 /// Text columns after the prompt/indent for a strip of the given outer width.
 pub fn text_cols(band_width: u16) -> usize {
@@ -70,7 +65,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     // Prompt + text first (caret stays on top); @chips sit under the message.
     let mut lines: Vec<Line> = Vec::new();
     if app.input.is_empty() {
-        let placeholder = if app.has_follow_up() {
+        let placeholder = if app.in_plan_view() && app.plan_composing() {
+            "Comment · MARK saves · select more anytime"
+        } else if app.has_follow_up() {
             "Enter again → next step · ↑ edit"
         } else if app.running {
             "Add a follow-up"
@@ -145,7 +142,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     f.set_cursor(x, y);
 }
 
-/// BUILD / PLAN chip with padded label, flush to the right edge of `area`.
+/// MAKE / PLAN chip with padded label, flush to the right edge of `area`.
 pub fn draw_mode_chip(f: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -153,7 +150,7 @@ pub fn draw_mode_chip(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
     let (label, chip_bg) = match app.agent_mode {
         AgentMode::Plan => (" PLAN ", theme.plan),
-        AgentMode::Build => (" BUILD ", theme.build),
+        AgentMode::Make => (" MAKE ", theme.make),
         AgentMode::Multitask => (" MULTITASK ", theme.multitask),
     };
     let chip_fg = Style::default()
@@ -168,112 +165,6 @@ pub fn draw_mode_chip(f: &mut Frame, area: Rect, app: &App) {
     let x = area.x + area.width.saturating_sub(w);
     let line = Line::from(Span::styled(label, chip_fg));
     f.buffer().set_line(x, area.y, &line, w);
-}
-
-/// Clickable back control shown while browsing a subagent thread.
-///
-/// Not an input: no hardware cursor, no IME target — just a button hit-target.
-/// Esc / ← / click all leave via the app event handlers.
-pub fn draw_back(f: &mut Frame, area: Rect, app: &mut App) {
-    let theme = &app.theme;
-    let bg = theme.strip;
-    f.buffer().paint(area, Style::default().bg(bg));
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    app.input_hit = None;
-    if inner.width == 0 || inner.height == 0 {
-        app.back_hit = None;
-        return;
-    }
-
-    let back_line = Line::from(Span::styled(
-        BACK,
-        Style::default().fg(theme.accent).bg(bg).add(Modifier::BOLD),
-    ));
-    f.buffer()
-        .set_lines_on(inner, &[back_line], 0, Style::default().bg(bg));
-
-    // Right-aligned key hint — reinforces that this is a control, not a field.
-    let hint = "esc";
-    let hint_w = hint.chars().count() as u16;
-    if inner.width > hint_w + BACK.chars().count() as u16 + 2 {
-        let hx = inner.x + inner.width.saturating_sub(hint_w);
-        let hint_line = Line::from(Span::styled(hint, Style::default().fg(theme.faint).bg(bg)));
-        f.buffer().set_line(hx, inner.y, &hint_line, hint_w);
-    }
-
-    // Entire strip is clickable (pads + label).
-    app.back_hit = Some(area);
-    app.build_hit = None;
-    // Deliberately do NOT call set_cursor — hidden caret, no input focus feel.
-}
-
-/// Plan preview chrome: `← back` + `Build`, or an amend composer when selecting.
-pub fn draw_plan_bar(f: &mut Frame, area: Rect, app: &mut App) {
-    if app.plan_view.amending {
-        // Reuse the normal input strip as the amend composer (with PLAN chip).
-        app.agent_mode = AgentMode::Plan;
-        draw(f, area, app);
-        app.back_hit = None;
-        app.build_hit = None;
-        return;
-    }
-
-    let theme = &app.theme;
-    let bg = theme.strip;
-    f.buffer().paint(area, Style::default().bg(bg));
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    app.input_hit = None;
-    if inner.width == 0 || inner.height == 0 {
-        app.back_hit = None;
-        app.build_hit = None;
-        return;
-    }
-
-    let back_line = Line::from(Span::styled(
-        BACK,
-        Style::default().fg(theme.accent).bg(bg).add(Modifier::BOLD),
-    ));
-    f.buffer()
-        .set_lines_on(inner, &[back_line], 0, Style::default().bg(bg));
-
-    let build_label = " Build ";
-    let bw = build_label.chars().count() as u16;
-    let build_style = Style::default()
-        .fg(theme.sel_fg)
-        .bg(theme.build)
-        .add(Modifier::BOLD);
-    if inner.width > bw + BACK.chars().count() as u16 + 4 {
-        let bx = inner.x + inner.width.saturating_sub(bw);
-        f.buffer().set_line(
-            bx,
-            inner.y,
-            &Line::from(Span::styled(build_label, build_style)),
-            bw,
-        );
-        app.build_hit = Some(Rect {
-            x: bx,
-            y: area.y,
-            width: bw,
-            height: area.height,
-        });
-    } else {
-        app.build_hit = None;
-    }
-
-    // Left portion is back; whole strip also accepts Esc/←.
-    app.back_hit = Some(area);
 }
 
 /// Soft `@path` chips for pending attachments (accent `@`, dim path).
@@ -317,28 +208,6 @@ mod tests {
             ui: Default::default(),
             context_window: 128_000,
         })
-    }
-
-    #[test]
-    fn subagent_back_has_no_hardware_cursor() {
-        use hive_core::event::AgentEvent;
-
-        let mut a = app();
-        a.apply(AgentEvent::SubagentSpawned {
-            id: "v1".into(),
-            label: "Checking".into(),
-            prompt: "go".into(),
-        });
-        a.open_subagent_view("v1".into());
-
-        let (buf, cursor) =
-            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
-        assert!(cursor.is_none(), "back control must not show a caret");
-        assert!(a.back_hit.is_some(), "back hit target recorded");
-        let text = buf.text();
-        assert!(text.contains("← back"), "{text}");
-        assert!(text.contains("esc"), "{text}");
-        assert!(!text.contains("read only"), "{text}");
     }
 
     #[test]
@@ -393,7 +262,57 @@ mod tests {
     }
 
     #[test]
-    fn mode_chip_renders_build_plan_and_multitask() {
+    fn live_plan_selection_shows_comment_placeholder() {
+        use crate::app::state::PlanDrag;
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "Test".into(),
+            body: "# Test\n\nselect this text\n".into(),
+        });
+        a.open_plan_view();
+        // Mouse-down has started a selection, but mouse-up has not made a saved mark yet.
+        a.plan_view.drag = Some(PlanDrag {
+            anchor: 0,
+            current: 6,
+        });
+
+        let (buf, _) =
+            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Comment"), "{text}");
+        assert!(text.contains("MARK"), "{text}");
+        assert!(!text.contains("Ask hive anything"), "{text}");
+    }
+
+    #[test]
+    fn zero_width_plan_drag_keeps_idle_bar() {
+        use crate::app::state::PlanDrag;
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "Test".into(),
+            body: "# Test\n\nselect this text\n".into(),
+        });
+        a.open_plan_view();
+        // Mouse-down without any movement is only a click, not a selection.
+        a.plan_view.drag = Some(PlanDrag {
+            anchor: 6,
+            current: 6,
+        });
+
+        let (buf, _) =
+            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("MAKE"), "{text}");
+        assert!(!text.contains("Comment"), "{text}");
+        assert!(!text.contains("  MARK  "), "{text}");
+    }
+
+    #[test]
+    fn mode_chip_renders_make_plan_and_multitask() {
         use hive_core::AgentMode;
 
         let mut a = app();
@@ -404,7 +323,7 @@ mod tests {
         a.apply(hive_core::event::AgentEvent::TurnFinished);
 
         let (buf, _) = render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
-        assert!(buf.text().contains("BUILD"), "{}", buf.text());
+        assert!(buf.text().contains("MAKE"), "{}", buf.text());
 
         a.agent_mode = AgentMode::Plan;
         let (buf, _) = render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));

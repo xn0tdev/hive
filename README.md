@@ -8,7 +8,7 @@ Hive wasn’t built as a product launch. It started as a personal agent — some
 
 ## Why use it
 
-- **Feels like a real coding agent** — plan / build / multitask, tools, subagents, skills, context compact when the window fills up.
+- **Feels like a real coding agent** — plan / make / multitask, tools, subagents, skills, context compact when the window fills up.
 - **Native TUI** — fast redraws, keyboard-first, runs where you already work.
 - **Rust end-to-end** — one binary, low overhead, no Node runtime in the loop.
 - **Your providers** — OpenAI-compatible endpoints (Fireworks, OpenRouter, …). First run walks you through setup; `/connect` and `/model` later.

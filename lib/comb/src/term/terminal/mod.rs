@@ -8,15 +8,19 @@
 mod platform;
 
 use std::io::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::core::buffer::{Buffer, WIDE_CONT};
 use crate::core::geom::{Rect, Size};
 use crate::core::style::{Color, Modifier, Style};
 use crate::draw::surface::Compositor;
-use crate::term::event::{self, Event};
+use crate::term::event::{self, Event, Key, KeyCode, KeyMods};
 
 use platform::{PlatformState, Wait};
+
+/// How long to wait after a bare ESC before treating it as the Esc key.
+/// Shorter than a human Esc press interval; long enough for mouse CSI tails.
+const ESC_TIMEOUT: Duration = Duration::from_millis(35);
 
 /// Sequences enabled on enter (alt screen, mouse, kitty disambiguate, paste…).
 const ENTER_SEQ: &str =
@@ -120,6 +124,8 @@ pub struct Terminal {
     front: Buffer,
     size: Size,
     inbuf: Vec<u8>,
+    /// When `inbuf` is exactly `[ESC]` awaiting more bytes (or Esc timeout).
+    esc_seen_at: Option<Instant>,
     cursor_visible: bool,
     out: io::Stdout,
 }
@@ -134,6 +140,7 @@ impl Terminal {
             front: Buffer::blank(size),
             size,
             inbuf: Vec::new(),
+            esc_seen_at: None,
             cursor_visible: true,
             out: io::stdout(),
         };
@@ -253,13 +260,21 @@ impl Terminal {
             return Ok(Some(Event::Resize(w, h)));
         }
         if let Some(ev) = self.poll_parsed() {
+            self.esc_seen_at = None;
+            return Ok(Some(ev));
+        }
+        if let Some(ev) = self.take_timed_out_esc(Instant::now()) {
             return Ok(Some(ev));
         }
 
-        match platform::wait_stdin(timeout)? {
+        let wait = self.stdin_wait(timeout, Instant::now());
+        match platform::wait_stdin(wait)? {
             Wait::Timeout => {
                 if let Some((w, h)) = platform::take_resize(self.size) {
                     return Ok(Some(Event::Resize(w, h)));
+                }
+                if let Some(ev) = self.take_timed_out_esc(Instant::now()) {
+                    return Ok(Some(ev));
                 }
                 return Ok(None);
             }
@@ -274,7 +289,58 @@ impl Terminal {
         if let Some((w, h)) = platform::take_resize(self.size) {
             return Ok(Some(Event::Resize(w, h)));
         }
-        Ok(self.poll_parsed())
+        if let Some(ev) = self.poll_parsed() {
+            self.esc_seen_at = None;
+            return Ok(Some(ev));
+        }
+        self.note_bare_esc(Instant::now());
+        if let Some(ev) = self.take_timed_out_esc(Instant::now()) {
+            return Ok(Some(ev));
+        }
+        Ok(None)
+    }
+
+    fn stdin_wait(&mut self, timeout: Duration, now: Instant) -> Duration {
+        if self.inbuf.as_slice() != [0x1b] {
+            return timeout;
+        }
+        let seen = *self.esc_seen_at.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(seen);
+        if elapsed >= ESC_TIMEOUT {
+            Duration::ZERO
+        } else {
+            timeout.min(ESC_TIMEOUT - elapsed)
+        }
+    }
+
+    fn note_bare_esc(&mut self, now: Instant) {
+        if self.inbuf.as_slice() == [0x1b] {
+            if self.esc_seen_at.is_none() {
+                self.esc_seen_at = Some(now);
+            }
+        } else {
+            self.esc_seen_at = None;
+        }
+    }
+
+    fn take_timed_out_esc(&mut self, now: Instant) -> Option<Event> {
+        if self.inbuf.as_slice() != [0x1b] {
+            if !self.inbuf.is_empty() {
+                // Incomplete multi-byte escape (e.g. ESC [) — keep waiting.
+                self.esc_seen_at = None;
+            }
+            return None;
+        }
+        let seen = *self.esc_seen_at.get_or_insert(now);
+        if now.saturating_duration_since(seen) < ESC_TIMEOUT {
+            return None;
+        }
+        self.inbuf.clear();
+        self.esc_seen_at = None;
+        Some(Event::Key(Key {
+            code: KeyCode::Esc,
+            mods: KeyMods::NONE,
+        }))
     }
 
     fn poll_parsed(&mut self) -> Option<Event> {

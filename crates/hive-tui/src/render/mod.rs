@@ -8,7 +8,7 @@
 //!   subagent cards, input strip, slash menu, footer; working cubes by the mode chip).
 //! - Subagent view → same layout, but the transcript shows that agent's thread
 //!   and the input strip is replaced by a clickable `← back` button (no caret).
-//! - Plan view → markdown preview of Plan.md; bottom bar is back/Build or amend.
+//! - Plan view → markdown preview of Plan.md; bottom bar is back/Make or amend.
 
 pub mod bee;
 pub mod markdown;
@@ -19,17 +19,18 @@ pub mod wrap;
 
 mod about;
 mod footer;
-mod input_box;
+mod input_bars;
 mod menu;
 mod palette;
 mod settings;
+mod terminal_view;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;
 mod toast;
 pub(crate) mod two_col;
 mod transcript;
 
-pub use sidebar::{clamp_width, ProjectSnapshot, SidebarSection, SidebarSections};
+pub use sidebar::{clamp_width, ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections};
 
 use comb::{Frame, Line, Rect, Span, Style};
 
@@ -64,7 +65,7 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
     let input_h = input_height(app, inner_w);
     let menu_h = menu::height(app);
     let gap: u16 = 1;
-    // Copy colors before `input_box::draw` needs `&mut App` for hit-testing.
+    // Copy colors before `input_bars::draw` needs `&mut App` for hit-testing.
     let faint = app.theme.faint;
 
     // The menu is an overlay (see below), so it's NOT part of the centered
@@ -93,7 +94,7 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Centered, narrower input strip.
     let input_top = y;
-    input_box::draw(f, Rect::new(ix, y, inner_w, input_h), app);
+    input_bars::draw(f, Rect::new(ix, y, inner_w, input_h), app);
     y += input_h;
 
     // Model + cwd flush with the input strip's outer left; chip on the right.
@@ -122,43 +123,54 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     let special = app.in_special_view();
     let plan = app.in_plan_view();
+    let terminal = app.in_terminal_view();
     let menu_h = if special { 0 } else { menu::height(app) };
 
     app.refresh_project();
 
-    // On wide screens, reserve a right project sidebar; chat fills/centers the rest.
-    let side_w = sidebar::width_for(
-        area.width,
-        app.sidebar_open,
-        app.ui.sidebar_mode,
-        app.ui.sidebar_width,
-    );
+    // Plan preview: hide sidebar; keep the same left/right page padding as chat.
+    let side_w = if plan || terminal {
+        0
+    } else {
+        sidebar::width_for(
+            area.width,
+            app.sidebar_open,
+            app.ui.sidebar_mode,
+            app.ui.sidebar_width,
+        )
+    };
     let gap: u16 = if side_w > 0 { 2 } else { 0 };
     let chat_avail = area.width.saturating_sub(side_w).saturating_sub(gap);
     // No hard 88-col ceiling — use the band left of the sidebar (with modest pad),
     // then center the column so leftover space isn't a dead left margin.
-    let inner_w = if side_w > 0 {
-        chat_avail.saturating_sub(4).max(40).min(chat_avail)
+    let (inner_w, ix) = if plan || terminal {
+        // Same outer pad as a no-sidebar chat column (not flush to screen edges).
+        let w = area.width.saturating_sub(6).max(40).min(area.width);
+        (w, area.x + (area.width - w) / 2)
+    } else if side_w > 0 {
+        let w = chat_avail.saturating_sub(4).max(40).min(chat_avail);
+        (w, area.x + chat_avail.saturating_sub(w) / 2)
     } else {
-        area.width.saturating_sub(6).max(20).min(area.width)
+        let w = area.width.saturating_sub(6).max(20).min(area.width);
+        (w, area.x + (area.width - w) / 2)
     };
-    let input_h = if plan && app.plan_view.amending {
-        input_height(app, inner_w)
+    // Plan composer matches chat textarea height; chip width is reserved so
+    // wrap/height don't shift when MARK/SEND appears. Subagent back stays 3.
+    let input_h = if plan {
+        let composer_w = inner_w.saturating_sub(input_bars::PLAN_ACTION_COLS);
+        input_height(app, composer_w.max(8))
     } else if special {
-        3 // pad + ← back (+ Build) + pad
+        3
     } else {
         input_height(app, inner_w)
-    };
-    let ix = if side_w > 0 {
-        area.x + chat_avail.saturating_sub(inner_w) / 2
-    } else {
-        area.x + (area.width - inner_w) / 2
     };
 
-    // Manual vertical layout, bottom-anchored: footer (model+cwd, chip on the
-    // model row) on the last two rows, then input, transcript above.
-    // Working cubes sit just left of the mode chip on the model row.
-    let footer_y = area.bottom().saturating_sub(2);
+    // Manual vertical layout, bottom-anchored. Plan view hides the status
+    // footer (model/cwd) — only back + MAKE matter there — but keeps the same
+    // 2-row bottom reserve as chat so the InputZone (back / MARK / SEND) lands
+    // at the exact height of the chat Input, with toasts on the very last row.
+    let footer_h: u16 = 2;
+    let footer_y = area.bottom().saturating_sub(footer_h);
     let follow_h: u16 = if !special && app.has_follow_up() { 1 } else { 0 };
     let input_y = footer_y.saturating_sub(input_h);
     let follow_y = input_y.saturating_sub(follow_h);
@@ -166,26 +178,36 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     let transcript = Rect::new(ix, area.y, inner_w, transcript_h);
     let band = |y: u16, h: u16| Rect::new(ix, y, inner_w, h);
 
-    transcript::draw(f.buffer(), transcript, app);
+    if terminal {
+        terminal_view::draw(f, transcript, app);
+    } else {
+        transcript::draw(f.buffer(), transcript, app);
+    }
     if plan {
-        input_box::draw_plan_bar(f, band(input_y, input_h), app);
-        footer::draw(f.buffer(), band(footer_y, 2), app);
+        input_bars::draw_plan_bar(f, band(input_y, input_h), app);
+    } else if terminal {
+        input_bars::draw_terminal_bar(f, band(input_y, input_h), app);
     } else if app.in_subagent_view() {
         app.input_hit = None;
-        input_box::draw_back(f, band(input_y, input_h), app);
+        input_bars::draw_back(f, band(input_y, input_h), app);
         footer::draw(f.buffer(), band(footer_y, 2), app);
     } else {
         app.back_hit = None;
-        app.build_hit = None;
+        app.make_hit = None;
         if follow_h > 0 {
-            input_box::draw_follow_up(f, band(follow_y, follow_h), app);
+            input_bars::draw_follow_up(f, band(follow_y, follow_h), app);
         }
-        input_box::draw(f, band(input_y, input_h), app);
+        input_bars::draw(f, band(input_y, input_h), app);
         // Full band width: text flush left with strip, chip flush right.
         footer::draw_with_mode(f, band(footer_y, 2), app);
     }
 
-    if side_w > 0 {
+    if plan || terminal {
+        app.sidebar_toggle_hit = None;
+        app.sidebar_resize_hit = None;
+        app.sidebar_section_hits.clear();
+        app.sidebar_item_hits.clear();
+    } else if side_w > 0 {
         let sx = area.right().saturating_sub(side_w);
         let side = Rect::new(sx, area.y + 1, side_w, area.height.saturating_sub(4));
         sidebar::draw(f.buffer(), side, app);
@@ -196,6 +218,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         app.sidebar_toggle_hit = None;
         app.sidebar_resize_hit = None;
         app.sidebar_section_hits.clear();
+        app.sidebar_item_hits.clear();
     }
 
     // Menu overlay, drawn last so it layers over the transcript, its bottom
@@ -249,7 +272,7 @@ fn draw_about(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn input_height(app: &mut App, band_width: u16) -> u16 {
     // Persist wrap width so Up/Down between frames use the same soft-wrap.
-    app.input.text_cols = input_box::text_cols(band_width);
+    app.input.text_cols = input_bars::text_cols(band_width);
     // text rows + one padding row above and below, inside the strip
     let tag = u16::from(app.has_pending_attaches());
     app.input.visible_line_count(app.input.text_cols) as u16 + 2 + tag

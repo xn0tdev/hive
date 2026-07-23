@@ -1,4 +1,6 @@
+use crate::agent::AgentMode;
 use crate::provider::Usage;
+use crate::terminal::{TerminalController, TerminalOutputFrame, TerminalProcessState};
 
 /// Status of a subagent in the swarm / transcript card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +88,42 @@ pub enum AgentEvent {
         summary: String,
         body: String,
     },
+    /// The agent switched its own working mode mid-session (e.g. into PLAN
+    /// before tackling a large feature). `reason` explains why, for the card.
+    ModeSwitched {
+        mode: AgentMode,
+        reason: String,
+    },
+    TerminalStarted {
+        id: String,
+        command: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalStartFailed {
+        id: String,
+        command: String,
+        message: String,
+    },
+    TerminalOutput {
+        id: String,
+        frame: TerminalOutputFrame,
+    },
+    TerminalState {
+        id: String,
+        controller: TerminalController,
+        process: TerminalProcessState,
+        revision: u64,
+    },
+    TerminalResized {
+        id: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalError {
+        id: String,
+        message: String,
+    },
     /// The active model changed (e.g. via `/model`).
     ModelChanged {
         /// Provider model id (sent to the API).
@@ -123,6 +161,8 @@ pub struct CatalogModel {
     pub group: String,
     /// `/connect` profile id this model was listed from.
     pub connection_id: String,
+    /// True when the catalog says this model accepts image inputs.
+    pub vision: bool,
 }
 
 /// One saved provider in the `/connect` picker.

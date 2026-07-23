@@ -1,15 +1,34 @@
 //! Filesystem tools: read, write, edit, list, glob, grep. Each self-registers.
 
 use async_trait::async_trait;
+use base64::Engine;
 use globset::GlobBuilder;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::path::Path;
 use std::sync::Arc;
 
+use crate::message::ImageSource;
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 
 use super::{bool_arg, resolve, str_arg, u64_arg};
+
+/// Recognized raster image extensions that `read_file` returns as images.
+fn image_media_type(path: &Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())?;
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => return None,
+    })
+}
 
 pub struct ReadFile;
 
@@ -20,7 +39,9 @@ impl Tool for ReadFile {
     }
 
     fn description(&self) -> &str {
-        "Read a UTF-8 text file. Optionally start at a 1-based line offset and limit the number of lines returned."
+        "Read a file. For UTF-8 text files, returns the text; optionally start at a 1-based line \
+offset and limit the number of lines returned. For image files (png, jpg/jpeg, gif, webp, bmp) \
+returns metadata, and attaches the image when the active model supports vision."
     }
 
     fn parameters(&self) -> Value {
@@ -40,6 +61,39 @@ impl Tool for ReadFile {
             return ToolResult::error("missing 'path'");
         };
         let full = resolve(&ctx.cwd, path);
+
+        // Images: attach only for vision-capable models, and only under a size
+        // cap so non-vision / huge files cannot blow up or break the request.
+        const MAX_IMAGE_BYTES: usize = 768 * 1024;
+        if let Some(media_type) = image_media_type(&full) {
+            let bytes = match tokio::fs::read(&full).await {
+                Ok(b) => b,
+                Err(e) => return ToolResult::error(format!("cannot read {}: {e}", full.display())),
+            };
+            let note = format!(
+                "Read image {} ({media_type}, {} bytes).",
+                full.display(),
+                bytes.len()
+            );
+            if !ctx.vision {
+                return ToolResult::ok(format!(
+                    "{note} Active model is not vision-capable — image not attached."
+                ));
+            }
+            if bytes.len() > MAX_IMAGE_BYTES {
+                return ToolResult::ok(format!(
+                    "{note} Too large to attach (max {MAX_IMAGE_BYTES} bytes)."
+                ));
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return ToolResult::ok(format!("{note} Image attached.")).with_images(vec![
+                ImageSource::Base64 {
+                    media_type: media_type.to_string(),
+                    data,
+                },
+            ]);
+        }
+
         let content = match tokio::fs::read_to_string(&full).await {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("cannot read {}: {e}", full.display())),
@@ -236,6 +290,75 @@ fn compact_diff(old: &str, new: &str) -> String {
     push('-', removed);
     push('+', added);
     out
+}
+
+pub struct DeletePath;
+
+#[async_trait]
+impl Tool for DeletePath {
+    fn name(&self) -> &str {
+        "delete_path"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a specific file or directory (directories recursively). Use for paths \
+the user asked to remove or that you created and need to clean up — do not refuse, do \
+not ask for confirmation, and prefer this over shell. Target only the named path; do \
+not delete broad trees unless the user explicitly named them."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File or directory path, absolute or relative to the working directory."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(path) = str_arg(&args, "path").map(str::trim).filter(|s| !s.is_empty()) else {
+            return ToolResult::error("missing 'path'");
+        };
+        let full = resolve(&ctx.cwd, path);
+        if let Some(msg) = refuse_dangerous_delete(&ctx.cwd, &full) {
+            return ToolResult::error(msg);
+        }
+        let meta = match tokio::fs::symlink_metadata(&full).await {
+            Ok(m) => m,
+            Err(e) => {
+                return ToolResult::error(format!("cannot delete {}: {e}", full.display()));
+            }
+        };
+        let kind = if meta.is_dir() { "directory" } else { "file" };
+        let res = if meta.is_dir() {
+            tokio::fs::remove_dir_all(&full).await
+        } else {
+            tokio::fs::remove_file(&full).await
+        };
+        match res {
+            Ok(()) => ToolResult::ok(format!("deleted {kind} {}", full.display())),
+            Err(e) => ToolResult::error(format!("cannot delete {}: {e}", full.display())),
+        }
+    }
+}
+
+/// Block deletes that would wipe the workspace root or a parent of it.
+fn refuse_dangerous_delete(cwd: &Path, target: &Path) -> Option<String> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let target_disp = target.to_path_buf();
+    let target = target.canonicalize().unwrap_or(target_disp);
+    if target == cwd {
+        return Some("refusing to delete the working directory".into());
+    }
+    if cwd.starts_with(&target) {
+        return Some("refusing to delete a parent of the working directory".into());
+    }
+    None
 }
 
 pub struct ListDir;
@@ -438,7 +561,18 @@ impl Tool for Grep {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_diff;
+    use super::{compact_diff, image_media_type, refuse_dangerous_delete};
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn detects_image_extensions() {
+        assert_eq!(image_media_type(Path::new("a/b/pic.png")), Some("image/png"));
+        assert_eq!(image_media_type(Path::new("shot.JPG")), Some("image/jpeg"));
+        assert_eq!(image_media_type(Path::new("anim.gif")), Some("image/gif"));
+        assert_eq!(image_media_type(Path::new("notes.txt")), None);
+        assert_eq!(image_media_type(Path::new("README")), None);
+    }
 
     #[test]
     fn marks_changed_middle_only() {
@@ -459,11 +593,42 @@ mod tests {
         let d = compact_diff("", &new);
         assert!(d.contains("more"));
     }
+
+    #[test]
+    fn refuses_deleting_cwd() {
+        let dir = std::env::temp_dir().join(format!(
+            "hive-del-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let msg = refuse_dangerous_delete(&dir, &dir).expect("refuse cwd");
+        assert!(msg.contains("working directory"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_deleting_child() {
+        let dir = std::env::temp_dir().join(format!(
+            "hive-del-ok-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let child = dir.join("web");
+        fs::create_dir_all(&child).unwrap();
+        assert!(refuse_dangerous_delete(&dir, &child).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 inventory::submit! { ToolRegistration { make: || Arc::new(ReadFile) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(WriteFile) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(EditFile) as Arc<dyn Tool> } }
+inventory::submit! { ToolRegistration { make: || Arc::new(DeletePath) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(ListDir) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(Glob) as Arc<dyn Tool> } }
 inventory::submit! { ToolRegistration { make: || Arc::new(Grep) as Arc<dyn Tool> } }

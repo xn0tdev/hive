@@ -6,6 +6,7 @@ mod intro;
 mod render;
 mod run;
 mod sound;
+mod terminal_input;
 mod theme;
 
 use hive_core::event::ConnectionInfo;
@@ -29,6 +30,8 @@ pub struct ModelChoice {
     pub group: String,
     /// `/connect` profile id — switching model may activate this provider.
     pub connection_id: String,
+    /// Catalog says this model accepts image inputs.
+    pub vision: bool,
 }
 
 /// A skill exposed in the `/` composer menu (`/skill-name`).
@@ -65,6 +68,24 @@ pub struct TuiInit {
     pub context_window: u64,
 }
 
+pub struct PrivateTerminalInput(Vec<u8>);
+
+impl PrivateTerminalInput {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for PrivateTerminalInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<private terminal input: {} bytes>", self.0.len())
+    }
+}
+
 /// Messages the TUI sends to the agent driver.
 #[derive(Debug)]
 pub enum InputCommand {
@@ -73,12 +94,32 @@ pub enum InputCommand {
         images: Vec<ImageSource>,
         mode: AgentMode,
     },
+    TerminalAttach {
+        id: String,
+    },
+    TerminalDetach {
+        id: String,
+    },
+    TerminalInput {
+        id: String,
+        input: PrivateTerminalInput,
+    },
+    TerminalResize {
+        id: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalStop {
+        id: String,
+    },
     /// Switch the active model (`display` is the TUI label).
     SetModel {
         id: String,
         display: String,
         /// When set, activate this `/connect` profile before applying the model.
         connection_id: Option<String>,
+        /// Whether the model accepts image inputs (from the live catalog).
+        vision: bool,
     },
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,
@@ -105,4 +146,17 @@ pub enum InputCommand {
     Compact,
     /// Persist UI prefs into `~/.config/hive/config.toml`.
     SaveUi(UiConfig),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_terminal_input_debug_is_redacted() {
+        let input = PrivateTerminalInput::new(b"super-secret".to_vec());
+        let rendered = format!("{input:?}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("private terminal input"));
+    }
 }

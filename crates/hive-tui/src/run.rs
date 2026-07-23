@@ -15,10 +15,12 @@ use hive_core::message::ImageSource;
 use hive_core::{AgentMode, FollowUpSlot, UserInput};
 
 use crate::app::palette::PaletteMode;
+use crate::app::state::TerminalViewPhase;
 use crate::app::App;
 use crate::commands::{self, CmdId};
 use crate::render;
-use crate::{InputCommand, TuiInit};
+use crate::terminal_input::{terminal_key_bytes, terminal_paste_bytes};
+use crate::{InputCommand, PrivateTerminalInput, TuiInit};
 
 const UNKNOWN_HINT: &str = "Ctrl+P for commands · /about for About";
 
@@ -26,6 +28,8 @@ const UNKNOWN_HINT: &str = "Ctrl+P for commands · /about for About";
 const ANIM_TICK: Duration = Duration::from_millis(100);
 /// Idle poll — long enough to skip needless redraws, short enough for input.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// Keep a hot producer from starving keyboard and mouse polling.
+const MAX_EVENTS_PER_TICK: usize = 128;
 
 pub fn run(
     init: TuiInit,
@@ -43,7 +47,7 @@ pub fn run(
     // its `Drop` restores everything, so there's no manual teardown here.
     let mut terminal = Terminal::new()?;
     // Need button-drag reports so the sidebar left edge can be resized.
-    terminal.mouse_mode(MouseMode::Drag)?;
+    terminal.mouse_mode(MouseMode::Motion)?;
     let mut app = App::new(init);
 
     run_loop(
@@ -67,16 +71,7 @@ fn run_loop(
     let mut dirty = true;
     let mut last_spinner = usize::MAX;
     loop {
-        let mut content_dirty = false;
-        while let Ok(ev) = events.try_recv() {
-            let finished = matches!(ev, hive_core::event::AgentEvent::TurnFinished);
-            if app.apply(ev) {
-                content_dirty = true;
-            }
-            if finished && flush_follow_up(app, input_tx) {
-                content_dirty = true;
-            }
-        }
+        let content_dirty = drain_events(app, events, input_tx);
 
         if app.tick() {
             // Idle composer blur (or other tick-side visual change).
@@ -87,6 +82,15 @@ fn run_loop(
 
         if dirty || content_dirty || spinner_moved {
             terminal.draw(|f| render::draw(f, app))?;
+            if let Some((id, rows, cols)) = app.take_pending_terminal_resize() {
+                if rows > 0 && cols > 0 {
+                    let _ = input_tx.send(InputCommand::TerminalResize {
+                        id,
+                        rows,
+                        cols,
+                    });
+                }
+            }
             last_spinner = app.spinner;
             dirty = false;
         }
@@ -111,7 +115,7 @@ fn run_loop(
                     dirty = true;
                 }
                 Event::Paste(text) => {
-                    if handle_paste(app, &text) {
+                    if handle_paste(app, &text, input_tx) {
                         dirty = true;
                     }
                 }
@@ -121,33 +125,73 @@ fn run_loop(
     Ok(())
 }
 
+fn drain_events(
+    app: &mut App,
+    events: &mut EventReceiver,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    let mut dirty = false;
+    for _ in 0..MAX_EVENTS_PER_TICK {
+        let Ok(ev) = events.try_recv() else {
+            break;
+        };
+        let finished = matches!(ev, hive_core::event::AgentEvent::TurnFinished);
+        dirty |= app.apply(ev);
+        if finished {
+            dirty |= flush_follow_up(app, input_tx);
+        }
+    }
+    dirty
+}
+
 /// Bracketed paste / clipboard paste. Returns whether the UI should redraw.
-fn handle_paste(app: &mut App, text: &str) -> bool {
+fn handle_paste(
+    app: &mut App,
+    text: &str,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    if app.in_terminal_view() {
+        if app.terminal_view.phase != TerminalViewPhase::UserControl {
+            return false;
+        }
+        let Some(id) = app.terminal_view_id().map(str::to_string) else {
+            return false;
+        };
+        let bracketed = app
+            .terminal_input_modes()
+            .map(|(_, bracketed)| bracketed)
+            .unwrap_or(false);
+        let bytes = terminal_paste_bytes(text, bracketed);
+        if bytes.is_empty() {
+            return false;
+        }
+        let _ = input_tx.send(InputCommand::TerminalInput {
+            id,
+            input: PrivateTerminalInput::new(bytes),
+        });
+        return true;
+    }
     if app.about_open() || app.settings_open() {
         return false;
     }
     if app.palette_open() {
         return paste_into_palette(app, text);
     }
-    if app.in_special_view() && !(app.in_plan_view() && app.plan_view.amending) {
+    if app.in_special_view() && !(app.in_plan_view() && app.plan_composing()) {
         return false;
     }
 
     app.focus_input();
 
-    let trimmed = text.trim();
-    // Lone path paste → attach, same as submit-time path detect.
-    if app.input.is_empty()
-        && !trimmed.is_empty()
-        && !trimmed.contains('\n')
-        && !trimmed.contains(' ')
-    {
-        if let Some(leftover) = app.try_attach_pasted_path(trimmed) {
-            if leftover.is_empty() {
-                app.flash(format!("Attached {}", app.attachment_tags_line()));
-                app.reset_menu();
-                return true;
-            }
+    // Drag-and-drop / lone path paste → attach as an @chip, exactly like the
+    // `@` picker. `try_attach_pasted_path` only consumes the paste when it fully
+    // resolves to existing file path(s) — handling quotes, escaped spaces and
+    // `file://` URIs — otherwise we fall through to a normal text paste.
+    if let Some(leftover) = app.try_attach_pasted_path(text) {
+        if leftover.is_empty() {
+            app.flash(format!("Attached {}", app.attachment_tags_line()));
+            app.reset_menu();
+            return true;
         }
     }
 
@@ -211,6 +255,63 @@ fn read_clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+fn handle_terminal_key(
+    app: &mut App,
+    key: Key,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    let phase = app.terminal_view.phase;
+    let Some(id) = app.terminal_view_id().map(str::to_string) else {
+        return false;
+    };
+    let user_owned = app
+        .viewed_terminal()
+        .is_some_and(|card| card.controller == hive_core::TerminalController::User);
+
+    if key.mods.ctrl && key.code == KeyCode::Char(']') {
+        if phase == TerminalViewPhase::Attaching || user_owned {
+            let _ = input_tx.send(InputCommand::TerminalDetach { id });
+        }
+        app.leave_terminal_view();
+        return false;
+    }
+
+    if key.mods.shift && key.code == KeyCode::PageUp {
+        let amount = app
+            .terminal_view
+            .body_rect
+            .map(|rect| usize::from(rect.height.saturating_sub(1).max(1)))
+            .unwrap_or(5);
+        app.scroll_terminal(isize::try_from(amount).unwrap_or(isize::MAX));
+        return false;
+    }
+    if key.mods.shift && key.code == KeyCode::PageDown {
+        let amount = app
+            .terminal_view
+            .body_rect
+            .map(|rect| usize::from(rect.height.saturating_sub(1).max(1)))
+            .unwrap_or(5);
+        app.scroll_terminal(-isize::try_from(amount).unwrap_or(isize::MAX));
+        return false;
+    }
+
+    if phase != TerminalViewPhase::UserControl {
+        return false;
+    }
+    let application_cursor = app
+        .terminal_input_modes()
+        .map(|(application_cursor, _)| application_cursor)
+        .unwrap_or(false);
+    let bytes = terminal_key_bytes(key, application_cursor);
+    if !bytes.is_empty() {
+        let _ = input_tx.send(InputCommand::TerminalInput {
+            id,
+            input: PrivateTerminalInput::new(bytes),
+        });
+    }
+    false
+}
+
 /// Returns true when the user asked to quit.
 fn handle_key(
     app: &mut App,
@@ -219,6 +320,10 @@ fn handle_key(
     interrupt: &Arc<AtomicBool>,
     follow_up: &FollowUpSlot,
 ) -> bool {
+    if app.in_terminal_view() {
+        return handle_terminal_key(app, key, input_tx);
+    }
+
     let ctrl = key.mods.ctrl;
     let alt = key.mods.alt;
     let shift = key.mods.shift;
@@ -248,7 +353,7 @@ fn handle_key(
         return handle_settings_key(app, key, input_tx);
     }
 
-    // Plan preview: section select / amend / Build / back.
+    // Plan preview: section select / amend / Make / back.
     if app.in_plan_view() {
         return handle_plan_key(app, key, input_tx, interrupt);
     }
@@ -388,13 +493,13 @@ fn handle_key(
         // Ctrl+V / Insert → system clipboard (bracketed paste is Event::Paste).
         KeyCode::Char('v') | KeyCode::Char('V') if ctrl => {
             if let Some(text) = read_clipboard_text() {
-                let _ = handle_paste(app, &text);
+                let _ = handle_paste(app, &text, input_tx);
             }
             composer_activity = true;
         }
         KeyCode::Insert => {
             if let Some(text) = read_clipboard_text() {
-                let _ = handle_paste(app, &text);
+                let _ = handle_paste(app, &text, input_tx);
             }
             composer_activity = true;
         }
@@ -435,9 +540,7 @@ fn handle_key(
         // Multiline: arrows move inside the input; at the edges they scroll chat.
         // Empty composer + queued follow-up: ↑ pulls it back for editing.
         KeyCode::Up => {
-            if app.input.is_empty() && app.recall_follow_up() {
-                composer_activity = true;
-            } else if app.input.up() {
+            if (app.input.is_empty() && app.recall_follow_up()) || app.input.up() {
                 composer_activity = true;
             } else {
                 app.scroll_up(1);
@@ -474,7 +577,7 @@ fn handle_key(
 }
 
 /// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
-/// chats, hits `← back` / Build, or bonks the logo.
+/// chats, hits `← back` / Make, or bonks the logo.
 ///
 /// Palette / About overlays are keyboard-only — mouse events are swallowed so
 /// they don't leak through to the chat underneath.
@@ -485,20 +588,57 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
     }
     match m.kind {
         MouseKind::ScrollUp => {
-            app.scroll_up(3);
+            if app.in_terminal_view() {
+                app.scroll_terminal(3);
+            } else {
+                app.scroll_up(3);
+            }
             true
         }
         MouseKind::ScrollDown => {
-            app.scroll_down(3);
+            if app.in_terminal_view() {
+                app.scroll_terminal(-3);
+            } else {
+                app.scroll_down(3);
+            }
             true
         }
         MouseKind::Down(MouseButton::Left) => {
+            if app.in_terminal_view() {
+                if app
+                    .terminal_stop_hit
+                    .is_some_and(|hit| hit.contains(m.col, m.row))
+                {
+                    if let Some(id) = app.terminal_view_id() {
+                        let _ = input_tx.send(InputCommand::TerminalStop { id: id.into() });
+                    }
+                    return true;
+                }
+                if app
+                    .back_hit
+                    .is_some_and(|hit| hit.contains(m.col, m.row))
+                {
+                    let user_owned = app.viewed_terminal().is_some_and(|card| {
+                        card.controller == hive_core::TerminalController::User
+                    });
+                    if app.terminal_view.phase == TerminalViewPhase::Attaching || user_owned {
+                        if let Some(id) = app.terminal_view_id() {
+                            let _ =
+                                input_tx.send(InputCommand::TerminalDetach { id: id.into() });
+                        }
+                    }
+                    app.leave_terminal_view();
+                    return true;
+                }
+                return false;
+            }
             if app.is_empty_chat() && app.bonk_logo_at(m.col, m.row) {
                 app.blur_input();
                 return true;
             }
             if let Some(hit) = app.sidebar_resize_hit {
                 if hit.contains(m.col, m.row) {
+                    app.clear_assistant_selection();
                     app.sidebar_resizing = true;
                     app.blur_input();
                     return true;
@@ -506,6 +646,7 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
             }
             if let Some(hit) = app.sidebar_toggle_hit {
                 if hit.contains(m.col, m.row) {
+                    app.clear_assistant_selection();
                     app.toggle_sidebar();
                     app.blur_input();
                     return true;
@@ -514,15 +655,37 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
             for (hit, section) in &app.sidebar_section_hits {
                 if hit.contains(m.col, m.row) {
                     let section = *section;
+                    app.clear_assistant_selection();
                     app.toggle_sidebar_section(section);
                     app.blur_input();
                     return true;
                 }
             }
+            if let Some(item) = app
+                .sidebar_item_hits
+                .iter()
+                .find(|(hit, _)| hit.contains(m.col, m.row))
+                .map(|(_, item)| item.clone())
+            {
+                app.clear_assistant_selection();
+                match item {
+                    render::SidebarItem::Subagent(id) => app.open_subagent_view(id),
+                    render::SidebarItem::Terminal(id) => app.open_terminal_view(id),
+                }
+                app.blur_input();
+                return true;
+            }
             if app.in_plan_view() {
-                if let Some(hit) = app.build_hit {
+                if let Some(hit) = app.make_hit {
                     if hit.contains(m.col, m.row) {
-                        start_build_from_plan(app, input_tx);
+                        use crate::app::state::PlanAction;
+                        match app.plan_action() {
+                            PlanAction::Make => start_make_from_plan(app, input_tx),
+                            PlanAction::Add => {
+                                app.plan_commit_note();
+                            }
+                            PlanAction::Send => send_plan_corrections(app, input_tx),
+                        }
                         return true;
                     }
                 }
@@ -532,7 +695,15 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                         return true;
                     }
                 }
-                return false;
+                if app.input_contains(m.col, m.row) && app.plan_composing() {
+                    if !app.input_focused {
+                        app.focus_input();
+                        return true;
+                    }
+                    return false;
+                }
+                // Begin text selection on the plan body.
+                return app.plan_drag_to(m.col, m.row, false);
             }
             if app.in_subagent_view() {
                 if let Some(hit) = app.back_hit {
@@ -544,8 +715,24 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                 // No composer in subagent view — ignore leftover focus clicks.
                 return false;
             }
+            if app.start_assistant_selection(m.col, m.row) {
+                app.blur_input();
+                return true;
+            }
+            let cleared_selection = app.clear_assistant_selection();
             if let Some(idx) = app.expandable_at_row(m.row) {
+                let terminal = app.blocks.get(idx).and_then(|block| match block {
+                    crate::app::state::Block::Terminal(card)
+                        if matches!(card.process, hive_core::TerminalProcessState::Running) =>
+                    {
+                        Some(card.id.clone())
+                    }
+                    _ => None,
+                });
                 app.activate_expandable_at(idx);
+                if let Some(id) = terminal {
+                    let _ = input_tx.send(InputCommand::TerminalAttach { id });
+                }
                 app.blur_input();
                 return true;
             }
@@ -554,14 +741,14 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                     app.focus_input();
                     return true;
                 }
-                return false;
+                return cleared_selection;
             }
             // Empty transcript / chrome / elsewhere → drop composer focus.
             if app.input_focused {
                 app.blur_input();
                 return true;
             }
-            false
+            cleared_selection
         }
         MouseKind::Drag if app.sidebar_resizing => {
             let edge = app.sidebar_right_edge;
@@ -573,13 +760,74 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                 false
             }
         }
+        MouseKind::Drag if app.in_plan_view() && app.plan_view.drag.is_some() => {
+            app.plan_drag_to(m.col, m.row, false)
+        }
+        MouseKind::Drag if app.assistant_selection_active() => {
+            app.update_assistant_selection(m.col, m.row)
+        }
         MouseKind::Up if app.sidebar_resizing => {
             app.sidebar_resizing = false;
             app.ui.sidebar_width = render::clamp_width(app.ui.sidebar_width);
             let _ = input_tx.send(InputCommand::SaveUi(app.ui.clone()));
             true
         }
-        // Motion / other releases must not thrash the redraw loop.
+        MouseKind::Up if app.in_plan_view() && app.plan_view.drag.is_some() => {
+            app.plan_drag_to(m.col, m.row, true)
+        }
+        MouseKind::Up if app.assistant_selection_active() => {
+            if let Some(text) = app.finish_assistant_selection(m.col, m.row) {
+                copy_to_clipboard(&text);
+                app.flash("Copied");
+            }
+            true
+        }
+        MouseKind::Moved => {
+            let mut dirty = false;
+            if app.in_special_view() {
+                dirty |= app.set_hover_block(None);
+                dirty |= app.set_hover_sidebar_item(None);
+                let on_stop = app.in_terminal_view()
+                    && app
+                        .terminal_stop_hit
+                        .is_some_and(|rect| rect.contains(m.col, m.row));
+                let on_make = app
+                    .make_hit
+                    .map(|r| r.contains(m.col, m.row))
+                    .unwrap_or(false);
+                let on_back = !on_make
+                    && !on_stop
+                    && app
+                        .back_hit
+                        .map(|r| r.contains(m.col, m.row))
+                        .unwrap_or(false);
+                dirty |= app.set_hover_make(on_make);
+                dirty |= app.set_hover_back(on_back);
+                dirty |= app.set_hover_terminal_stop(on_stop);
+            } else {
+                dirty |= app.set_hover_back(false);
+                dirty |= app.set_hover_make(false);
+                dirty |= app.set_hover_terminal_stop(false);
+                let sidebar_item = app
+                    .sidebar_item_hits
+                    .iter()
+                    .find(|(hit, _)| hit.contains(m.col, m.row))
+                    .map(|(_, item)| item.clone());
+                dirty |= app.set_hover_sidebar_item(sidebar_item);
+                let card = app.expandable_at_row(m.row).and_then(|i| {
+                    matches!(
+                        app.blocks.get(i),
+                        Some(crate::app::state::Block::Plan(_))
+                            | Some(crate::app::state::Block::Subagent(_))
+                            | Some(crate::app::state::Block::Terminal(_))
+                    )
+                    .then_some(i)
+                });
+                dirty |= app.set_hover_block(card);
+            }
+            dirty
+        }
+        // Other releases must not thrash the redraw loop.
         _ => false,
     }
 }
@@ -598,25 +846,17 @@ fn handle_plan_key(
         _ => {}
     }
 
-    if app.plan_view.amending && app.input_focused {
+    // Composer open: typing goes to the comment (even if idle-blurred).
+    if app.plan_composing() {
         match key.code {
             KeyCode::Enter if !key.mods.shift && !key.mods.alt && !key.mods.ctrl => {
-                let notes = app.input.take();
-                if notes.trim().is_empty() {
-                    return false;
-                }
-                let msg = app.plan_amend_message(notes.trim());
-                app.plan_view.selected.clear();
-                app.plan_view.amending = false;
-                app.blur_input();
-                app.leave_special_view();
-                app.agent_mode = AgentMode::Plan;
-                app.push_user(msg.clone());
-                let _ = input_tx.send(InputCommand::User {
-                    text: msg,
-                    images: Vec::new(),
-                    mode: AgentMode::Plan,
-                });
+                app.plan_commit_note();
+                return false;
+            }
+            KeyCode::Enter if key.mods.shift => {
+                app.focus_input();
+                app.input.newline();
+                app.note_input_activity();
                 return false;
             }
             KeyCode::Esc => {
@@ -624,31 +864,41 @@ fn handle_plan_key(
                     let _ = app.input.take();
                     app.note_input_activity();
                 } else {
-                    app.plan_view.selected.clear();
-                    app.plan_view.amending = false;
-                    app.blur_input();
+                    app.plan_stop_composing();
                 }
                 return false;
             }
             KeyCode::Char(ch) if !ctrl => {
+                app.focus_input();
                 app.input.insert(ch);
                 app.note_input_activity();
                 return false;
             }
             KeyCode::Backspace => {
+                app.focus_input();
                 app.input.backspace();
                 app.note_input_activity();
                 return false;
             }
             KeyCode::Left => {
+                app.focus_input();
                 app.input.left();
                 app.note_input_activity();
+                return false;
             }
             KeyCode::Right => {
+                app.focus_input();
                 app.input.right();
                 app.note_input_activity();
+                return false;
             }
-            _ => {}
+            KeyCode::PageUp => app.scroll_up(5),
+            KeyCode::PageDown => app.scroll_down(5),
+            KeyCode::Up => app.scroll_up(1),
+            KeyCode::Down => app.scroll_down(1),
+            _ => {
+                let _ = interrupt;
+            }
         }
         return false;
     }
@@ -657,14 +907,24 @@ fn handle_plan_key(
         KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
             app.leave_special_view();
         }
-        KeyCode::Char('b') | KeyCode::Char('B') => {
-            start_build_from_plan(app, input_tx);
+        KeyCode::Char('m') | KeyCode::Char('M') if !app.plan_view.has_corrections() => {
+            start_make_from_plan(app, input_tx);
         }
-        KeyCode::Char(' ') => app.plan_toggle_select(),
-        KeyCode::Up => app.plan_cursor_up(),
-        KeyCode::Down => app.plan_cursor_down(),
+        KeyCode::Char('s') | KeyCode::Char('S') if app.plan_view.has_corrections() => {
+            send_plan_corrections(app, input_tx);
+        }
+        KeyCode::Enter
+            if app.plan_view.has_corrections()
+                && !key.mods.shift
+                && !key.mods.alt
+                && !key.mods.ctrl =>
+        {
+            send_plan_corrections(app, input_tx);
+        }
         KeyCode::PageUp => app.scroll_up(5),
         KeyCode::PageDown => app.scroll_down(5),
+        KeyCode::Up => app.scroll_up(1),
+        KeyCode::Down => app.scroll_down(1),
         _ => {
             let _ = interrupt;
         }
@@ -672,8 +932,25 @@ fn handle_plan_key(
     false
 }
 
-fn start_build_from_plan(app: &mut App, input_tx: &UnboundedSender<InputCommand>) {
-    app.agent_mode = AgentMode::Build;
+fn send_plan_corrections(app: &mut App, input_tx: &UnboundedSender<InputCommand>) {
+    if !app.plan_view.has_corrections() {
+        return;
+    }
+    app.plan_sync_active_note();
+    let msg = app.plan_corrections_message();
+    app.plan_clear_corrections();
+    // Stay in PLAN — agent revises the plan; user presses MAKE when ready.
+    app.agent_mode = AgentMode::Plan;
+    app.push_user(msg.clone());
+    let _ = input_tx.send(InputCommand::User {
+        text: msg,
+        images: Vec::new(),
+        mode: AgentMode::Plan,
+    });
+}
+
+fn start_make_from_plan(app: &mut App, input_tx: &UnboundedSender<InputCommand>) {
+    app.agent_mode = AgentMode::Make;
     app.leave_special_view();
     let text =
         "Implement the plan in `.hive/Plan.md`. Follow its sections in order and keep going until the work is done."
@@ -682,22 +959,65 @@ fn start_build_from_plan(app: &mut App, input_tx: &UnboundedSender<InputCommand>
     let _ = input_tx.send(InputCommand::User {
         text,
         images: Vec::new(),
-        mode: AgentMode::Build,
+        mode: AgentMode::Make,
     });
 }
 
-/// Copy the last finished answer to the system clipboard via OSC 52 (works in
-/// most modern terminals). Feedback goes to the footer, not the chat.
+/// Copy the last finished answer to the clipboard. Feedback goes to the footer,
+/// not the chat. The text is cleaned first so the paste has no trailing padding.
 fn copy_last_answer(app: &mut App) {
-    let Some(text) = app.last_answer().map(|s| s.to_string()) else {
+    let Some(text) = app.last_answer().map(clean_for_copy) else {
         app.flash("Nothing to copy");
         return;
     };
+    if text.is_empty() {
+        app.flash("Nothing to copy");
+        return;
+    }
+    copy_to_clipboard(&text);
+    app.flash("Copied");
+}
+
+/// Normalize an answer for copying: drop trailing whitespace on every line and
+/// strip surrounding blank lines, while keeping leading indentation (code
+/// blocks) and interior blank lines (paragraph breaks) intact.
+fn clean_for_copy(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_string()
+}
+
+/// Best-effort copy to the clipboard through two channels so it "just works":
+/// the local OS clipboard (arboard) for a normal Ctrl/Cmd+V, and OSC 52 for
+/// terminals over SSH / inside multiplexers.
+fn copy_to_clipboard(text: &str) {
+    // OSC 52 — understood by most modern terminals and forwarded over SSH/tmux.
     let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut out = io::stdout();
     let _ = write!(out, "\x1b]52;c;{b64}\x07");
     let _ = out.flush();
-    app.flash("Copied");
+
+    // Local OS clipboard. On X11/Wayland the selection is only served while the
+    // owning connection lives, so hold it on a detached thread (`wait`) until
+    // another app takes ownership; elsewhere `set_text` persists immediately.
+    let owned = text.to_string();
+    std::thread::spawn(move || {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            use arboard::SetExtLinux;
+            let _ = clipboard.set().wait().text(owned);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = clipboard.set_text(owned);
+        }
+    });
 }
 
 /// Complete slash command or `@file` mention from the floating menu.
@@ -964,10 +1284,17 @@ fn run_command(
                 app.open_model_picker(input_tx);
             } else {
                 let display = arg.rsplit('/').next().unwrap_or(arg).to_string();
+                let vision = app
+                    .model_choices
+                    .iter()
+                    .find(|m| m.key == arg)
+                    .map(|m| m.vision)
+                    .unwrap_or(false);
                 let _ = input_tx.send(InputCommand::SetModel {
                     id: arg.to_string(),
                     display,
                     connection_id: None,
+                    vision,
                 });
             }
         }
@@ -1150,15 +1477,17 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                         c.key.clone(),
                         c.display.clone(),
                         c.connection_id.clone(),
+                        c.vision,
                     )
                 });
             app.close_palette();
-            if let Some((id, display, connection_id)) = picked {
+            if let Some((id, display, connection_id, vision)) = picked {
                 let connection_id = (!connection_id.is_empty()).then_some(connection_id);
                 let _ = input_tx.send(InputCommand::SetModel {
                     id,
                     display,
                     connection_id,
+                    vision,
                 });
                 app.flash("Switching model…");
             }
@@ -1328,6 +1657,7 @@ mod tests {
                     detail: "default".into(),
                     group: "Test".into(),
                     connection_id: String::new(),
+                    vision: false,
                 },
                 crate::ModelChoice {
                     key: "fast".into(),
@@ -1335,6 +1665,7 @@ mod tests {
                     detail: "fast".into(),
                     group: "Test".into(),
                     connection_id: String::new(),
+                    vision: false,
                 },
             ],
             skills: Vec::new(),
@@ -1444,10 +1775,12 @@ mod tests {
                 id,
                 display,
                 connection_id,
+                vision,
             }) => {
                 assert_eq!(id, "default");
                 assert_eq!(display, "Default");
                 assert!(connection_id.is_none());
+                assert!(!vision);
             }
             other => panic!("expected SetModel, got {other:?}"),
         }
@@ -1482,7 +1815,7 @@ mod tests {
             text: "queued text".into(),
             composer: "queued text".into(),
             attaches: Vec::new(),
-            mode: AgentMode::Build,
+            mode: AgentMode::Make,
         });
         assert!(app.recall_follow_up());
         assert!(!app.has_follow_up());
@@ -1498,7 +1831,7 @@ mod tests {
             text: "now".into(),
             composer: "now".into(),
             attaches: Vec::new(),
-            mode: AgentMode::Build,
+            mode: AgentMode::Make,
         });
         let slot = follow_slot();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1678,21 +2011,208 @@ mod tests {
         assert!(app.about_open());
     }
 
+    fn seed_assistant_mouse_row(app: &mut App) {
+        use crate::app::state::{AssistantRowHit, AssistantRowJoin};
+
+        app.assistant_row_hits = vec![AssistantRowHit {
+            block: 2,
+            response_row: 0,
+            screen_row: 5,
+            x: 2,
+            text: "select this answer".into(),
+            join_before: AssistantRowJoin::Hard,
+        }];
+    }
+
+    #[test]
+    fn assistant_mouse_drag_builds_selection() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 2,
+                row: 5,
+            },
+            &tx
+        ));
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Drag,
+                col: 7,
+                row: 5,
+            },
+            &tx
+        ));
+        let selection = app.assistant_selection.as_ref().expect("selection");
+        assert!(selection.dragged);
+        assert_eq!(selection.block, 2);
+    }
+
+    #[test]
+    fn ordinary_click_clears_previous_assistant_selection() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        assert!(app.start_assistant_selection(2, 5));
+        assert!(app.update_assistant_selection(7, 5));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 40,
+                row: 20,
+            },
+            &tx
+        ));
+        assert!(app.assistant_selection.is_none());
+    }
+
+    #[test]
+    fn assistant_selection_does_not_steal_sidebar_resize() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        app.sidebar_resize_hit = Some(comb::Rect::new(2, 5, 1, 1));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 2,
+                row: 5,
+            },
+            &tx
+        ));
+        assert!(app.sidebar_resizing);
+        assert!(app.assistant_selection.is_none());
+    }
+
+    #[test]
+    fn sidebar_terminal_row_click_opens_terminal_view() {
+        use hive_core::event::AgentEvent;
+        let mut app = test_app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "theme-installer".into(),
+            rows: 12,
+            cols: 40,
+        });
+        app.sidebar_item_hits = vec![(
+            comb::Rect::new(10, 8, 20, 1),
+            render::SidebarItem::Terminal("term-1".into()),
+        )];
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 12,
+                row: 8,
+            },
+            &tx
+        ));
+        assert!(app.in_terminal_view());
+        assert_eq!(app.terminal_view_id(), Some("term-1"));
+    }
+
+    #[test]
+    fn ordinary_click_keeps_assistant_hit_map_available() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        app.input_hit = Some(comb::Rect::new(10, 20, 20, 2));
+        app.focus_input();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(!handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 12,
+                row: 20,
+            },
+            &tx
+        ));
+        assert!(app.start_assistant_selection(2, 5));
+    }
+
+    #[test]
+    fn completed_assistant_selection_ignores_later_mouse_up() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        assert!(app.start_assistant_selection(2, 5));
+        assert!(app.update_assistant_selection(7, 5));
+        assert!(app.finish_assistant_selection(7, 5).is_some());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(!handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Up,
+                col: 7,
+                row: 5,
+            },
+            &tx
+        ));
+    }
+
+    #[test]
+    fn scrolling_keeps_an_active_assistant_drag() {
+        let mut app = test_app();
+        seed_assistant_mouse_row(&mut app);
+        app.set_transcript_max_scroll(10);
+        assert!(app.start_assistant_selection(2, 5));
+        assert!(app.update_assistant_selection(7, 5));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::ScrollUp,
+                col: 2,
+                row: 5,
+            },
+            &tx
+        ));
+        assert!(app.assistant_selection_active());
+        assert_eq!(app.scroll_from_bottom, 3);
+    }
+
     #[test]
     fn paste_inserts_multiline_into_composer() {
         let mut app = test_app();
         app.blur_input();
-        assert!(handle_paste(&mut app, "hello\r\nworld"));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(handle_paste(&mut app, "hello\r\nworld", &tx));
         assert!(app.input_focused);
         assert_eq!(app.input.value, "hello\nworld");
         assert_eq!(app.input.cursor, app.input.value.chars().count());
     }
 
     #[test]
+    fn clean_for_copy_strips_padding_keeps_structure() {
+        // Trailing spaces gone, surrounding blank lines gone, but interior blank
+        // lines and leading indentation (code) preserved.
+        let raw = "\n\nHello world   \n\n    let x = 1;  \n\n";
+        assert_eq!(
+            super::clean_for_copy(raw),
+            "Hello world\n\n    let x = 1;"
+        );
+        assert_eq!(super::clean_for_copy("   \n  \n"), "");
+    }
+
+    #[test]
     fn paste_into_connect_key_strips_whitespace() {
         let mut app = test_app();
         app.palette = Some(crate::app::palette::PaletteState::connect_key(0));
-        assert!(handle_paste(&mut app, " sk-abc \n"));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(handle_paste(&mut app, " sk-abc \n", &tx));
         let q = app.palette.as_ref().unwrap().query.clone();
         assert_eq!(q, "sk-abc");
     }
@@ -1962,5 +2482,332 @@ mod tests {
         assert!(app.in_subagent_view());
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
+    }
+
+    fn terminal_app(
+        controller: hive_core::TerminalController,
+        process: hive_core::TerminalProcessState,
+    ) -> App {
+        let mut app = test_app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "cat".into(),
+            rows: 20,
+            cols: 80,
+        });
+        app.apply(AgentEvent::TerminalState {
+            id: "term-1".into(),
+            controller,
+            process,
+            revision: 1,
+        });
+        app.open_terminal_view("term-1".into());
+        app
+    }
+
+    fn terminal_input(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputCommand>) -> Vec<u8> {
+        match rx.try_recv().expect("terminal input command") {
+            InputCommand::TerminalInput { id, input } => {
+                assert_eq!(id, "term-1");
+                input.into_bytes()
+            }
+            other => panic!("expected private terminal input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_close_bracket_detaches_without_stopping() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char(']')),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        ));
+        assert!(!app.in_terminal_view());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::TerminalDetach { id }) if id == "term-1"
+        ));
+        assert!(rx.try_recv().is_err(), "detach must not stop the process");
+    }
+
+    #[test]
+    fn ctrl_close_bracket_hands_back_user_owned_exited_session() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Exited { code: 0 },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        handle_key(
+            &mut app,
+            ctrl(KeyCode::Char(']')),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::TerminalDetach { id }) if id == "term-1"
+        ));
+        assert!(!app.in_terminal_view());
+    }
+
+    #[test]
+    fn escape_and_ctrl_c_go_to_pty_not_hive() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Esc),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        ));
+        assert_eq!(terminal_input(&mut rx), b"\x1b");
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('c')),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        ));
+        assert_eq!(terminal_input(&mut rx), b"\x03");
+        assert!(!interrupt.load(Ordering::Relaxed));
+        assert!(app.in_terminal_view());
+    }
+
+    #[test]
+    fn paste_goes_to_pty_only_under_user_control() {
+        let mut user = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        user.apply(AgentEvent::TerminalOutput {
+            id: "term-1".into(),
+            frame: hive_core::TerminalOutputFrame::from_bytes(
+                20,
+                80,
+                10_000,
+                b"\x1b[?2004h",
+                2,
+            ),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(handle_paste(&mut user, "secret", &tx));
+        assert_eq!(
+            terminal_input(&mut rx),
+            b"\x1b[200~secret\x1b[201~"
+        );
+
+        let mut attaching = terminal_app(
+            hive_core::TerminalController::Agent,
+            hive_core::TerminalProcessState::Running,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!handle_paste(&mut attaching, "blocked", &tx));
+        assert!(rx.try_recv().is_err());
+        assert!(attaching.input.is_empty());
+    }
+
+    #[test]
+    fn attaching_and_read_only_views_swallow_process_input() {
+        for mut app in [
+            terminal_app(
+                hive_core::TerminalController::Agent,
+                hive_core::TerminalProcessState::Running,
+            ),
+            terminal_app(
+                hive_core::TerminalController::Agent,
+                hive_core::TerminalProcessState::Exited { code: 0 },
+            ),
+        ] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let interrupt = Arc::new(AtomicBool::new(false));
+            assert!(!handle_key(
+                &mut app,
+                key(KeyCode::Char('x')),
+                &tx,
+                &interrupt,
+                &follow_slot(),
+            ));
+            assert!(rx.try_recv().is_err());
+            assert!(app.input.is_empty());
+        }
+    }
+
+    #[test]
+    fn mouse_back_detaches_and_stop_hit_stops() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        app.back_hit = Some(comb::Rect::new(0, 20, 72, 3));
+        app.terminal_stop_hit = Some(comb::Rect::new(72, 20, 8, 3));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 75,
+                row: 21,
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::TerminalStop { id }) if id == "term-1"
+        ));
+        assert!(app.in_terminal_view());
+
+        assert!(handle_mouse(
+            &mut app,
+            Mouse {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: 2,
+                row: 21,
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::TerminalDetach { id }) if id == "term-1"
+        ));
+        assert!(!app.in_terminal_view());
+    }
+
+    #[test]
+    fn terminal_resize_uses_body_dimensions_and_is_deduplicated() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        let size = comb::Size::new(100, 30);
+        let _ = comb::render(size, |frame| crate::render::draw(frame, &mut app));
+        let body = app.terminal_view.body_rect.unwrap();
+        let first = app.take_pending_terminal_resize().unwrap();
+        assert_eq!(first, ("term-1".into(), body.height, body.width));
+        assert!(body.height > 0 && body.width > 0);
+
+        let _ = comb::render(size, |frame| crate::render::draw(frame, &mut app));
+        assert!(app.take_pending_terminal_resize().is_none());
+    }
+
+    #[test]
+    fn agent_controlled_terminal_view_does_not_resize_pty() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::Agent,
+            hive_core::TerminalProcessState::Running,
+        );
+        let size = comb::Size::new(100, 30);
+        let _ = comb::render(size, |frame| crate::render::draw(frame, &mut app));
+        assert!(app.take_pending_terminal_resize().is_none());
+    }
+
+    #[test]
+    fn shift_page_scrolls_history_but_plain_page_reaches_child() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        app.apply(AgentEvent::TerminalOutput {
+            id: "term-1".into(),
+            frame: hive_core::TerminalOutputFrame::from_bytes(
+                20,
+                80,
+                10_000,
+                &(0..100)
+                .map(|line| format!("line {line}\r\n"))
+                .collect::<String>()
+                .into_bytes(),
+                2,
+            ),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let shift_page_up = Key {
+            code: KeyCode::PageUp,
+            mods: KeyMods::SHIFT,
+        };
+        assert!(!handle_key(
+            &mut app,
+            shift_page_up,
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        ));
+        assert!(app.terminal_view.scrollback > 0);
+        assert!(rx.try_recv().is_err());
+
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::PageUp),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        ));
+        assert_eq!(terminal_input(&mut rx), b"\x1b[5~");
+    }
+
+    #[test]
+    fn direct_terminal_input_never_changes_composer_or_user_blocks() {
+        let mut app = terminal_app(
+            hive_core::TerminalController::User,
+            hive_core::TerminalProcessState::Running,
+        );
+        app.input.insert_str("draft");
+        let user_blocks = app
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, crate::app::state::Block::User(_)))
+            .count();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        handle_key(
+            &mut app,
+            key(KeyCode::Char('x')),
+            &tx,
+            &interrupt,
+            &follow_slot(),
+        );
+        handle_paste(&mut app, "secret", &tx);
+
+        assert_eq!(app.input.value, "draft");
+        assert_eq!(
+            app.blocks
+                .iter()
+                .filter(|block| matches!(block, crate::app::state::Block::User(_)))
+                .count(),
+            user_blocks
+        );
+    }
+
+    #[test]
+    fn event_drain_is_bounded_so_terminal_input_stays_responsive() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for index in 0..300 {
+            tx.send(AgentEvent::Notice(format!("event {index}"))).unwrap();
+        }
+        let (input_tx, _input_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(drain_events(&mut app, &mut rx, &input_tx));
+        assert!(
+            rx.try_recv().is_ok(),
+            "one UI iteration drained an unbounded event stream"
+        );
     }
 }

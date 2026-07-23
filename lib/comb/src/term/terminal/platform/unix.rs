@@ -78,12 +78,12 @@ pub fn query_size() -> Size {
 }
 
 pub fn take_resize(last: Size) -> Option<(u16, u16)> {
-    let winched = WINCHED.swap(false, Ordering::Relaxed);
+    // Consume the SIGWINCH flag so it doesn't linger; the decision is based on
+    // the actual queried size, not the flag.
+    WINCHED.swap(false, Ordering::Relaxed);
     let now = query_size();
     if now.width > 0 && now != last {
         Some((now.width, now.height))
-    } else if winched {
-        None
     } else {
         None
     }

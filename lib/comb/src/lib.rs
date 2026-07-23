@@ -38,8 +38,8 @@ pub use crate::widgets::{
     ScrollView, Scrollbar, ScrollbarStyle, Tabs, TextInput, Toasts, Window,
 };
 
-pub use crate::core::buffer::{Buffer, Cell};
-pub use crate::core::geom::{Pos, Rect, Size};
+pub use crate::core::buffer::{center_pad, chip_cols, label_cols, Buffer, Cell};
+pub use crate::core::geom::{Align, Pos, Rect, Size};
 pub use crate::core::style::{Color, Modifier, Style};
 pub use crate::core::text::{Line, Span};
 pub use crate::draw::border::Border;

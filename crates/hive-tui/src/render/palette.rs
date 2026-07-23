@@ -286,7 +286,7 @@ fn draw_command_list(
                 let line = Line::from(Span::styled(
                     cat.label().to_string(),
                     Style::default()
-                        .fg(theme.build)
+                        .fg(theme.fg)
                         .bg(panel)
                         .add(Modifier::BOLD),
                 ));
@@ -406,7 +406,7 @@ fn draw_model_list(
                 let line = Line::from(Span::styled(
                     (*label).to_string(),
                     Style::default()
-                        .fg(theme.build)
+                        .fg(theme.fg)
                         .bg(panel)
                         .add(Modifier::BOLD),
                 ));
@@ -600,7 +600,7 @@ mod tests {
     }
 
     fn panel_bg() -> Color {
-        Color::Rgb(0x32, 0x32, 0x32)
+        Color::Rgb(0x26, 0x26, 0x26)
     }
 
     #[test]

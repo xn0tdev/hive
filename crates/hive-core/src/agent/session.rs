@@ -48,7 +48,7 @@ impl Session {
         }
     }
 
-    /// Replace the pinned system prompt (e.g. when BUILD/PLAN mode changes).
+    /// Replace the pinned system prompt (e.g. when MAKE/PLAN mode changes).
     pub fn set_system(&mut self, system: impl Into<String>) {
         let system = system.into();
         self.system = system.clone();
