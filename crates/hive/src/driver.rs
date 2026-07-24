@@ -71,6 +71,8 @@ pub async fn run(
                 display,
                 connection_id,
                 vision,
+                cost_input,
+                cost_output,
             } => {
                 if let Some(cid) = connection_id.as_deref().filter(|c| !c.is_empty()) {
                     if cid != cfg.connections.active {
@@ -89,6 +91,8 @@ pub async fn run(
                 let _ = events.send(AgentEvent::ModelChanged {
                     id: id.clone(),
                     display: display.clone(),
+                    cost_input,
+                    cost_output,
                 });
                 let _ = events.send(AgentEvent::Notice(format!("Model set to {display}")));
             }
@@ -295,6 +299,8 @@ async fn apply_connection(
     let _ = events.send(AgentEvent::ModelChanged {
         id: model_id,
         display: model_display.clone(),
+        cost_input: 0.0,
+        cost_output: 0.0,
     });
     let label = cfg
         .connections
@@ -425,6 +431,8 @@ fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<Ca
             group: group.to_string(),
             connection_id: connection_id.to_string(),
             vision: c.vision,
+            cost_input: c.cost_input,
+            cost_output: c.cost_output,
         })
         .collect()
 }

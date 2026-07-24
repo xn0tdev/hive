@@ -202,6 +202,10 @@ pub struct App {
     pub(crate) context_tokens: u64,
     /// Configured context window size.
     pub(crate) context_window: u64,
+    /// USD per 1M input tokens for the active model.
+    pub(crate) cost_input: f64,
+    /// USD per 1M output tokens for the active model.
+    pub(crate) cost_output: f64,
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
@@ -344,6 +348,8 @@ impl App {
             usage: Usage::default(),
             context_tokens: 0,
             context_window: init.context_window.max(1),
+            cost_input: init.cost_input,
+            cost_output: init.cost_output,
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
@@ -2007,9 +2013,11 @@ Keep everything else unless a note says otherwise.\n",
                 self.flash(message);
                 true
             }
-            AgentEvent::ModelChanged { id, display } => {
+            AgentEvent::ModelChanged { id, display, cost_input, cost_output } => {
                 self.model = id;
                 self.model_display = display;
+                self.cost_input = cost_input;
+                self.cost_output = cost_output;
                 true
             }
             AgentEvent::ModelsListed { models } => {
@@ -2022,6 +2030,8 @@ Keep everything else unless a note says otherwise.\n",
                         group: m.group,
                         connection_id: m.connection_id,
                         vision: m.vision,
+                        cost_input: m.cost_input,
+                        cost_output: m.cost_output,
                     })
                     .collect();
                 self.models_catalog = ModelsCatalogState::Ready;
@@ -2702,6 +2712,8 @@ mod tests {
             version: "0.1.0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 

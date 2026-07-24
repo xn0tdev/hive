@@ -151,6 +151,8 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         group: "Configured".into(),
         connection_id: cfg.connections.active.clone(),
         vision: false,
+        cost_input: 0.0,
+        cost_output: 0.0,
     }];
 
     let tui_init = TuiInit {
@@ -165,6 +167,8 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         ui: cfg.ui.clone(),
         context_window: cfg.agent.context_window,
+        cost_input: 0.0,
+        cost_output: 0.0,
     };
 
     install_panic_hook();

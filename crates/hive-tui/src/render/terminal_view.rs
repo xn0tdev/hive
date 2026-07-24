@@ -209,6 +209,8 @@ mod tests {
             version: "test".into(),
             ui: UiConfig::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 

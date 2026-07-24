@@ -1284,17 +1284,19 @@ fn run_command(
                 app.open_model_picker(input_tx);
             } else {
                 let display = arg.rsplit('/').next().unwrap_or(arg).to_string();
-                let vision = app
+                let (vision, cost_input, cost_output) = app
                     .model_choices
                     .iter()
                     .find(|m| m.key == arg)
-                    .map(|m| m.vision)
-                    .unwrap_or(false);
+                    .map(|m| (m.vision, m.cost_input, m.cost_output))
+                    .unwrap_or((false, 0.0, 0.0));
                 let _ = input_tx.send(InputCommand::SetModel {
                     id: arg.to_string(),
                     display,
                     connection_id: None,
                     vision,
+                    cost_input,
+                    cost_output,
                 });
             }
         }
@@ -1478,16 +1480,20 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                         c.display.clone(),
                         c.connection_id.clone(),
                         c.vision,
+                        c.cost_input,
+                        c.cost_output,
                     )
                 });
             app.close_palette();
-            if let Some((id, display, connection_id, vision)) = picked {
+            if let Some((id, display, connection_id, vision, cost_input, cost_output)) = picked {
                 let connection_id = (!connection_id.is_empty()).then_some(connection_id);
                 let _ = input_tx.send(InputCommand::SetModel {
                     id,
                     display,
                     connection_id,
                     vision,
+                    cost_input,
+                    cost_output,
                 });
                 app.flash("Switching model…");
             }
@@ -1658,6 +1664,8 @@ mod tests {
                     group: "Test".into(),
                     connection_id: String::new(),
                     vision: false,
+                    cost_input: 0.0,
+                    cost_output: 0.0,
                 },
                 crate::ModelChoice {
                     key: "fast".into(),
@@ -1666,6 +1674,8 @@ mod tests {
                     group: "Test".into(),
                     connection_id: String::new(),
                     vision: false,
+                    cost_input: 0.0,
+                    cost_output: 0.0,
                 },
             ],
             skills: Vec::new(),
@@ -1676,6 +1686,8 @@ mod tests {
             version: "0.1.0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 
@@ -1776,6 +1788,8 @@ mod tests {
                 display,
                 connection_id,
                 vision,
+                cost_input: _,
+                cost_output: _,
             }) => {
                 assert_eq!(id, "default");
                 assert_eq!(display, "Default");
@@ -2240,6 +2254,8 @@ mod tests {
             version: "0.1.0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         });
         app.input.value = "look @hel".into();
         app.input.cursor = app.input.value.chars().count();

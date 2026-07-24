@@ -342,14 +342,21 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     ));
     // Session spend (footer shows context fill instead).
     let session = format_session_tokens(app.usage.total_tokens);
-    lines.push((
+    let cost = session_cost(app);
+    let session_line = if cost.is_empty() {
         Line::from(vec![
             Span::styled("· ", Style::default().fg(theme.faint)),
             Span::styled(session, Style::default().fg(theme.dim)),
-        ]),
-        None,
-        None,
-    ));
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("· ", Style::default().fg(theme.faint)),
+            Span::styled(session, Style::default().fg(theme.dim)),
+            Span::styled(" ", Style::default().fg(theme.faint)),
+            Span::styled(cost, Style::default().fg(theme.dim)),
+        ])
+    };
+    lines.push((session_line, None, None));
 
     let collapsible = app.ui.sidebar_collapse_sections;
 
@@ -648,6 +655,20 @@ fn format_session_tokens(n: u64) -> String {
     }
 }
 
+fn session_cost(app: &crate::app::App) -> String {
+    if app.cost_input == 0.0 && app.cost_output == 0.0 {
+        return String::new();
+    }
+    let input_cost = app.usage.prompt_tokens as f64 * app.cost_input / 1_000_000.0;
+    let output_cost = app.usage.completion_tokens as f64 * app.cost_output / 1_000_000.0;
+    let total = input_cost + output_cost;
+    if total < 0.01 {
+        format!("${:.4}", total)
+    } else {
+        format!("${:.2}", total)
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -688,6 +709,8 @@ mod tests {
             version: "0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 

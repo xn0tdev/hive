@@ -734,6 +734,8 @@ mod tests {
             version: "0.1.0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 

@@ -24,11 +24,11 @@ const WORKING_GLYPH_THRESHOLD: f32 = 0.45;
 /// Gap between the cubes and the mode chip (columns).
 const WORKING_CHIP_GAP: u16 = 1;
 
-/// `model · context` as a single line (no activity chrome).
+/// `model · context · $cost` as a single line (no activity chrome).
 /// Session spend lives in the project sidebar.
 pub fn model_line(app: &crate::app::App) -> Line {
     let theme = &app.theme;
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(app.model_display.clone(), Style::default().fg(theme.dim)),
         Span::styled(" · ", Style::default().fg(theme.faint)),
         Span::styled(
@@ -36,6 +36,11 @@ pub fn model_line(app: &crate::app::App) -> Line {
             Style::default().fg(theme.faint),
         ),
     ];
+    let cost = session_cost(app);
+    if !cost.is_empty() {
+        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
+        spans.push(Span::styled(cost, Style::default().fg(theme.faint)));
+    }
     Line::from(spans)
 }
 
@@ -160,6 +165,22 @@ fn format_context(used: u64, window: u64) -> String {
     format!("{} / {}", short_tokens(used), short_tokens(window))
 }
 
+/// Session cost in USD based on cumulative token usage and model pricing.
+/// Returns empty string when pricing is unknown (0 for both rates).
+fn session_cost(app: &crate::app::App) -> String {
+    if app.cost_input == 0.0 && app.cost_output == 0.0 {
+        return String::new();
+    }
+    let input_cost = app.usage.prompt_tokens as f64 * app.cost_input / 1_000_000.0;
+    let output_cost = app.usage.completion_tokens as f64 * app.cost_output / 1_000_000.0;
+    let total = input_cost + output_cost;
+    if total < 0.01 {
+        format!("${:.4}", total)
+    } else {
+        format!("${:.2}", total)
+    }
+}
+
 fn short_tokens(n: u64) -> String {
     if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
@@ -199,6 +220,8 @@ mod tests {
             version: "0.1.0".into(),
             ui: Default::default(),
             context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 

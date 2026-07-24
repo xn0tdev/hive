@@ -32,6 +32,10 @@ pub struct ModelChoice {
     pub connection_id: String,
     /// Catalog says this model accepts image inputs.
     pub vision: bool,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 /// A skill exposed in the `/` composer menu (`/skill-name`).
@@ -66,6 +70,10 @@ pub struct TuiInit {
     pub ui: UiConfig,
     /// Model context window size (`[agent].context_window`).
     pub context_window: u64,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 pub struct PrivateTerminalInput(Vec<u8>);
@@ -120,6 +128,10 @@ pub enum InputCommand {
         connection_id: Option<String>,
         /// Whether the model accepts image inputs (from the live catalog).
         vision: bool,
+        /// USD per 1M input tokens (0 if unknown).
+        cost_input: f64,
+        /// USD per 1M output tokens (0 if unknown).
+        cost_output: f64,
     },
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,

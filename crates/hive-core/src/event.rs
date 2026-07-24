@@ -130,6 +130,10 @@ pub enum AgentEvent {
         id: String,
         /// Pretty label for the TUI.
         display: String,
+        /// USD per 1M input tokens (0 if unknown).
+        cost_input: f64,
+        /// USD per 1M output tokens (0 if unknown).
+        cost_output: f64,
     },
     /// Live `/models` catalog for the Switch-model picker.
     ModelsListed {
@@ -163,6 +167,10 @@ pub struct CatalogModel {
     pub connection_id: String,
     /// True when the catalog says this model accepts image inputs.
     pub vision: bool,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 /// One saved provider in the `/connect` picker.

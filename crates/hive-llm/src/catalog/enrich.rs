@@ -14,6 +14,10 @@ pub struct ModelCard {
     pub context: u64,
     /// True when models.dev had a hit (otherwise capability flags are unknown/false).
     pub enriched: bool,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 impl ModelCard {
@@ -80,6 +84,8 @@ pub fn enrich_models(
                     tools: m.tool_call,
                     context: m.context,
                     enriched: true,
+                    cost_input: m.cost_input,
+                    cost_output: m.cost_output,
                 },
                 None => ModelCard {
                     id: r.id.clone(),
@@ -91,6 +97,8 @@ pub fn enrich_models(
                     tools: false,
                     context: 0,
                     enriched: false,
+                    cost_input: 0.0,
+                    cost_output: 0.0,
                 },
             }
         })
