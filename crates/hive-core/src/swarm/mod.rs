@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::event::{AgentEvent, EventSender, SubagentLine, SubagentStatus};
 use crate::spawner::{noop_spawner, SubagentOutcome, SubagentSpawner, SubagentTask};
+use crate::worktree;
 
 use crate::agent::AgentBuilder;
 
@@ -86,13 +87,53 @@ impl Inner {
         });
 
         let model = self.builder.config.model(task.model_role).to_string();
+        let main_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let worktree_meta = if task.isolate_worktree {
+            match worktree::create(&main_cwd, &id) {
+                Ok((path, branch)) => Some((path, branch)),
+                Err(e) => {
+                    let _ = self.events.send(AgentEvent::SubagentStatus {
+                        id: id.clone(),
+                        status: SubagentStatus::Failed,
+                        detail: "worktree failed".into(),
+                    });
+                    let _ = forward.await;
+                    return SubagentOutcome {
+                        id,
+                        result: Err(e),
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        let child_cwd = worktree_meta
+            .as_ref()
+            .map(|(p, _)| p.clone())
+            .or(task.cwd.clone())
+            .unwrap_or_else(|| main_cwd.clone());
+
         let result = {
-            let mut agent = self.builder.build(tx, model, task.depth, child_spawner);
+            let mut agent =
+                self.builder
+                    .build_in(tx, model, task.depth, child_spawner, child_cwd.clone());
             agent.run_headless(task.prompt).await
         }; // agent (and its event sender) dropped → forwarder exits
         let _ = forward.await;
 
-        let ok = !result.trim().is_empty();
+        let mut report = result;
+        if let Some((ref wt, ref branch)) = worktree_meta {
+            let summary = worktree::summarize(wt);
+            report = format!(
+                "{report}\n\n---\nworktree: {}\nbranch: `{branch}`\nid: `{id}`\n\n{summary}\n\n\
+Use `integrate_worktree` with id `{id}` to merge this branch into the main checkout.",
+                wt.display()
+            );
+        }
+
+        let ok = !report.trim().is_empty();
         let _ = self.events.send(AgentEvent::SubagentStatus {
             id: id.clone(),
             status: if ok {
@@ -106,7 +147,7 @@ impl Inner {
 
         SubagentOutcome {
             id,
-            result: Ok(result),
+            result: Ok(report),
         }
     }
 }

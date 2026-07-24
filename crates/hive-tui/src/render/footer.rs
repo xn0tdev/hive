@@ -1,13 +1,13 @@
-//! Footer content: `model · tokens` and the working directory. Exposed as
+//! Footer content: `model · context` and the working directory. Exposed as
 //! reusable lines so both the bottom bar and the centered landing can use them.
-//! BUILD/PLAN chip sits on the model row (right), under the input strip.
+//! MAKE/PLAN chip sits on the model row (right), under the input strip.
 //! While a turn is running, a compact 5-cube ping-pong wave sits just left of
 //! the mode chip (or flush-right when there is no chip) — not next to the model.
 
 use comb::{Buffer, Color, Frame, Line, Rect, Span, Style};
 use hive_core::AgentMode;
 
-use crate::render::input_box;
+use crate::render::input_bars;
 
 /// How many cubes in the working indicator.
 const WORKING_BLOCKS: usize = 5;
@@ -24,28 +24,22 @@ const WORKING_GLYPH_THRESHOLD: f32 = 0.45;
 /// Gap between the cubes and the mode chip (columns).
 const WORKING_CHIP_GAP: u16 = 1;
 
-/// `model · tokens · attachments` as a single line (no activity chrome).
+/// `model · context · $cost` as a single line (no activity chrome).
+/// Session spend lives in the project sidebar.
 pub fn model_line(app: &crate::app::App) -> Line {
     let theme = &app.theme;
-    let mut spans = Vec::new();
-
-    spans.push(Span::styled(
-        app.model_display.clone(),
-        Style::default().fg(theme.dim),
-    ));
-    if app.usage.total_tokens > 0 {
-        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(
-            format_tokens(app.usage.total_tokens),
+    let mut spans = vec![
+        Span::styled(app.model_display.clone(), Style::default().fg(theme.dim)),
+        Span::styled(" · ", Style::default().fg(theme.faint)),
+        Span::styled(
+            format_context(app.context_tokens, app.context_window),
             Style::default().fg(theme.faint),
-        ));
-    }
-    if app.has_pending_attaches() {
+        ),
+    ];
+    let cost = session_cost(app);
+    if !cost.is_empty() {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(
-            app.attachment_tags_line(),
-            Style::default().fg(theme.warn),
-        ));
+        spans.push(Span::styled(cost, Style::default().fg(theme.faint)));
     }
     Line::from(spans)
 }
@@ -67,7 +61,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &crate::app::App) {
     buf.set_line(area.x, area.y + 1, &cwd_line(app), area.width);
 }
 
-/// Model + cwd under the input; BUILD/PLAN on the model row (right).
+/// Model + cwd under the input; MAKE/PLAN on the model row (right).
 /// Working cubes sit just left of the chip. Toasts are drawn separately
 /// (centered), so they never replace the chip.
 pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
@@ -84,7 +78,7 @@ pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
         app,
         chip_w,
     );
-    input_box::draw_mode_chip(f, Rect::new(area.x, area.y, area.width, 1), app);
+    input_bars::draw_mode_chip(f, Rect::new(area.x, area.y, area.width, 1), app);
     f.buffer()
         .set_line(area.x, area.y + 1, &cwd_line(app), area.width);
 }
@@ -107,7 +101,8 @@ fn draw_working(buf: &mut Buffer, area: Rect, app: &crate::app::App, chip_w: u16
 fn mode_chip_width(app: &crate::app::App) -> u16 {
     let label = match app.agent_mode {
         AgentMode::Plan => " PLAN ",
-        AgentMode::Build => " BUILD ",
+        AgentMode::Make => " MAKE ",
+        AgentMode::Multitask => " MULTITASK ",
     };
     label.chars().count() as u16
 }
@@ -164,19 +159,43 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-fn format_tokens(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k tokens", n as f64 / 1000.0)
+/// `used / window` for the context meter in the footer.
+fn format_context(used: u64, window: u64) -> String {
+    let window = window.max(1);
+    format!("{} / {}", short_tokens(used), short_tokens(window))
+}
+
+/// Session cost in USD based on cumulative token usage and model pricing.
+/// Returns empty string when pricing is unknown (0 for both rates).
+fn session_cost(app: &crate::app::App) -> String {
+    if app.cost_input == 0.0 && app.cost_output == 0.0 {
+        return String::new();
+    }
+    let input_cost = app.usage.prompt_tokens as f64 * app.cost_input / 1_000_000.0;
+    let output_cost = app.usage.completion_tokens as f64 * app.cost_output / 1_000_000.0;
+    let total = input_cost + output_cost;
+    if total < 0.01 {
+        format!("${:.4}", total)
     } else {
-        format!("{n} tokens")
+        format!("${:.2}", total)
+    }
+}
+
+fn short_tokens(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
     }
 }
 
 fn tilde(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()));
+    match home {
+        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
         _ => path.to_string(),
     }
 }
@@ -193,12 +212,16 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 
@@ -324,13 +347,13 @@ mod tests {
     fn model_line_stays_clean_when_idle_or_running() {
         let mut a = app();
         let idle = line_text(&model_line(&a));
-        assert_eq!(idle, "Kimi 2.6", "{idle}");
+        assert_eq!(idle, "Kimi 2.6 · 0 / 128.0k", "{idle}");
         assert_eq!(working_glyph_count(&idle), 0, "{idle}");
 
         a.apply(AgentEvent::TurnStarted);
         a.spinner = 4;
         let running = line_text(&model_line(&a));
-        assert_eq!(running, "Kimi 2.6", "{running}");
+        assert_eq!(running, "Kimi 2.6 · 0 / 128.0k", "{running}");
         assert!(!running.contains("Working"), "{running}");
         assert_eq!(working_glyph_count(&running), 0, "{running}");
     }
@@ -348,13 +371,13 @@ mod tests {
         let text = buf.text();
         assert!(!text.contains("Working"), "{text}");
         assert!(text.contains("Kimi 2.6"), "{text}");
-        assert!(text.contains("BUILD"), "{text}");
+        assert!(text.contains("MAKE"), "{text}");
         assert_eq!(working_glyph_count(&text), WORKING_BLOCKS, "{text}");
 
         // Cubes sit on the model row between the model name and the chip.
         let model_row = text
             .lines()
-            .find(|l| l.contains("Kimi 2.6") && l.contains("BUILD"))
+            .find(|l| l.contains("Kimi 2.6") && l.contains("MAKE"))
             .unwrap_or("");
         let model_i = model_row.find("Kimi 2.6").unwrap();
         let cube_i = model_row
@@ -362,9 +385,9 @@ mod tests {
             .find(|(_, c)| *c == WORKING_GLYPH_LIT || *c == WORKING_GLYPH_DIM)
             .map(|(i, _)| i)
             .expect("cubes on model row");
-        let build_i = model_row.find("BUILD").unwrap();
+        let make_i = model_row.find("MAKE").unwrap();
         assert!(model_i < cube_i, "model left of cubes: {model_row:?}");
-        assert!(cube_i < build_i, "cubes left of chip: {model_row:?}");
+        assert!(cube_i < make_i, "cubes left of chip: {model_row:?}");
         let cubes: String = model_row[cube_i..].chars().take(WORKING_BLOCKS).collect();
         assert!(
             cubes

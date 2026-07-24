@@ -1,9 +1,8 @@
 //! Plain data types describing what's currently on screen.
 
-use std::collections::HashSet;
-
 use hive_core::event::{SubagentLine, SubagentStatus};
 use hive_core::provider::Usage;
+use hive_core::{AgentMode, TerminalController, TerminalProcessState};
 
 /// Which conversation the transcript is showing.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -12,8 +11,10 @@ pub enum ChatView {
     Main,
     /// Read-only view of a subagent's thread (by card id).
     Subagent(String),
-    /// Markdown preview of `.hive/Plan.md` with section select / amend / Build.
+    /// Plan.md preview with text-highlight corrections / Make.
     Plan,
+    /// Interactive or read-only persistent terminal session.
+    Terminal(String),
 }
 
 /// Status of the Plan.md transcript card.
@@ -47,6 +48,52 @@ impl ToolCard {
             Some(ms) => ms as f64 / 1000.0,
             None => self.started.elapsed().as_millis() as f64 / 1000.0,
         }
+    }
+}
+
+pub struct TerminalCard {
+    pub id: String,
+    pub command: String,
+    pub controller: TerminalController,
+    pub process: TerminalProcessState,
+    pub revision: u64,
+    pub screen: vt100::Screen,
+    pub started: std::time::Instant,
+    pub elapsed_ms: Option<u128>,
+}
+
+impl TerminalCard {
+    pub fn preview(&self) -> String {
+        let contents = self.screen.contents();
+        let mut lines = contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>();
+        lines.reverse();
+        lines.join(" · ")
+    }
+
+    pub fn secs(&self) -> f64 {
+        match self.elapsed_ms {
+            Some(ms) => ms as f64 / 1000.0,
+            None => self.started.elapsed().as_millis() as f64 / 1000.0,
+        }
+    }
+
+    pub fn status_text(&self) -> String {
+        let controller = match self.controller {
+            TerminalController::Agent => "AGENT",
+            TerminalController::User => "USER",
+        };
+        let process = match &self.process {
+            TerminalProcessState::Running => "running".to_string(),
+            TerminalProcessState::Exited { code } => format!("exited {code}"),
+            TerminalProcessState::Failed { message } => format!("failed: {message}"),
+        };
+        format!("{controller} · {process}")
     }
 }
 
@@ -137,9 +184,13 @@ pub struct PlanCard {
     pub status: PlanStatus,
     pub started: std::time::Instant,
     pub elapsed_ms: Option<u128>,
+    /// True once the plan has been rewritten over an existing body — drives the
+    /// `UPDATED` corner badge on the card so a revision is visible at a glance.
+    pub revised: bool,
 }
 
 impl PlanCard {
+    #[allow(dead_code)] // tracked for writing state; card UI no longer shows duration
     pub fn secs(&self) -> f64 {
         match self.elapsed_ms {
             Some(ms) => ms as f64 / 1000.0,
@@ -148,27 +199,141 @@ impl PlanCard {
     }
 }
 
-/// A selectable region inside the plan preview (heading or top-level list item).
+/// How a rendered assistant row connects to the preceding row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssistantRowJoin {
+    /// A real source/Markdown line boundary.
+    Hard,
+    /// A soft wrap that removed whitespace.
+    SoftSpace,
+    /// A soft wrap inside one unbroken token.
+    SoftNone,
+}
+
+/// One rendered row of a completed assistant response, including offscreen rows.
 #[derive(Clone, Debug)]
-pub struct PlanSection {
-    /// Display title for amend prompts.
-    pub title: String,
-    /// Inclusive start line index in the plan body (0-based).
-    #[allow(dead_code)]
-    pub start_line: usize,
-    /// Exclusive end line index.
-    #[allow(dead_code)]
-    pub end_line: usize,
+pub struct AssistantResponseRow {
+    pub line_idx: usize,
+    pub block: usize,
+    pub response_row: usize,
+    pub text: String,
+    pub join_before: AssistantRowJoin,
+}
+
+/// One visible, selectable row of a completed assistant response.
+#[derive(Clone, Debug)]
+pub struct AssistantRowHit {
+    pub block: usize,
+    pub response_row: usize,
+    pub screen_row: u16,
+    /// First screen column of response content (the outer gutter is excluded).
+    pub x: u16,
+    pub text: String,
+    pub join_before: AssistantRowJoin,
+}
+
+/// A display-cell position inside one rendered assistant response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AssistantPoint {
+    pub row: usize,
+    pub col: usize,
+}
+
+/// In-progress mouse selection inside one assistant response.
+#[derive(Clone, Debug)]
+pub struct AssistantSelection {
+    pub block: usize,
+    pub anchor: AssistantPoint,
+    pub current: AssistantPoint,
+    pub dragged: bool,
+    /// True only between left-button down and the first matching mouse-up.
+    pub active: bool,
+}
+
+/// One text-highlight correction on the plan body.
+#[derive(Clone, Debug)]
+pub struct PlanCorrection {
+    /// Inclusive UTF-8 byte start in `Plan.md` body.
+    pub start: usize,
+    /// Exclusive UTF-8 byte end.
+    pub end: usize,
+    pub excerpt: String,
+    pub note: String,
+}
+
+/// In-progress mouse drag selection over the plan body.
+#[derive(Clone, Debug)]
+pub struct PlanDrag {
+    pub anchor: usize,
+    pub current: usize,
 }
 
 /// Selection / navigation state while `ChatView::Plan` is open.
 #[derive(Clone, Default)]
 pub struct PlanViewState {
-    pub sections: Vec<PlanSection>,
-    pub cursor: usize,
-    pub selected: HashSet<usize>,
-    /// When true, the bottom strip is an amend composer (not back/Build).
-    pub amending: bool,
+    pub corrections: Vec<PlanCorrection>,
+    /// Correction whose note is loaded in the composer.
+    pub active: Option<usize>,
+    pub drag: Option<PlanDrag>,
+    /// First transcript line index of the plan body (after header). Rebuilt each draw.
+    pub body_line0: usize,
+    /// Per body display-row source spans. Rebuilt each draw.
+    pub row_spans: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViewPhase {
+    Attaching,
+    UserControl,
+    ReadOnly,
+    Failed,
+}
+
+pub struct TerminalViewState {
+    pub phase: TerminalViewPhase,
+    pub body_rect: Option<comb::Rect>,
+    pub scrollback: usize,
+    pub last_size: Option<(u16, u16)>,
+}
+
+impl Default for TerminalViewState {
+    fn default() -> Self {
+        Self {
+            phase: TerminalViewPhase::Attaching,
+            body_rect: None,
+            scrollback: 0,
+            last_size: None,
+        }
+    }
+}
+
+/// Right-side plan bar action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlanAction {
+    /// No marks — start implementation.
+    Make,
+    /// Save the note for the current mark (then select more).
+    Add,
+    /// Send all marks to the agent to revise the plan.
+    Send,
+}
+
+impl PlanViewState {
+    pub fn has_corrections(&self) -> bool {
+        !self.corrections.is_empty()
+    }
+
+    pub fn drag_range(&self) -> Option<(usize, usize)> {
+        let d = self.drag.as_ref()?;
+        Some((d.anchor.min(d.current), d.anchor.max(d.current)))
+    }
+}
+
+/// Inline card announcing the agent switched its own mode (e.g. into PLAN).
+#[derive(Clone)]
+pub struct ModeSwitchCard {
+    pub mode: AgentMode,
+    pub reason: String,
 }
 
 /// One renderable chunk of the transcript.
@@ -182,10 +347,14 @@ pub enum Block {
     },
     Reasoning(Thought),
     Tool(ToolCard),
+    /// Persistent interactive terminal session.
+    Terminal(Box<TerminalCard>),
     /// Subagent status + expandable conversation (verify_project, etc.).
     Subagent(SubagentCard),
     /// Workspace plan card (`.hive/Plan.md`).
     Plan(PlanCard),
+    /// The agent switched its working mode with a reason.
+    ModeSwitch(ModeSwitchCard),
     Notice(String),
     Error(String),
 }

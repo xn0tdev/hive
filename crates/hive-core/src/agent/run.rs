@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -11,11 +11,16 @@ use crate::message::{ContentPart, ImageSource, Message};
 use crate::provider::{ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
 use crate::skill::SkillSource;
 use crate::spawner::SubagentSpawner;
+use crate::terminal::{is_terminal_tool, TerminalHandle};
 use crate::tool::{Tool, ToolContext, ToolResult};
-use crate::vision::VisionDescriber;
 
+use super::compact::{
+    compacted_messages, estimate_tokens, format_transcript, should_compact, summarize_request,
+    MIN_MESSAGES_TO_COMPACT,
+};
 use super::mode::{
-    plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
+    multitask_mode_check, multitask_mode_tool_allowed, plan_mode_check, plan_mode_tool_allowed,
+    plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
 };
 use super::prompt::build_system_prompt;
 use super::session::Session;
@@ -27,12 +32,40 @@ pub struct UserInput {
     pub mode: AgentMode,
 }
 
+/// Mid-turn follow-up staged by the TUI (double-Enter → next tool round).
+pub type FollowUpSlot = Arc<Mutex<Option<UserInput>>>;
+
+fn take_follow_up(slot: &FollowUpSlot) -> Option<UserInput> {
+    slot.lock().ok().and_then(|mut g| g.take())
+}
+
+/// Poll until Esc sets the interrupt flag. Used with `tokio::select!` so a
+/// long `chat_stream` or tool call can abort without waiting for completion.
+async fn wait_interrupt(flag: &AtomicBool) {
+    while !flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn push_user_input(session: &mut Session, input: UserInput) {
+    let mut parts: Vec<ContentPart> = Vec::new();
+    if !input.text.is_empty() {
+        parts.push(ContentPart::Text(input.text));
+    }
+    for img in input.images {
+        parts.push(ContentPart::Image(img));
+    }
+    if !parts.is_empty() {
+        session.push(Message::user_parts(parts));
+    }
+}
+
 impl From<String> for UserInput {
     fn from(text: String) -> Self {
         UserInput {
             text,
             images: Vec::new(),
-            mode: AgentMode::Build,
+            mode: AgentMode::Make,
         }
     }
 }
@@ -52,7 +85,6 @@ pub struct AgentBuilder {
     pub provider: Arc<dyn LlmProvider>,
     pub tools: Vec<Arc<dyn Tool>>,
     pub skills: Arc<dyn SkillSource>,
-    pub vision: Arc<dyn VisionDescriber>,
     pub config: Arc<AppConfig>,
 }
 
@@ -64,37 +96,72 @@ impl AgentBuilder {
         depth: usize,
         spawner: Arc<dyn SubagentSpawner>,
     ) -> Agent {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mode = AgentMode::Build;
+        self.build_in(
+            events,
+            model,
+            depth,
+            spawner,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    pub fn build_in(
+        &self,
+        events: EventSender,
+        model: String,
+        depth: usize,
+        spawner: Arc<dyn SubagentSpawner>,
+        cwd: PathBuf,
+    ) -> Agent {
+        self.build_inner(events, model, depth, spawner, cwd, None)
+    }
+
+    pub fn build_with_terminal(
+        &self,
+        events: EventSender,
+        model: String,
+        depth: usize,
+        spawner: Arc<dyn SubagentSpawner>,
+        terminal: TerminalHandle,
+    ) -> Agent {
+        self.build_inner(
+            events,
+            model,
+            depth,
+            spawner,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            Some(terminal),
+        )
+    }
+
+    fn build_inner(
+        &self,
+        events: EventSender,
+        model: String,
+        depth: usize,
+        spawner: Arc<dyn SubagentSpawner>,
+        cwd: PathBuf,
+        terminal: Option<TerminalHandle>,
+    ) -> Agent {
+        let mode = AgentMode::Make;
         let system = build_system_prompt(&cwd, self.skills.as_ref(), depth > 0, mode);
         Agent {
             provider: self.provider.clone(),
-            tool_specs: tool_specs(&self.tools),
             tools: self.tools.clone(),
             skills: self.skills.clone(),
-            vision: self.vision.clone(),
             config: self.config.clone(),
             spawner,
+            terminal,
             events,
             session: Session::new(system),
             model,
+            vision_capable: false,
             depth,
             cwd,
             mode,
-            vision_cache: HashMap::new(),
+            last_prompt_tokens: 0,
         }
     }
-}
-
-fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
-    tools
-        .iter()
-        .map(|t| ToolSpec {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters(),
-        })
-        .collect()
 }
 
 /// One conversational agent: a provider, a tool set, and a running session.
@@ -102,18 +169,20 @@ fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: Vec<Arc<dyn Tool>>,
-    tool_specs: Vec<ToolSpec>,
     skills: Arc<dyn SkillSource>,
-    vision: Arc<dyn VisionDescriber>,
     config: Arc<AppConfig>,
     spawner: Arc<dyn SubagentSpawner>,
+    terminal: Option<TerminalHandle>,
     events: EventSender,
     session: Session,
     model: String,
+    /// When false, tools must not inject image parts (non-vision models reject them).
+    vision_capable: bool,
     depth: usize,
     cwd: PathBuf,
     mode: AgentMode,
-    vision_cache: HashMap<String, String>,
+    /// Prompt tokens from the most recent chat request (for auto-compact).
+    last_prompt_tokens: u64,
 }
 
 impl Agent {
@@ -125,18 +194,44 @@ impl Agent {
         self.model = model.into();
     }
 
+    pub fn set_vision_capable(&mut self, capable: bool) {
+        self.vision_capable = capable;
+    }
+
+    pub fn vision_capable(&self) -> bool {
+        self.vision_capable
+    }
+
     /// Swap the LLM HTTP client (e.g. after `/connect` switches provider).
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
     }
 
-    /// Swap the vision describer (usually rebuilt with the new provider).
-    pub fn set_vision(&mut self, vision: Arc<dyn VisionDescriber>) {
-        self.vision = vision;
-        self.vision_cache.clear();
+    pub fn provider_clone(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
     }
 
-    /// Apply BUILD/PLAN for the next turn and refresh the system prompt.
+    pub fn tools_clone(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools.clone()
+    }
+
+    pub fn skills_clone(&self) -> Arc<dyn SkillSource> {
+        self.skills.clone()
+    }
+
+    pub fn config_clone(&self) -> Arc<AppConfig> {
+        self.config.clone()
+    }
+
+    pub fn spawner_clone(&self) -> Arc<dyn SubagentSpawner> {
+        self.spawner.clone()
+    }
+
+    pub fn events_clone(&self) -> EventSender {
+        self.events.clone()
+    }
+
+    /// Apply MAKE/PLAN for the next turn and refresh the system prompt.
     pub fn set_mode(&mut self, mode: AgentMode) {
         if self.mode == mode {
             return;
@@ -149,18 +244,61 @@ impl Agent {
     }
 
     fn active_tool_specs(&self) -> Vec<ToolSpec> {
-        if self.depth > 0 || self.mode == AgentMode::Build {
-            return self.tool_specs.clone();
+        // Subagents always get the full MAKE tool set (no swarm fan-out, and no
+        // self mode-switching — only the top-level agent owns the session mode).
+        if self.depth > 0 {
+            return self
+                .tools
+                .iter()
+                .filter(|t| {
+                    t.name() != "spawn_swarm"
+                        && t.name() != "integrate_worktree"
+                        && t.name() != "switch_mode"
+                        && !is_terminal_tool(t.name())
+                })
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect();
         }
-        self.tools
-            .iter()
-            .filter(|t| plan_mode_tool_allowed(t.name()))
-            .map(|t| ToolSpec {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                parameters: t.parameters(),
-            })
-            .collect()
+        match self.mode {
+            AgentMode::Make => self
+                .tools
+                .iter()
+                .filter(|t| {
+                    t.name() != "spawn_swarm"
+                        && t.name() != "integrate_worktree"
+                        && (self.terminal.is_some() || !is_terminal_tool(t.name()))
+                })
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+            AgentMode::Plan => self
+                .tools
+                .iter()
+                .filter(|t| plan_mode_tool_allowed(t.name()))
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+            AgentMode::Multitask => self
+                .tools
+                .iter()
+                .filter(|t| multitask_mode_tool_allowed(t.name()))
+                .map(|t| ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters(),
+                })
+                .collect(),
+        }
     }
 
     pub fn usage(&self) -> Usage {
@@ -168,34 +306,116 @@ impl Agent {
     }
 
     pub fn reset(&mut self) {
+        if let Some(terminal) = &self.terminal {
+            terminal.shutdown();
+        }
         self.session.reset();
-        self.vision_cache.clear();
+        self.last_prompt_tokens = 0;
+    }
+
+    fn context_window(&self) -> u64 {
+        let w = self.config.agent.context_window;
+        if w == 0 {
+            crate::config::DEFAULT_CONTEXT_WINDOW
+        } else {
+            w
+        }
     }
 
     fn emit(&self, e: AgentEvent) {
         let _ = self.events.send(e);
     }
 
+    /// Manually compact conversation history (`/compact`).
+    pub async fn compact(&mut self) -> Result<(), String> {
+        self.compact_inner(true).await
+    }
+
+    /// Auto-compact at 75% context when needed (silent no-op otherwise).
+    async fn maybe_auto_compact(&mut self) {
+        if let Err(e) = self.compact_inner(false).await {
+            // Don't stall the turn — just surface the failure.
+            self.emit(AgentEvent::Notice(e));
+        }
+    }
+
+    async fn compact_inner(&mut self, force: bool) -> Result<(), String> {
+        if self.session.messages.len() < MIN_MESSAGES_TO_COMPACT {
+            if force {
+                return Err("nothing to compact yet".into());
+            }
+            return Ok(());
+        }
+
+        let window = self.context_window();
+        let estimated = estimate_tokens(&self.session.messages);
+        let over =
+            should_compact(self.last_prompt_tokens, window) || should_compact(estimated, window);
+        if !force && !over {
+            return Ok(());
+        }
+
+        self.emit(AgentEvent::Notice("Compacting context…".into()));
+
+        let transcript = format_transcript(&self.session.messages);
+        if transcript.trim().is_empty() {
+            if force {
+                return Err("nothing to compact yet".into());
+            }
+            return Ok(());
+        }
+
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: summarize_request(&transcript),
+            tools: Vec::new(),
+            temperature: Some(0.2),
+            max_tokens: Some(2_048),
+        };
+        let mut on_delta = |_d: Delta| {};
+        let outcome = self
+            .provider
+            .chat_stream(req, &mut on_delta)
+            .await
+            .map_err(|e| format!("compact failed: {e}"))?;
+
+        self.last_prompt_tokens = outcome.usage.prompt_tokens;
+        self.session.add_usage(outcome.usage);
+        self.emit(AgentEvent::Usage(self.session.usage));
+        self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
+
+        let summary = outcome.message.text();
+        if summary.trim().is_empty() {
+            return Err("compact failed: empty summary".into());
+        }
+
+        let system = self.session.system().to_string();
+        self.session
+            .replace_messages(compacted_messages(&system, &summary));
+        self.last_prompt_tokens = estimate_tokens(&self.session.messages);
+
+        self.emit(AgentEvent::Notice("Context compacted".into()));
+        Ok(())
+    }
+
     /// Run one user turn to completion: stream the model, execute any tool calls
     /// (immediately, no confirmation), and repeat until the model stops calling
     /// tools. Returns the final assistant text.
-    pub async fn run_turn(&mut self, input: UserInput, interrupt: Arc<AtomicBool>) -> String {
+    ///
+    /// `follow_up`: optional mid-turn inject from the TUI (second Enter). Applied
+    /// before the next model call — after the current tool batch finishes.
+    pub async fn run_turn(
+        &mut self,
+        input: UserInput,
+        interrupt: Arc<AtomicBool>,
+        follow_up: FollowUpSlot,
+    ) -> String {
         if self.depth == 0 {
             self.set_mode(input.mode);
         }
         self.emit(AgentEvent::TurnStarted);
 
-        // Assemble the user message (text + any images).
-        let mut parts: Vec<ContentPart> = Vec::new();
-        if !input.text.is_empty() {
-            parts.push(ContentPart::Text(input.text));
-        }
-        for img in input.images {
-            parts.push(ContentPart::Image(img));
-        }
-        if !parts.is_empty() {
-            self.session.push(Message::user_parts(parts));
-        }
+        push_user_input(&mut self.session, input);
 
         let mut final_text = String::new();
 
@@ -205,7 +425,15 @@ impl Agent {
                 break;
             }
 
-            let messages = self.prepare_messages().await;
+            // Mid-turn safe point: tool results (if any) are already in history.
+            if self.depth == 0 {
+                if let Some(fu) = take_follow_up(&follow_up) {
+                    push_user_input(&mut self.session, fu);
+                }
+                self.maybe_auto_compact().await;
+            }
+
+            let messages = self.session.messages.clone();
             let req = ChatRequest {
                 model: self.model.clone(),
                 messages,
@@ -217,36 +445,79 @@ impl Agent {
             self.emit(AgentEvent::AssistantStarted);
 
             let events = self.events.clone();
+            let saw_reasoning = Arc::new(AtomicBool::new(false));
+            let saw_reasoning_cb = saw_reasoning.clone();
             let mut on_delta = move |d: Delta| match d {
                 Delta::Text(t) => {
                     let _ = events.send(AgentEvent::AssistantTextDelta(t));
                 }
                 Delta::Reasoning(r) => {
+                    saw_reasoning_cb.store(true, Ordering::Relaxed);
                     let _ = events.send(AgentEvent::ReasoningDelta(r));
                 }
             };
 
-            let outcome = match self.provider.chat_stream(req, &mut on_delta).await {
-                Ok(o) => o,
-                Err(e) => {
-                    self.emit(AgentEvent::Error(format!("model error: {e}")));
+            // Esc must abort mid-stream — not only between rounds.
+            let outcome = tokio::select! {
+                biased;
+                _ = wait_interrupt(&interrupt) => {
+                    self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                     break;
+                }
+                outcome = self.provider.chat_stream(req, &mut on_delta) => {
+                    match outcome {
+                        Ok(o) => o,
+                        Err(e) => {
+                            self.emit(AgentEvent::Error(format!("model error: {e}")));
+                            break;
+                        }
+                    }
                 }
             };
 
+            self.last_prompt_tokens = outcome.usage.prompt_tokens;
             self.session.add_usage(outcome.usage);
             self.emit(AgentEvent::Usage(self.session.usage));
+            self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
 
+            let finish_reason = outcome.finish_reason.clone();
             let assistant_text = outcome.message.text();
             let tool_calls = outcome.message.tool_calls.clone();
             self.session.push(outcome.message);
 
             if !assistant_text.trim().is_empty() {
                 self.emit(AgentEvent::AssistantMessage(assistant_text.clone()));
-                final_text = assistant_text;
+                final_text = assistant_text.clone();
             }
 
             if tool_calls.is_empty() {
+                // Silent empty stop after long thinking looks like the agent "died".
+                if assistant_text.trim().is_empty() {
+                    let fr = finish_reason.to_ascii_lowercase();
+                    let msg = if fr == "length" {
+                        "Stopped: hit max tokens (often during long thinking) — no reply or tools. Retry or use a larger context/output limit.".into()
+                    } else if saw_reasoning.load(Ordering::Relaxed) {
+                        "Model finished thinking with no reply or tool call — turn ended.".into()
+                    } else {
+                        format!(
+                            "Model returned an empty reply{}.",
+                            if fr.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (finish_reason={finish_reason})")
+                            }
+                        )
+                    };
+                    self.emit(AgentEvent::Error(msg));
+                    break;
+                }
+                // Final reply — but a double-Enter follow-up means continue.
+                if self.depth == 0 {
+                    if let Some(fu) = take_follow_up(&follow_up) {
+                        push_user_input(&mut self.session, fu);
+                        continue;
+                    }
+                }
                 break;
             }
 
@@ -255,7 +526,8 @@ impl Agent {
                     self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                     break;
                 }
-                self.run_tool(&tc.id, &tc.name, &tc.arguments).await;
+                self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
+                    .await;
             }
 
             if interrupt.load(Ordering::Relaxed) {
@@ -263,6 +535,20 @@ impl Agent {
             }
         }
 
+        // Don't drop a staged follow-up if we exited on interrupt/error.
+        if self.depth == 0 {
+            if let Some(fu) = take_follow_up(&follow_up) {
+                push_user_input(&mut self.session, fu);
+            }
+        }
+
+        if interrupt.load(Ordering::Relaxed) {
+            if let Some(terminal) = &self.terminal {
+                let terminal = terminal.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || terminal.stop_if_agent_controlled()).await;
+            }
+        }
         self.emit(AgentEvent::TurnFinished);
         final_text
     }
@@ -271,11 +557,18 @@ impl Agent {
     /// text. Used by subagents.
     pub async fn run_headless(&mut self, prompt: impl Into<String>) -> String {
         let interrupt = Arc::new(AtomicBool::new(false));
-        self.run_turn(UserInput::from(prompt.into()), interrupt)
+        let follow_up: FollowUpSlot = Arc::new(Mutex::new(None));
+        self.run_turn(UserInput::from(prompt.into()), interrupt, follow_up)
             .await
     }
 
-    async fn run_tool(&mut self, id: &str, name: &str, arguments: &str) {
+    async fn run_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        arguments: &str,
+        interrupt: &Arc<AtomicBool>,
+    ) {
         self.emit(AgentEvent::ToolStarted {
             id: id.to_string(),
             name: name.to_string(),
@@ -288,14 +581,40 @@ impl Agent {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // `switch_mode` changes the session mode — only the top-level agent may.
+        // Capture the target here (before `args` is consumed) and apply it once
+        // the tool reports success below.
+        let switch_target = if name == "switch_mode" && self.depth == 0 {
+            args.get("mode")
+                .and_then(|v| v.as_str())
+                .and_then(AgentMode::parse)
+                .map(|mode| {
+                    let reason = args
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    (mode, reason)
+                })
+        } else {
+            None
+        };
+
         let result = if self.depth == 0 && self.mode == AgentMode::Plan {
             if let Err(msg) = plan_mode_check(name, path.as_deref(), &self.cwd) {
                 ToolResult::error(msg)
             } else {
-                self.execute_tool(name, args, id).await
+                self.execute_tool(name, args, id, interrupt).await
+            }
+        } else if self.depth == 0 && self.mode == AgentMode::Multitask {
+            if let Err(msg) = multitask_mode_check(name) {
+                ToolResult::error(msg)
+            } else {
+                self.execute_tool(name, args, id, interrupt).await
             }
         } else {
-            self.execute_tool(name, args, id).await
+            self.execute_tool(name, args, id, interrupt).await
         };
 
         self.emit(AgentEvent::ToolFinished {
@@ -304,6 +623,19 @@ impl Agent {
             ok: !result.is_error,
             summary: first_line(&result.content, 120),
         });
+
+        // Apply a validated `switch_mode` now: refresh the system prompt for the
+        // next round and tell the frontend so it can update the chip + card.
+        // Skip the event when it's a no-op (already in that mode) so the UI
+        // doesn't show a redundant switch card + toast.
+        if !result.is_error {
+            if let Some((mode, reason)) = switch_target {
+                if self.mode != mode {
+                    self.set_mode(mode);
+                    self.emit(AgentEvent::ModeSwitched { mode, reason });
+                }
+            }
+        }
 
         if !result.is_error && matches!(name, "write_file" | "edit_file") {
             if let Some(path) = path.as_deref() {
@@ -327,7 +659,13 @@ impl Agent {
         }
     }
 
-    async fn execute_tool(&self, name: &str, args: serde_json::Value, id: &str) -> ToolResult {
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        id: &str,
+        interrupt: &Arc<AtomicBool>,
+    ) -> ToolResult {
         let tool = self.tools.iter().find(|t| t.name() == name).cloned();
         match tool {
             Some(t) => {
@@ -337,10 +675,20 @@ impl Agent {
                     spawner: self.spawner.clone(),
                     skills: self.skills.clone(),
                     config: self.config.clone(),
+                    terminal: self.terminal.clone(),
+                    vision: self.vision_capable,
                     depth: self.depth,
                     call_id: id.to_string(),
+                    isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
+                    interrupt: interrupt.clone(),
                 };
-                t.execute(args, &ctx).await
+                // Drop the tool future on Esc so HTTP/spawn unblock; shell
+                // also kills its process group in Drop / on interrupt.
+                tokio::select! {
+                    biased;
+                    _ = wait_interrupt(interrupt) => ToolResult::error("interrupted"),
+                    result = t.execute(args, &ctx) => result,
+                }
             }
             None => ToolResult::error(format!("unknown tool: {name}")),
         }
@@ -352,56 +700,6 @@ impl Agent {
         let summary = plan_summary(&body);
         self.emit(AgentEvent::PlanUpdated { summary, body });
     }
-
-    /// Produce the message list to send. If the active model can't see images,
-    /// replace each image with a cached textual description (the vision
-    /// fallback).
-    async fn prepare_messages(&mut self) -> Vec<Message> {
-        if self.config.is_vision_capable(&self.model) {
-            return self.session.messages.clone();
-        }
-
-        let vision = self.vision.clone();
-        let msgs = self.session.messages.clone();
-        let mut out = Vec::with_capacity(msgs.len());
-
-        for m in &msgs {
-            if m.images().is_empty() {
-                out.push(m.clone());
-                continue;
-            }
-            let mut new_parts = Vec::new();
-            for part in &m.content {
-                match part {
-                    ContentPart::Text(t) => new_parts.push(ContentPart::Text(t.clone())),
-                    ContentPart::Image(src) => {
-                        let key = src.as_data_url();
-                        let desc = if let Some(d) = self.vision_cache.get(&key) {
-                            d.clone()
-                        } else {
-                            self.emit(AgentEvent::Notice(
-                                "Describing image with vision model…".to_string(),
-                            ));
-                            let d = vision
-                                .describe(src)
-                                .await
-                                .unwrap_or_else(|e| format!("[image description failed: {e}]"));
-                            self.vision_cache.insert(key, d.clone());
-                            d
-                        };
-                        new_parts.push(ContentPart::Text(format!(
-                            "[Image described by vision model]:\n{desc}"
-                        )));
-                    }
-                }
-            }
-            let mut nm = m.clone();
-            nm.content = new_parts;
-            out.push(nm);
-        }
-
-        out
-    }
 }
 
 /// A short, human-friendly summary of a tool call — the one argument that
@@ -411,9 +709,13 @@ fn preview_args(name: &str, arguments: &str) -> String {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
 
     let main = match name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" => s("path"),
+        "read_file" | "write_file" | "edit_file" | "delete_path" | "list_dir" => s("path"),
+        "write_plan" => s("summary"),
+        "switch_mode" => s("mode"),
         "glob" | "grep" => s("pattern"),
         "run_shell" => s("command"),
+        "terminal_start" => s("command"),
+        "terminal_read" | "terminal_write" | "terminal_stop" => s("session_id"),
         "web_search" => s("query"),
         "read_skill" => s("name"),
         "spawn_subagent" | "spawn_swarm" => s("task").or_else(|| s("prompt")),
@@ -451,4 +753,129 @@ fn truncate(s: &str, max: usize) -> String {
 fn first_line(s: &str, max: usize) -> String {
     let line = s.lines().next().unwrap_or("");
     truncate(line, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{all_tools, no_skills, noop_spawner, ChatOutcome, CoreError, TerminalManager};
+    use async_trait::async_trait;
+
+    struct NoopProvider;
+
+    #[async_trait]
+    impl LlmProvider for NoopProvider {
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+            _on_delta: &mut (dyn FnMut(Delta) + Send),
+        ) -> Result<ChatOutcome, CoreError> {
+            unreachable!("tool-spec tests do not call the provider")
+        }
+    }
+
+    fn builder() -> AgentBuilder {
+        AgentBuilder {
+            provider: Arc::new(NoopProvider),
+            tools: all_tools(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+        }
+    }
+
+    fn tool_names(agent: &Agent) -> Vec<String> {
+        agent
+            .active_tool_specs()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
+    #[test]
+    fn terminal_tools_only_root_make_with_manager() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let manager = TerminalManager::new(events.clone());
+        let root = builder().build_with_terminal(
+            events.clone(),
+            "test".into(),
+            0,
+            noop_spawner(),
+            manager,
+        );
+        let root_without_manager =
+            builder().build(events.clone(), "test".into(), 0, noop_spawner());
+        let subagent = builder().build(events, "test".into(), 1, noop_spawner());
+
+        let terminal_names = [
+            "terminal_start",
+            "terminal_read",
+            "terminal_write",
+            "terminal_stop",
+        ];
+        let root_names = tool_names(&root);
+        let plain_root_names = tool_names(&root_without_manager);
+        let subagent_names = tool_names(&subagent);
+        for name in terminal_names {
+            assert!(root_names.iter().any(|tool| tool == name), "{name}");
+            assert!(
+                !plain_root_names.iter().any(|tool| tool == name),
+                "{name} leaked without a manager"
+            );
+            assert!(
+                !subagent_names.iter().any(|tool| tool == name),
+                "{name} leaked to a subagent"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_turn_stops_only_agent_controlled_terminal() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let manager = TerminalManager::new(events.clone());
+        let started = manager
+            .start("cat", std::path::Path::new("."))
+            .await
+            .unwrap();
+        let mut agent = builder().build_with_terminal(
+            events.clone(),
+            "test".into(),
+            0,
+            noop_spawner(),
+            manager.clone(),
+        );
+        let interrupt = Arc::new(AtomicBool::new(true));
+        agent
+            .run_turn(
+                UserInput::from("stop"),
+                interrupt,
+                Arc::new(Mutex::new(None)),
+            )
+            .await;
+        let stopped = manager.read(&started.id, None, None).await.unwrap();
+        assert!(!matches!(
+            stopped.session.process,
+            crate::TerminalProcessState::Running
+        ));
+
+        let restarted = manager
+            .start("cat", std::path::Path::new("."))
+            .await
+            .unwrap();
+        manager.attach(&restarted.id).unwrap();
+        let interrupt = Arc::new(AtomicBool::new(true));
+        agent
+            .run_turn(
+                UserInput::from("keep"),
+                interrupt,
+                Arc::new(Mutex::new(None)),
+            )
+            .await;
+        let preserved = manager.read(&restarted.id, None, None).await.unwrap();
+        assert!(matches!(
+            preserved.session.process,
+            crate::TerminalProcessState::Running
+        ));
+        manager.shutdown();
+    }
 }

@@ -11,9 +11,7 @@ mod suggest;
 pub use enrich::{enrich_models, ModelCard};
 pub use models_dev::{fetch_models_dev, ModelsDevCatalog};
 pub use provider_list::{list_provider_models, RemoteModel};
-pub use provider_meta::{
-    group_by_id_prefix, models_dev_hint_for_base, provider_label_for_base,
-};
+pub use provider_meta::{models_dev_hint_for_base, provider_label_for_base};
 pub use suggest::{suggest_model, suggest_roles, RolePicks};
 
 #[derive(Debug, thiserror::Error)]

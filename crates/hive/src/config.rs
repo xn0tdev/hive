@@ -41,12 +41,6 @@ default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast"
 # [connections]
 # active = "default"
 
-[vision]
-# Models that natively accept images. Everything else uses the vision fallback.
-capable = [
-    "accounts/fireworks/routers/kimi-k2p6-fast",
-]
-
 [search]
 backend = "exa"
 
@@ -274,15 +268,30 @@ pub fn connection_infos(cfg: &AppConfig) -> Vec<ConnectionInfo> {
 }
 
 fn fill_secrets(cfg: &mut AppConfig) {
+    // Resolve every saved profile key before wiping plaintext from the struct.
+    cfg.secrets.connection_keys.clear();
+    for (id, p) in &cfg.connections.profiles {
+        if let Some(key) = resolve_secret(&p.api_key_env, p.api_key.as_deref()) {
+            cfg.secrets.connection_keys.insert(id.clone(), key);
+        }
+    }
+
     // Prefer the active profile's key when present.
     let profile_key = cfg
-        .connections
-        .profiles
+        .secrets
+        .connection_keys
         .get(&cfg.connections.active)
-        .and_then(|p| p.api_key.clone());
+        .cloned();
     let file_key = cfg.provider.api_key.clone().or(profile_key);
     cfg.secrets.provider_api_key =
         resolve_secret(&cfg.provider.api_key_env, file_key.as_deref()).unwrap_or_default();
+    // Keep active key in the map too (env may only be on [provider]).
+    if !cfg.secrets.provider_api_key.is_empty() && !cfg.connections.active.is_empty() {
+        cfg.secrets
+            .connection_keys
+            .entry(cfg.connections.active.clone())
+            .or_insert_with(|| cfg.secrets.provider_api_key.clone());
+    }
     cfg.secrets.exa_api_key = resolve_secret(&cfg.exa.api_key_env, cfg.exa.api_key.as_deref());
     cfg.secrets.perplexity_api_key = resolve_secret(
         &cfg.perplexity.api_key_env,
@@ -335,8 +344,6 @@ fn backend_str(b: SearchBackend) -> &'static str {
 }
 
 fn format_setup_toml(choices: &SetupChoices) -> String {
-    let capable = format!("    \"{}\",\n", toml_escape(&choices.default.id));
-
     let provider_key_line = choices
         .provider_api_key
         .as_deref()
@@ -382,10 +389,6 @@ default = {{ id = "{def_id}", name = "{def_name}" }}
 # [connections]
 # active = "default"
 
-[vision]
-capable = [
-{capable}]
-
 [search]
 backend = "{backend}"
 
@@ -415,7 +418,6 @@ sidebar_width = 34
         provider_key = provider_key_line,
         def_id = toml_escape(&choices.default.id),
         def_name = toml_escape(&choices.default.name),
-        capable = capable,
         backend = backend_str(choices.search_backend),
         exa_key = exa_key_line,
         pplx_key = pplx_key_line,
@@ -597,6 +599,14 @@ pub fn upsert_connection(
         .as_table_mut()
         .ok_or_else(|| anyhow!("[connections.profiles] must be a table"))?;
 
+    let existing_key = profiles
+        .get(id)
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("api_key"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let mut profile = toml::map::Map::new();
     profile.insert("label".into(), toml::Value::String(label.to_string()));
     profile.insert("base_url".into(), toml::Value::String(base_url.to_string()));
@@ -604,8 +614,12 @@ pub fn upsert_connection(
         "api_key_env".into(),
         toml::Value::String(api_key_env.to_string()),
     );
-    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        profile.insert("api_key".into(), toml::Value::String(key.to_string()));
+    let key = api_key
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .or(existing_key);
+    if let Some(key) = key {
+        profile.insert("api_key".into(), toml::Value::String(key));
     }
     let mut model = toml::map::Map::new();
     model.insert("id".into(), toml::Value::String(model_id.to_string()));
@@ -798,7 +812,6 @@ mod tests {
         assert_eq!(cfg.perplexity.api_key.as_deref(), Some("pplx-key"));
         assert!(cfg.ui.setup_complete);
         assert_eq!(cfg.ui.theme, "gray");
-        assert!(cfg.vision.capable.iter().any(|m| m == "model/a"));
     }
 
     #[test]

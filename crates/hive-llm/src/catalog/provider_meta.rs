@@ -42,12 +42,6 @@ pub fn models_dev_hint_for_base(base_url: &str) -> Option<&'static str> {
     None
 }
 
-/// True when ids are typically `org/model` and should be grouped by org.
-pub fn group_by_id_prefix(base_url: &str) -> bool {
-    let lower = base_url.to_ascii_lowercase();
-    lower.contains("openrouter.ai") || lower.contains("api.together.xyz")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,17 +56,13 @@ mod tests {
             models_dev_hint_for_base("https://api.fireworks.ai/inference/v1"),
             Some("fireworks-ai")
         );
-        assert!(!group_by_id_prefix(
-            "https://api.fireworks.ai/inference/v1"
-        ));
     }
 
     #[test]
-    fn openrouter_groups_by_prefix() {
+    fn openrouter_is_one_provider_label() {
         assert_eq!(
             provider_label_for_base("https://openrouter.ai/api/v1"),
             "OpenRouter"
         );
-        assert!(group_by_id_prefix("https://openrouter.ai/api/v1"));
     }
 }

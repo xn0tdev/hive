@@ -2,11 +2,95 @@
 //! Two buffers (front = on screen, back = next frame) are diffed so the terminal
 //! only receives the cells that actually changed.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::core::geom::{Rect, Size};
+use crate::core::geom::{Align, Rect, Size};
 use crate::core::style::Style;
 use crate::core::text::Line;
+
+/// Display columns for a label with `pad` blank cells on each side.
+pub fn label_cols(text: &str, pad: u16) -> u16 {
+    let w = UnicodeWidthStr::width(text) as u16;
+    w.saturating_add(pad.saturating_mul(2))
+}
+
+/// Shared chip width that exactly centers the greatest number of labels.
+///
+/// A label can have equal left and right pads only when its display width has
+/// the same parity as the chip. When the labels have mixed parity, this picks
+/// the majority parity; ties keep the narrowest possible chip. This makes the
+/// unavoidable one-cell imbalance affect the fewest labels.
+pub fn chip_cols(labels: &[&str], pad: u16) -> u16 {
+    let w = labels
+        .iter()
+        .map(|t| label_cols(t, pad))
+        .max()
+        .unwrap_or(pad.saturating_mul(2));
+
+    let (even, odd) = labels.iter().fold((0usize, 0usize), |(even, odd), text| {
+        if UnicodeWidthStr::width(*text) % 2 == 0 {
+            (even + 1, odd)
+        } else {
+            (even, odd + 1)
+        }
+    });
+    let preferred_parity = if odd > even { 1 } else { 0 };
+
+    if w % 2 == preferred_parity {
+        w
+    } else {
+        w.saturating_add(1)
+    }
+}
+
+/// Pad `text` to exactly `width` display columns (centered).
+///
+/// When the gap is odd, the extra column goes on the **right**.
+pub fn center_pad(text: &str, width: u16) -> String {
+    pad_align(text, width, Align::Center)
+}
+
+fn clip_text(text: &str, width: u16) -> (String, u16) {
+    let mut out = String::new();
+    let mut tw = 0u16;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if w == 0 {
+            continue;
+        }
+        if tw + w > width {
+            break;
+        }
+        out.push(ch);
+        tw += w;
+    }
+    (out, tw)
+}
+
+fn pad_align(text: &str, width: u16, align: Align) -> String {
+    let (core, tw) = clip_text(text, width);
+    if tw >= width {
+        return core;
+    }
+    let gap = width - tw;
+    let (left, right) = match align {
+        Align::Start => (0, gap),
+        Align::End => (gap, 0),
+        Align::Center => {
+            let left = gap / 2;
+            (left, gap - left)
+        }
+    };
+    let mut s = String::with_capacity(width as usize);
+    for _ in 0..left {
+        s.push(' ');
+    }
+    s.push_str(&core);
+    for _ in 0..right {
+        s.push(' ');
+    }
+    s
+}
 
 /// Marker in the cell to the right of a double-width glyph. Skipped when
 /// flushing ANSI so the terminal does not advance an extra column.
@@ -227,6 +311,56 @@ impl Buffer {
         self.fill(rect, ' ', style);
     }
 
+    /// Fill a horizontal band with `style`, then draw `text` inside it.
+    ///
+    /// The whole band is painted first, then one padded line is written so chip
+    /// backgrounds stay solid. [`Align::Center`] uses [`center_pad`].
+    pub fn put_str_aligned(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        text: &str,
+        style: Style,
+        align: Align,
+    ) {
+        if width == 0 || y >= self.height {
+            return;
+        }
+        let x = x.min(self.width);
+        let width = width.min(self.width.saturating_sub(x));
+        if width == 0 {
+            return;
+        }
+        self.paint(Rect::new(x, y, width, 1), style);
+        let padded = match align {
+            Align::Center => center_pad(text, width),
+            Align::Start => pad_align(text, width, Align::Start),
+            Align::End => pad_align(text, width, Align::End),
+        };
+        self.set_line_on(
+            x,
+            y,
+            &Line::from(crate::core::text::Span::styled(padded, style)),
+            width,
+            style,
+        );
+    }
+
+    /// Fill `area` with `style` and center `text` horizontally + vertically.
+    ///
+    /// Use [`chip_cols`] to choose a shared width that centers as many labels
+    /// as possible when their display widths have mixed parity.
+    pub fn put_label(&mut self, area: Rect, text: &str, style: Style) {
+        let area = area.intersection(self.area());
+        if area.is_empty() {
+            return;
+        }
+        self.paint(area, style);
+        let y = area.y + area.height / 2;
+        self.put_str_aligned(area.x, y, area.width, text, style, Align::Center);
+    }
+
     /// Copy `src` onto this buffer at `(ox, oy)`. When `skip_transparent`, cells
     /// marked transparent in `src` don't overwrite what's underneath.
     pub fn blit(&mut self, ox: u16, oy: u16, src: &Buffer, skip_transparent: bool) {
@@ -366,5 +500,31 @@ mod tests {
         assert_eq!(b.get(0, 0).unwrap().ch, 'あ');
         assert_eq!(b.get(1, 0).unwrap().ch, WIDE_CONT);
         assert_eq!(b.get(2, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn chip_cols_prefers_the_majority_label_parity() {
+        assert_eq!(chip_cols(&["MAKE", "MARK", "SEND"], 1), 6);
+        assert_eq!(center_pad("MAKE", 6), " MAKE ");
+        assert_eq!(center_pad("MARK", 6), " MARK ");
+        assert_eq!(center_pad("SEND", 6), " SEND ");
+    }
+
+    #[test]
+    fn put_label_preserves_shared_action_width() {
+        let bg = Color::rgb(0x5a, 0x8f, 0xb0);
+        let style = Style::new().bg(bg).fg(Color::rgb(0x11, 0x11, 0x11));
+        let w = chip_cols(&["MAKE", "MARK", "SEND"], 1);
+        assert_eq!(w, 6);
+        for (word, expect) in [("MAKE", " MAKE "), ("MARK", " MARK "), ("SEND", " SEND ")] {
+            let mut b = Buffer::blank(Size::new(w, 3));
+            b.put_label(Rect::new(0, 0, w, 3), word, style);
+            let mid: String = (0..w).map(|x| b.get(x, 1).unwrap().ch).collect();
+            assert_eq!(mid, expect, "{word}");
+            let text_width = UnicodeWidthStr::width(word);
+            let pad = (w as usize - text_width) / 2;
+            assert_eq!(&mid[..pad], " ".repeat(pad));
+            assert_eq!(&mid[pad + text_width..], " ".repeat(pad));
+        }
     }
 }

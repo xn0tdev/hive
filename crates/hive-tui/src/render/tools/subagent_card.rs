@@ -1,6 +1,6 @@
 //! Subagent card in the main transcript — soft `strip` band with pad rows.
 
-use comb::{Line, Modifier, Span, Style};
+use comb::{Color, Line, Modifier, Span, Style};
 
 use hive_core::event::SubagentStatus;
 
@@ -17,9 +17,14 @@ pub(crate) fn subagent_card_lines(
     app: &App,
     width: usize,
     show_hint: bool,
+    hovered: bool,
 ) -> Vec<Line> {
     let theme = &app.theme;
-    let bg = theme.strip;
+    let bg: Color = if hovered {
+        theme.strip_hover
+    } else {
+        theme.strip
+    };
     let (icon, icon_fg) = match card.status {
         SubagentStatus::Running => (app.spinner_char().to_string(), theme.accent),
         SubagentStatus::Done => ("✓".to_string(), theme.ok),
@@ -46,7 +51,7 @@ pub(crate) fn subagent_card_lines(
     if show_hint {
         title_spans.push(Span::styled(
             "  click to open",
-            Style::default().fg(theme.faint),
+            Style::default().fg(if hovered { theme.dim } else { theme.faint }),
         ));
     }
 

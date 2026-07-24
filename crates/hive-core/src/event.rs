@@ -1,4 +1,6 @@
+use crate::agent::AgentMode;
 use crate::provider::Usage;
+use crate::terminal::{TerminalController, TerminalOutputFrame, TerminalProcessState};
 
 /// Status of a subagent in the swarm / transcript card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +57,10 @@ pub enum AgentEvent {
         ok: bool,
         summary: String,
     },
+    /// Cumulative session usage (prompt/completion totals for this chat).
     Usage(Usage),
+    /// Tokens in the latest prompt — approx. how full the context window is.
+    ContextTokens(u64),
     SubagentSpawned {
         id: String,
         label: String,
@@ -83,12 +88,52 @@ pub enum AgentEvent {
         summary: String,
         body: String,
     },
+    /// The agent switched its own working mode mid-session (e.g. into PLAN
+    /// before tackling a large feature). `reason` explains why, for the card.
+    ModeSwitched {
+        mode: AgentMode,
+        reason: String,
+    },
+    TerminalStarted {
+        id: String,
+        command: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalStartFailed {
+        id: String,
+        command: String,
+        message: String,
+    },
+    TerminalOutput {
+        id: String,
+        frame: TerminalOutputFrame,
+    },
+    TerminalState {
+        id: String,
+        controller: TerminalController,
+        process: TerminalProcessState,
+        revision: u64,
+    },
+    TerminalResized {
+        id: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalError {
+        id: String,
+        message: String,
+    },
     /// The active model changed (e.g. via `/model`).
     ModelChanged {
         /// Provider model id (sent to the API).
         id: String,
         /// Pretty label for the TUI.
         display: String,
+        /// USD per 1M input tokens (0 if unknown).
+        cost_input: f64,
+        /// USD per 1M output tokens (0 if unknown).
+        cost_output: f64,
     },
     /// Live `/models` catalog for the Switch-model picker.
     ModelsListed {
@@ -116,8 +161,16 @@ pub struct CatalogModel {
     pub name: String,
     /// Secondary text (badges / short id).
     pub detail: String,
-    /// Section header (provider or org).
+    /// Section header (provider label).
     pub group: String,
+    /// `/connect` profile id this model was listed from.
+    pub connection_id: String,
+    /// True when the catalog says this model accepts image inputs.
+    pub vision: bool,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 /// One saved provider in the `/connect` picker.

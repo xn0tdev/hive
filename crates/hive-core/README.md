@@ -1,6 +1,6 @@
 # hive-core
 
-Agent loop, tools, swarm, skills, and vision for [hive](https://github.com/xn0tdev/hive).
+Agent loop, tools, swarm, and skills for [hive](https://github.com/xn0tdev/hive).
 
 ## License
 

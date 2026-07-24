@@ -54,6 +54,8 @@ mod tests {
             tools: true,
             context,
             enriched: true,
+            cost_input: 0.0,
+            cost_output: 0.0,
         }
     }
 

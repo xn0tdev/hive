@@ -119,6 +119,10 @@ pub fn parse(buf: &mut Vec<u8>) -> Option<Event> {
             let ch = (b0 - 1 + b'a') as char;
             Some((key(KeyCode::Char(ch), KeyMods::CTRL), 1))
         }
+        0x1c => Some((key(KeyCode::Char('\\'), KeyMods::CTRL), 1)),
+        0x1d => Some((key(KeyCode::Char(']'), KeyMods::CTRL), 1)),
+        0x1e => Some((key(KeyCode::Char('^'), KeyMods::CTRL), 1)),
+        0x1f => Some((key(KeyCode::Char('_'), KeyMods::CTRL), 1)),
         _ => None,
     };
     if let Some((event, n)) = ev {
@@ -139,10 +143,11 @@ pub fn parse(buf: &mut Vec<u8>) -> Option<Event> {
 }
 
 fn parse_escape(buf: &mut Vec<u8>) -> Option<Event> {
-    // Lone ESC (nothing follows yet): treat as the Esc key.
+    // Lone ESC: incomplete. Mouse / CSI sequences often arrive as ESC in one
+    // read and `[…` in the next — treating this as Esc would false-trigger
+    // interrupt. `Terminal::read_event` flushes a real Esc after a short timeout.
     if buf.len() == 1 {
-        buf.drain(0..1);
-        return Some(key(KeyCode::Esc, KeyMods::NONE));
+        return None;
     }
 
     match buf[1] {
@@ -428,6 +433,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_ctrl_close_bracket() {
+        let mut bytes = vec![0x1d];
+        assert_eq!(
+            parse(&mut bytes),
+            Some(key(KeyCode::Char(']'), KeyMods::CTRL))
+        );
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
     fn arrows_and_enter() {
         let mut b = b"\x1b[A".to_vec();
         assert_eq!(parse(&mut b), Some(key(KeyCode::Up, KeyMods::NONE)));
@@ -526,6 +541,16 @@ mod tests {
         let mut b = b"\x1b[".to_vec();
         assert_eq!(parse(&mut b), None);
         assert_eq!(b, b"\x1b[");
+    }
+
+    #[test]
+    fn lone_esc_waits_for_disambiguation() {
+        let mut b = vec![0x1b];
+        assert_eq!(parse(&mut b), None);
+        assert_eq!(b, vec![0x1b]);
+        // Rest of an SGR mouse event — must not have been consumed as Esc.
+        b.extend_from_slice(b"[<0;10;5M");
+        assert!(matches!(parse(&mut b), Some(Event::Mouse(_))));
     }
 
     #[test]

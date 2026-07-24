@@ -9,7 +9,10 @@ use crate::intro::PRESETS;
 
 const MAX_LIST: u16 = 14;
 const MIN_W: u16 = 36;
+/// Compact width for commands / providers.
 const MAX_W: u16 = 48;
+/// Wider panel for `/model` so long ids and badges fit.
+const MAX_W_MODELS: u16 = 72;
 const PAD_X: u16 = 2;
 const PAD_Y: u16 = 1;
 /// Title + search + gap before the list.
@@ -22,8 +25,22 @@ struct PaletteGeom {
     list: Rect,
 }
 
-fn geom(area: Rect, list_rows: u16) -> PaletteGeom {
-    let w = (area.width / 2).clamp(MIN_W, MAX_W).min(area.width);
+fn max_width_for(mode: PaletteMode) -> u16 {
+    match mode {
+        PaletteMode::Models => MAX_W_MODELS,
+        _ => MAX_W,
+    }
+}
+
+fn geom(area: Rect, list_rows: u16, mode: PaletteMode) -> PaletteGeom {
+    let max_w = max_width_for(mode);
+    // Prefer ~2/3 of the terminal for models; ~1/2 for compact palettes.
+    let prefer = if matches!(mode, PaletteMode::Models) {
+        area.width.saturating_mul(2) / 3
+    } else {
+        area.width / 2
+    };
+    let w = prefer.clamp(MIN_W, max_w).min(area.width);
     let list_h = list_rows.clamp(1, MAX_LIST);
     let h = (PAD_Y * 2 + CHROME_ROWS + list_h)
         .min(area.height.saturating_sub(2))
@@ -76,7 +93,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let panel = theme.strip;
     let panel_style = Style::default().bg(panel);
 
-    let g = geom(area, list_row_count(pal, app));
+    let g = geom(area, list_row_count(pal, app), pal.mode);
     // Soft scrim behind the panel so it reads with a bit of depth.
     dim_outside(buf, area, g.win);
     buf.paint(g.win, panel_style);
@@ -209,7 +226,7 @@ pub fn search_cursor(area: Rect, app: &App) -> Option<(u16, u16)> {
     if !pal.search_focused {
         return None;
     }
-    let g = geom(area, list_row_count(pal, app));
+    let g = geom(area, list_row_count(pal, app), pal.mode);
     let caret_x = g.content.x + pal.cursor as u16;
     let caret_y = g.search_y;
     Some((
@@ -223,7 +240,7 @@ pub fn list_visible(area: Rect, app: &App) -> u16 {
     let Some(pal) = app.palette.as_ref() else {
         return 0;
     };
-    geom(area, list_row_count(pal, app)).list.height
+    geom(area, list_row_count(pal, app), pal.mode).list.height
 }
 
 fn draw_command_list(
@@ -269,7 +286,7 @@ fn draw_command_list(
                 let line = Line::from(Span::styled(
                     cat.label().to_string(),
                     Style::default()
-                        .fg(theme.build)
+                        .fg(theme.fg)
                         .bg(panel)
                         .add(Modifier::BOLD),
                 ));
@@ -295,7 +312,7 @@ fn draw_command_list(
                 let mut spans = vec![Span::styled(left, Style::default().fg(name_fg).bg(bg))];
                 let mid_budget = avail.saturating_sub(left_w + short_w + 2);
                 if mid_budget > 4 && !desc.is_empty() {
-                    let d = ellipsize(desc, mid_budget.saturating_sub(1));
+                    let d = crate::render::two_col::ellipsize(desc, mid_budget.saturating_sub(1));
                     spans.push(Span::styled(
                         format!(" {d}"),
                         Style::default().fg(desc_fg).bg(bg),
@@ -348,7 +365,7 @@ fn draw_model_list(
             return;
         }
         ModelsCatalogState::Failed(err) => {
-            let msg = ellipsize(err, area.width as usize);
+            let msg = crate::render::two_col::ellipsize(err, area.width as usize);
             let line = Line::from(Span::styled(
                 msg,
                 Style::default().fg(theme.err).bg(panel),
@@ -389,7 +406,7 @@ fn draw_model_list(
                 let line = Line::from(Span::styled(
                     (*label).to_string(),
                     Style::default()
-                        .fg(theme.build)
+                        .fg(theme.fg)
                         .bg(panel)
                         .add(Modifier::BOLD),
                 ));
@@ -471,8 +488,11 @@ fn draw_connect_list(
             ConnectRow::Add => ("  Add provider…".into(), String::new()),
             ConnectRow::RemoveActive => ("  Remove active".into(), String::new()),
         };
-        let (left, right, gap) =
-            layout_label_host(&raw_left, &raw_right, area.width as usize);
+        let (left, right, gap) = crate::render::two_col::layout_label_host(
+            &raw_left,
+            &raw_right,
+            area.width as usize,
+        );
         let line = Line::from(vec![
             Span::styled(left, Style::default().fg(name_fg).bg(bg)),
             Span::styled(" ".repeat(gap), Style::default().bg(bg)),
@@ -519,15 +539,12 @@ fn draw_preset_list(
         let bg = if is_sel { theme.sel_bg } else { panel };
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
-        let host = preset
-            .base_url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("");
-        let (left, right, gap) =
-            layout_label_host(preset.label, host, area.width as usize);
+        let host = crate::render::two_col::host_hint(preset.base_url);
+        let (left, right, gap) = crate::render::two_col::layout_label_host(
+            preset.label,
+            host,
+            area.width as usize,
+        );
         let line = Line::from(vec![
             Span::styled(left, Style::default().fg(name_fg).bg(bg)),
             Span::styled(" ".repeat(gap), Style::default().bg(bg)),
@@ -558,44 +575,6 @@ fn draw_connect_key_hint(
     crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
 }
 
-fn ellipsize(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
-/// Left label + right-aligned host; truncates host (then label) so they never collide.
-fn layout_label_host(label: &str, host: &str, width: usize) -> (String, String, usize) {
-    if width == 0 {
-        return (String::new(), String::new(), 0);
-    }
-    if host.is_empty() {
-        return (ellipsize(label, width), String::new(), 0);
-    }
-
-    const MIN_GAP: usize = 1;
-    let label_w = label.chars().count();
-    let host_w = host.chars().count();
-    if label_w + MIN_GAP + host_w <= width {
-        return (label.to_string(), host.to_string(), width - label_w - host_w);
-    }
-
-    // Prefer a readable label; squeeze the host first.
-    let label_max = width.saturating_sub(MIN_GAP + 4).max(1);
-    let left = ellipsize(label, label_max.min(label_w));
-    let left_w = left.chars().count();
-    let right = ellipsize(host, width.saturating_sub(left_w + MIN_GAP));
-    let right_w = right.chars().count();
-    let gap = width.saturating_sub(left_w + right_w);
-    (left, right, gap)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,12 +586,16 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         });
         a.open_palette();
         a
@@ -623,25 +606,12 @@ mod tests {
     }
 
     #[test]
-    fn long_host_does_not_collide_with_label() {
-        let (left, right, gap) = layout_label_host(
-            "  Google AI",
-            "generativelanguage.googleapis.com",
-            40,
-        );
-        assert_eq!(left.chars().count() + gap + right.chars().count(), 40);
-        assert!(gap >= 1);
-        assert!(right.ends_with('…'), "{right}");
-        assert!(!left.contains("generative"), "{left}");
-    }
-
-    #[test]
     fn palette_is_centered_and_compact() {
         let a = app();
         let size = Size::new(80, 24);
         let area = Rect::new(0, 0, size.width, size.height);
-        let list_rows = list_row_count(a.palette.as_ref().unwrap(), &a);
-        let g = geom(area, list_rows);
+        let pal = a.palette.as_ref().unwrap();
+        let g = geom(area, list_row_count(pal, &a), pal.mode);
 
         assert!(g.win.width <= MAX_W, "width={}", g.win.width);
         assert!(g.win.width >= MIN_W.min(size.width));
@@ -649,6 +619,18 @@ mod tests {
         let expected_y = (size.height - g.win.height) / 2;
         assert_eq!(g.win.x, expected_x);
         assert_eq!(g.win.y, expected_y);
+    }
+
+    #[test]
+    fn model_palette_is_wider() {
+        let mut a = app();
+        a.palette = Some(PaletteState::models());
+        let size = Size::new(100, 24);
+        let area = Rect::new(0, 0, size.width, size.height);
+        let pal = a.palette.as_ref().unwrap();
+        let g = geom(area, list_row_count(pal, &a), pal.mode);
+        assert!(g.win.width > MAX_W, "width={}", g.win.width);
+        assert!(g.win.width <= MAX_W_MODELS, "width={}", g.win.width);
     }
 
     #[test]
@@ -706,7 +688,8 @@ mod tests {
 
         a.palette.as_mut().unwrap().focus_search();
         let (cx, cy) = search_cursor(area, &a).expect("cursor when focused");
-        let g = geom(area, list_row_count(a.palette.as_ref().unwrap(), &a));
+        let pal = a.palette.as_ref().unwrap();
+        let g = geom(area, list_row_count(pal, &a), pal.mode);
         assert_eq!(cy, g.search_y);
         assert_eq!(cx, g.content.x);
     }
@@ -726,8 +709,8 @@ mod tests {
         let a = app();
         let size = Size::new(80, 24);
         let area = Rect::new(0, 0, size.width, size.height);
-        let list_rows = list_row_count(a.palette.as_ref().unwrap(), &a);
-        let g = geom(area, list_rows);
+        let pal = a.palette.as_ref().unwrap();
+        let g = geom(area, list_row_count(pal, &a), pal.mode);
         assert!(!g.win.contains(0, 0), "probe cell must be outside panel");
 
         let mut buf = Buffer::blank(size);
@@ -748,9 +731,8 @@ mod tests {
     fn list_visible_matches_geom() {
         let a = app();
         let area = Rect::new(0, 0, 80, 24);
-        let expected = geom(area, list_row_count(a.palette.as_ref().unwrap(), &a))
-            .list
-            .height;
+        let pal = a.palette.as_ref().unwrap();
+        let expected = geom(area, list_row_count(pal, &a), pal.mode).list.height;
         assert_eq!(list_visible(area, &a), expected);
         assert!(expected > 0);
     }

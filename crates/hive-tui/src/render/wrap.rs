@@ -5,7 +5,27 @@
 use comb::{Line, Span, Style};
 use unicode_width::UnicodeWidthChar;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrapJoin {
+    Hard,
+    SoftSpace,
+    SoftNone,
+}
+
+#[derive(Clone, Debug)]
+pub struct WrappedLine {
+    pub line: Line,
+    pub join_before: WrapJoin,
+}
+
 pub fn wrap_lines(lines: Vec<Line>, width: usize) -> Vec<Line> {
+    wrap_lines_with_joins(lines, width)
+        .into_iter()
+        .map(|row| row.line)
+        .collect()
+}
+
+pub fn wrap_lines_with_joins(lines: Vec<Line>, width: usize) -> Vec<WrappedLine> {
     let width = width.max(1);
     let mut out = Vec::new();
     for line in lines {
@@ -24,7 +44,10 @@ pub fn wrap_lines(lines: Vec<Line>, width: usize) -> Vec<Line> {
                 }));
         let is_code_fence = is_code_fence_line(&line, &plain);
         if is_tableish || is_code_fence {
-            out.push(truncate_line(line, width));
+            out.push(WrappedLine {
+                line: truncate_line(line, width),
+                join_before: WrapJoin::Hard,
+            });
         } else {
             out.extend(wrap_one(line, width));
         }
@@ -72,7 +95,7 @@ fn char_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
-fn wrap_one(line: Line, width: usize) -> Vec<Line> {
+fn wrap_one(line: Line, width: usize) -> Vec<WrappedLine> {
     let mut cells: Vec<(char, Style)> = Vec::new();
     for span in line.spans {
         for ch in span.content.chars() {
@@ -80,7 +103,10 @@ fn wrap_one(line: Line, width: usize) -> Vec<Line> {
         }
     }
     if cells.is_empty() {
-        return vec![Line::from(String::new())];
+        return vec![WrappedLine {
+            line: Line::from(String::new()),
+            join_before: WrapJoin::Hard,
+        }];
     }
 
     // Leading whitespace is structural indent (tool tails, nested quotes). Carry
@@ -94,10 +120,11 @@ fn wrap_one(line: Line, width: usize) -> Vec<Line> {
     let indent_w: usize = indent.iter().map(|(c, _)| char_width(*c)).sum();
     let preserve_indent = !indent.is_empty() && indent_w + 1 < width;
 
-    let mut result: Vec<Line> = Vec::new();
+    let mut result: Vec<WrappedLine> = Vec::new();
     let mut cur: Vec<(char, Style)> = Vec::new();
     let mut cur_w = 0usize;
     let mut last_space: Option<usize> = None;
+    let mut cur_join = WrapJoin::Hard;
     // After a soft wrap on non-indented prose, swallow spaces so a new row
     // never starts with a chip's leading pad (` {content} `).
     let mut skip_leading_spaces = false;
@@ -117,17 +144,29 @@ fn wrap_one(line: Line, width: usize) -> Vec<Line> {
                 cur.pop(); // drop the space at the break
                 trim_trailing_spaces(&mut cur);
                 if !cur.is_empty() {
-                    result.push(to_line(&cur));
+                    result.push(WrappedLine {
+                        line: to_line(&cur),
+                        join_before: cur_join,
+                    });
                 }
                 cur = reindent(carry, &indent, preserve_indent);
                 if !preserve_indent {
                     trim_leading_spaces(&mut cur);
                 }
                 cur_w = cur.iter().map(|(c, _)| char_width(*c)).sum();
+                cur_join = WrapJoin::SoftSpace;
             } else {
-                result.push(to_line(&cur));
+                result.push(WrappedLine {
+                    line: to_line(&cur),
+                    join_before: cur_join,
+                });
                 cur = reindent(vec![(ch, st)], &indent, preserve_indent);
                 cur_w = cur.iter().map(|(c, _)| char_width(*c)).sum();
+                cur_join = if ch.is_whitespace() {
+                    WrapJoin::SoftSpace
+                } else {
+                    WrapJoin::SoftNone
+                };
                 last_space = None;
                 skip_leading_spaces = !preserve_indent;
                 continue;
@@ -151,7 +190,10 @@ fn wrap_one(line: Line, width: usize) -> Vec<Line> {
     }
 
     if !cur.is_empty() {
-        result.push(to_line(&cur));
+        result.push(WrappedLine {
+            line: to_line(&cur),
+            join_before: cur_join,
+        });
     }
     result
 }
@@ -247,6 +289,29 @@ mod tests {
 
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_str()).collect()
+    }
+
+    #[test]
+    fn reports_space_removed_by_soft_wrap() {
+        let rows = wrap_lines_with_joins(vec![Line::from("alpha beta")], 6);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].join_before, WrapJoin::Hard);
+        assert_eq!(rows[1].join_before, WrapJoin::SoftSpace);
+    }
+
+    #[test]
+    fn reports_hard_token_wrap_without_separator() {
+        let rows = wrap_lines_with_joins(vec![Line::from("abcdefgh")], 4);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].join_before, WrapJoin::SoftNone);
+    }
+
+    #[test]
+    fn reports_real_input_line_boundary() {
+        let rows = wrap_lines_with_joins(vec![Line::from("first"), Line::from("second")], 20);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].join_before, WrapJoin::Hard);
+        assert_eq!(rows[1].join_before, WrapJoin::Hard);
     }
 
     #[test]

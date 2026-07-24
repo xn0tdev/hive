@@ -7,6 +7,7 @@ use crate::event::{AgentEvent, EventSender};
 use crate::message::ImageSource;
 use crate::skill::SkillSource;
 use crate::spawner::SubagentSpawner;
+use crate::terminal::TerminalHandle;
 
 /// What a tool returns after executing.
 #[derive(Debug, Clone)]
@@ -49,10 +50,18 @@ pub struct ToolContext {
     pub spawner: Arc<dyn SubagentSpawner>,
     pub skills: Arc<dyn SkillSource>,
     pub config: Arc<AppConfig>,
+    /// Root-only interactive terminal service. Subagents receive `None`.
+    pub terminal: Option<TerminalHandle>,
+    /// Whether the active model accepts image inputs (gates `read_file` attaches).
+    pub vision: bool,
     /// Recursion depth of the agent running this tool (0 = top-level).
     pub depth: usize,
     /// Correlates streamed `ToolOutput` events with the running tool card.
     pub call_id: String,
+    /// When true, spawned workers get isolated git worktrees (MULTITASK).
+    pub isolate_worktrees: bool,
+    /// Shared Esc / cancel flag from the running turn.
+    pub interrupt: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ToolContext {

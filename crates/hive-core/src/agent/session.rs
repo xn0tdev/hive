@@ -33,7 +33,22 @@ impl Session {
         self.usage = Usage::default();
     }
 
-    /// Replace the pinned system prompt (e.g. when BUILD/PLAN mode changes).
+    /// Current system prompt text.
+    pub fn system(&self) -> &str {
+        &self.system
+    }
+
+    /// Replace the entire message list (must keep a system message first).
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        if let Some(first) = self.messages.first() {
+            if matches!(first.role, crate::message::Role::System) {
+                self.system = first.text();
+            }
+        }
+    }
+
+    /// Replace the pinned system prompt (e.g. when MAKE/PLAN mode changes).
     pub fn set_system(&mut self, system: impl Into<String>) {
         let system = system.into();
         self.system = system.clone();

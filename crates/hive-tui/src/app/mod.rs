@@ -12,15 +12,54 @@ use comb::{Line, Rect};
 use hive_core::event::{AgentEvent, ConnectionInfo, SubagentLine, SubagentStatus};
 use hive_core::message::ImageSource;
 use hive_core::provider::Usage;
-use hive_core::{AgentMode, SidebarMode, UiConfig};
+use hive_core::{
+    AgentMode, SidebarMode, TerminalController, TerminalProcessState, UiConfig,
+};
 
 use crate::commands;
 use crate::render::spinner;
-use crate::render::tools::parse_sections;
 use crate::render::wordmark::LogoBonk;
-use crate::render::{ProjectSnapshot, SidebarSection, SidebarSections};
+use crate::render::{ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections};
 use crate::theme::Theme;
-use crate::{ModelChoice, TuiInit};
+use crate::{ModelChoice, SkillChoice, TuiInit};
+
+/// One row in the composer `/` menu: built-in command or skill.
+#[derive(Debug, Clone)]
+pub enum SlashItem {
+    Command(&'static commands::CommandDef),
+    Skill(SkillChoice),
+}
+
+impl SlashItem {
+    pub fn name(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.name,
+            SlashItem::Skill(s) => s.name.as_str(),
+        }
+    }
+
+    pub fn desc(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.desc,
+            SlashItem::Skill(s) => s.description.as_str(),
+        }
+    }
+
+    pub fn hint(&self) -> &str {
+        match self {
+            SlashItem::Command(c) => c.hint,
+            SlashItem::Skill(_) => "skill",
+        }
+    }
+
+    pub fn takes_arg(&self) -> bool {
+        match self {
+            SlashItem::Command(c) => c.takes_arg,
+            // Optional note after the skill name is typed manually; menu Enter runs now.
+            SlashItem::Skill(_) => false,
+        }
+    }
+}
 
 use files::AtQuery;
 use palette::PaletteState;
@@ -28,39 +67,73 @@ use settings::SettingsState;
 
 use input::InputState;
 use state::{
-    Block, ChatView, PlanCard, PlanStatus, PlanViewState, SubagentCard, Thought, ToolCard,
-    ToolStatus,
+    AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
+    Block, ChatView, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
+    PlanViewState, SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState, Thought,
+    ToolCard, ToolStatus,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
 /// every spinner tick / subagent status pulse.
+#[derive(Clone)]
+pub(crate) struct MdRows {
+    pub lines: Vec<Line>,
+    pub joins: Vec<AssistantRowJoin>,
+}
+
 #[derive(Default)]
 pub(crate) struct MdCache {
     width: usize,
-    entries: HashMap<u64, Vec<Line>>,
+    entries: HashMap<u64, MdRows>,
 }
 
 impl MdCache {
+    pub(crate) fn rows(
+        &mut self,
+        text: &str,
+        width: usize,
+        build: impl FnOnce() -> MdRows,
+    ) -> MdRows {
+        self.cached(text, width, 0x51ec_7100_0000_0001, build)
+    }
+
     pub(crate) fn lines(
         &mut self,
         text: &str,
         width: usize,
         build: impl FnOnce() -> Vec<Line>,
     ) -> Vec<Line> {
+        self.cached(text, width, 0x51ec_7100_0000_0002, || {
+            let lines = build();
+            MdRows {
+                joins: vec![AssistantRowJoin::Hard; lines.len()],
+                lines,
+            }
+        })
+        .lines
+    }
+
+    fn cached(
+        &mut self,
+        text: &str,
+        width: usize,
+        salt: u64,
+        build: impl FnOnce() -> MdRows,
+    ) -> MdRows {
         if width != self.width {
             self.entries.clear();
             self.width = width;
         }
-        let key = fnv1a64(text.as_bytes());
+        let key = fnv1a64(text.as_bytes()) ^ salt;
         if let Some(cached) = self.entries.get(&key) {
             return cached.clone();
         }
-        let lines = build();
+        let rows = build();
         if self.entries.len() >= 64 {
             self.entries.clear();
         }
-        self.entries.insert(key, lines.clone());
-        lines
+        self.entries.insert(key, rows.clone());
+        rows
     }
 }
 
@@ -73,19 +146,35 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// A file or image queued for the next turn, shown as a composer tag.
+/// A file or image queued for the next turn, shown as a composer `@chip`.
 #[derive(Clone)]
 pub struct PendingAttach {
-    /// Display label without brackets, e.g. `Image #1` or `File #1`.
+    /// Path shown after `@` (project-relative when possible).
     pub label: String,
+    /// Path sent to the agent (`[Attached file: …]`).
     pub path: String,
     /// Set for image attachments (vision path unchanged).
     pub image: Option<ImageSource>,
 }
 
+/// Follow-up typed while a turn is running — sent after `TurnFinished`.
+#[derive(Clone)]
+pub struct QueuedFollowUp {
+    /// Text shown in the transcript when flushed.
+    pub display: String,
+    /// Payload for the agent (may include `[Attached file: …]` notes).
+    pub text: String,
+    /// Composer text restored on ↑ (without `@chip` prefix).
+    pub composer: String,
+    /// Attachments restored on ↑ / re-queued on Enter.
+    pub attaches: Vec<PendingAttach>,
+    pub mode: AgentMode,
+}
+
 impl PendingAttach {
+    /// Composer / transcript chip, e.g. `@src/main.rs`.
     pub fn tag(&self) -> String {
-        format!("[{}]", self.label)
+        format!("@{}", self.label)
     }
 }
 
@@ -109,6 +198,14 @@ pub struct App {
     pub(crate) cwd: String,
     pub(crate) version: String,
     pub(crate) usage: Usage,
+    /// Tokens in the latest prompt (context fill).
+    pub(crate) context_tokens: u64,
+    /// Configured context window size.
+    pub(crate) context_window: u64,
+    /// USD per 1M input tokens for the active model.
+    pub(crate) cost_input: f64,
+    /// USD per 1M output tokens for the active model.
+    pub(crate) cost_output: f64,
     pub(crate) running: bool,
     pub(crate) spinner: usize,
     pub(crate) scroll_from_bottom: usize,
@@ -117,8 +214,12 @@ pub struct App {
     pub(crate) transcript_max_scroll: usize,
     /// Files / images queued for the next user message (shown as tags).
     pub(crate) pending_attaches: Vec<PendingAttach>,
+    /// Follow-up waiting for the current turn to finish.
+    pub(crate) follow_up: Option<QueuedFollowUp>,
     /// Models offered in the Switch-model picker (live catalog when Ready).
     pub(crate) model_choices: Vec<ModelChoice>,
+    /// Skills for the `/` menu (`/skill-name`).
+    pub(crate) skills: Vec<SkillChoice>,
     /// Fetch status for the live model catalog.
     pub(crate) models_catalog: ModelsCatalogState,
     /// Saved `/connect` provider profiles.
@@ -147,6 +248,24 @@ pub struct App {
     /// Screen rows of expandable headers from the last draw: (row, block index).
     /// Rebuilt every frame; used to hit-test mouse clicks on thoughts/subagents.
     pub(crate) click_hits: Vec<(u16, usize)>,
+    /// Visible rows of completed assistant responses, rebuilt every frame.
+    pub(crate) assistant_row_hits: Vec<AssistantRowHit>,
+    /// All rendered rows of completed assistant responses, including offscreen rows.
+    pub(crate) assistant_rows: Vec<AssistantResponseRow>,
+    /// Active drag selection inside one assistant response.
+    pub(crate) assistant_selection: Option<AssistantSelection>,
+    /// Transcript content width used when the current selection was created.
+    pub(crate) assistant_selection_width: usize,
+    /// Block index under the mouse (plan / subagent cards light up on hover).
+    pub(crate) hover_block: Option<usize>,
+    /// Sidebar subagent / terminal row under the mouse.
+    pub(crate) hover_sidebar_item: Option<SidebarItem>,
+    /// `← back` strip hovered in subagent / plan view.
+    pub(crate) hover_back: bool,
+    /// Plan-view MAKE button hovered.
+    pub(crate) hover_make: bool,
+    /// Terminal-view STOP button hovered.
+    pub(crate) hover_terminal_stop: bool,
     /// Landing-screen logo rect from the last draw (for click hit-testing).
     pub(crate) logo_hit: Option<Rect>,
     /// Active "bonk" ripple on the HIVE wordmark.
@@ -155,8 +274,12 @@ pub struct App {
     pub(crate) view: ChatView,
     /// Hit target for the `← back` control in subagent/plan view (last draw).
     pub(crate) back_hit: Option<Rect>,
-    /// Hit target for the Build button in plan preview (last draw).
-    pub(crate) build_hit: Option<Rect>,
+    /// Hit target for the Make / Send button in plan preview (last draw).
+    pub(crate) make_hit: Option<Rect>,
+    /// Hit target for STOP in the terminal bottom bar.
+    pub(crate) terminal_stop_hit: Option<Rect>,
+    /// Transcript viewport from the last draw (plan body hit-testing).
+    pub(crate) transcript_hit: Option<Rect>,
     /// Hit target for the main input strip (last draw). Cleared in special views.
     pub(crate) input_hit: Option<Rect>,
     /// Whether the main input has keyboard focus (caret + typing).
@@ -164,10 +287,14 @@ pub struct App {
     /// Wall clock of the last key that affected the composer (typing / caret).
     /// Cleared when blurred. Used for idle auto-blur.
     pub(crate) input_last_activity: Option<std::time::Instant>,
-    /// BUILD / PLAN mode for the next user turn.
+    /// MAKE / PLAN mode for the next user turn.
     pub(crate) agent_mode: AgentMode,
     /// Plan preview selection / amend state.
     pub(crate) plan_view: PlanViewState,
+    /// Interactive terminal special-view state.
+    pub(crate) terminal_view: TerminalViewState,
+    /// Body resize waiting to be sent to the PTY manager.
+    pub(crate) pending_terminal_resize: Option<(String, u16, u16)>,
     /// Finished-assistant markdown cache (invalidated on width change).
     pub(crate) md_cache: MdCache,
     /// Cached git project / diff summary for the right sidebar.
@@ -186,6 +313,8 @@ pub struct App {
     pub(crate) sidebar_sections: SidebarSections,
     /// Hit targets for collapsible section headers (last draw).
     pub(crate) sidebar_section_hits: Vec<(Rect, SidebarSection)>,
+    /// Hit targets for clickable subagent / terminal rows (last draw).
+    pub(crate) sidebar_item_hits: Vec<(Rect, SidebarItem)>,
     /// Project instruction files present under cwd (refreshed with the project snapshot).
     pub(crate) context_files: Vec<hive_core::ContextFile>,
     /// Visible list rows in the palette (last draw) — keeps keyboard selection in view.
@@ -217,12 +346,18 @@ impl App {
             cwd: init.cwd,
             version: init.version,
             usage: Usage::default(),
+            context_tokens: 0,
+            context_window: init.context_window.max(1),
+            cost_input: init.cost_input,
+            cost_output: init.cost_output,
             running: false,
             spinner: 0,
             scroll_from_bottom: 0,
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
+            follow_up: None,
             model_choices: init.model_choices,
+            skills: init.skills,
             models_catalog: ModelsCatalogState::Idle,
             connections: init.connections,
             active_connection: init.active_connection,
@@ -236,16 +371,29 @@ impl App {
             ctrl_c_armed: None,
             anim_start: std::time::Instant::now(),
             click_hits: Vec::new(),
+            assistant_row_hits: Vec::new(),
+            assistant_rows: Vec::new(),
+            assistant_selection: None,
+            assistant_selection_width: 0,
+            hover_block: None,
+            hover_sidebar_item: None,
+            hover_back: false,
+            hover_make: false,
+            hover_terminal_stop: false,
             logo_hit: None,
             logo_bonk: None,
             view: ChatView::Main,
             back_hit: None,
-            build_hit: None,
+            make_hit: None,
+            terminal_stop_hit: None,
+            transcript_hit: None,
             input_hit: None,
             input_focused: true,
             input_last_activity: Some(std::time::Instant::now()),
-            agent_mode: AgentMode::Build,
+            agent_mode: AgentMode::Make,
             plan_view: PlanViewState::default(),
+            terminal_view: TerminalViewState::default(),
+            pending_terminal_resize: None,
             md_cache: MdCache::default(),
             project: ProjectSnapshot::default(),
             sidebar_open: !matches!(init.ui.sidebar_mode, SidebarMode::Hidden),
@@ -255,6 +403,7 @@ impl App {
             sidebar_resizing: false,
             sidebar_sections: SidebarSections::default(),
             sidebar_section_hits: Vec::new(),
+            sidebar_item_hits: Vec::new(),
             context_files: Vec::new(),
             palette_list_visible: 0,
         };
@@ -286,7 +435,7 @@ impl App {
         }
     }
 
-    /// Toggle a collapsible sidebar section (Context / Sub agents / Changes).
+    /// Toggle a collapsible sidebar section (Context / Sub agents / Terminals / Changes).
     pub fn toggle_sidebar_section(&mut self, section: SidebarSection) {
         if !self.ui.sidebar_collapse_sections {
             return;
@@ -346,15 +495,19 @@ impl App {
         matches!(self.view, ChatView::Plan)
     }
 
-    /// True in any read-only special view (subagent or plan).
+    pub fn in_terminal_view(&self) -> bool {
+        matches!(self.view, ChatView::Terminal(_))
+    }
+
+    /// True in any special view (subagent, plan, or terminal).
     pub fn in_special_view(&self) -> bool {
-        self.in_subagent_view() || self.in_plan_view()
+        self.in_subagent_view() || self.in_plan_view() || self.in_terminal_view()
     }
 
     /// The subagent card currently being viewed, if any.
     pub fn viewed_subagent(&self) -> Option<&SubagentCard> {
         match &self.view {
-            ChatView::Main | ChatView::Plan => None,
+            ChatView::Main | ChatView::Plan | ChatView::Terminal(_) => None,
             ChatView::Subagent(id) => self.blocks.iter().find_map(|b| match b {
                 Block::Subagent(card) if card.id == *id => Some(card),
                 _ => None,
@@ -370,41 +523,194 @@ impl App {
         })
     }
 
+    pub fn terminal_card(&self, id: &str) -> Option<&TerminalCard> {
+        self.blocks.iter().find_map(|block| match block {
+            Block::Terminal(card) if card.id == id => Some(card.as_ref()),
+            _ => None,
+        })
+    }
+
+    pub fn viewed_terminal(&self) -> Option<&TerminalCard> {
+        let ChatView::Terminal(id) = &self.view else {
+            return None;
+        };
+        self.terminal_card(id)
+    }
+
+    pub fn terminal_view_id(&self) -> Option<&str> {
+        match &self.view {
+            ChatView::Terminal(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Open the read-only chat view for a subagent card.
     pub fn open_subagent_view(&mut self, id: String) {
+        self.clear_assistant_selection();
         self.view = ChatView::Subagent(id);
         self.scroll_from_bottom = 0;
+        self.hover_block = None;
+        self.hover_sidebar_item = None;
+        self.hover_back = false;
+        self.hover_make = false;
         self.back_hit = None;
-        self.build_hit = None;
+        self.make_hit = None;
         self.blur_input();
     }
 
     /// Open the Plan.md markdown preview.
     pub fn open_plan_view(&mut self) {
-        let body = self.plan_card().map(|c| c.body.clone()).unwrap_or_default();
-        self.plan_view = PlanViewState {
-            sections: parse_sections(&body),
-            cursor: 0,
-            selected: Default::default(),
-            amending: false,
-        };
+        self.clear_assistant_selection();
+        self.plan_view = PlanViewState::default();
         self.view = ChatView::Plan;
-        self.scroll_from_bottom = 0;
+        // Pin to the top of the plan (chat uses bottom-pin; 0 would show the end).
+        self.scroll_from_bottom = usize::MAX;
+        self.hover_block = None;
+        self.hover_sidebar_item = None;
+        self.hover_back = false;
+        self.hover_make = false;
         self.back_hit = None;
-        self.build_hit = None;
+        self.make_hit = None;
         self.blur_input();
         let _ = self.input.take();
     }
 
+    pub fn open_terminal_view(&mut self, id: String) {
+        let (phase, last_size) = self
+            .terminal_card(&id)
+            .map(|card| {
+                let phase = if !matches!(card.process, TerminalProcessState::Running) {
+                    TerminalViewPhase::ReadOnly
+                } else if card.controller == TerminalController::User {
+                    TerminalViewPhase::UserControl
+                } else {
+                    TerminalViewPhase::Attaching
+                };
+                (phase, Some(card.screen.size()))
+            })
+            .unwrap_or((TerminalViewPhase::Failed, None));
+        self.clear_assistant_selection();
+        self.terminal_view = TerminalViewState {
+            phase,
+            body_rect: None,
+            scrollback: 0,
+            last_size,
+        };
+        self.view = ChatView::Terminal(id);
+        self.scroll_from_bottom = 0;
+        self.hover_block = None;
+        self.hover_sidebar_item = None;
+        self.hover_back = false;
+        self.hover_make = false;
+        self.hover_terminal_stop = false;
+        self.back_hit = None;
+        self.make_hit = None;
+        self.terminal_stop_hit = None;
+        self.pending_terminal_resize = None;
+        self.blur_input();
+        let _ = self.input.take();
+    }
+
+    pub fn leave_terminal_view(&mut self) {
+        self.leave_special_view();
+    }
+
+    pub fn terminal_input_modes(&self) -> Option<(bool, bool)> {
+        let screen = &self.viewed_terminal()?.screen;
+        Some((screen.application_cursor(), screen.bracketed_paste()))
+    }
+
+    pub fn scroll_terminal(&mut self, rows: isize) -> bool {
+        let Some(id) = self.terminal_view_id().map(str::to_string) else {
+            return false;
+        };
+        let current = self.terminal_view.scrollback;
+        let requested = if rows >= 0 {
+            current.saturating_add(rows as usize)
+        } else {
+            current.saturating_sub(rows.unsigned_abs())
+        };
+        let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
+            Block::Terminal(card) if card.id == id => Some(card.as_mut()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        card.screen.set_scrollback(requested);
+        let actual = card.screen.scrollback();
+        if actual == current {
+            return false;
+        }
+        self.terminal_view.scrollback = actual;
+        true
+    }
+
+    pub fn take_pending_terminal_resize(&mut self) -> Option<(String, u16, u16)> {
+        self.pending_terminal_resize.take()
+    }
+
     /// Return to the main agent transcript.
     pub fn leave_special_view(&mut self) {
+        self.clear_assistant_selection();
         self.view = ChatView::Main;
         self.scroll_from_bottom = 0;
+        self.hover_block = None;
+        self.hover_sidebar_item = None;
+        self.hover_back = false;
+        self.hover_make = false;
+        self.hover_terminal_stop = false;
         self.back_hit = None;
-        self.build_hit = None;
+        self.make_hit = None;
+        self.terminal_stop_hit = None;
         self.plan_view = PlanViewState::default();
+        self.terminal_view = TerminalViewState::default();
+        self.pending_terminal_resize = None;
         let _ = self.input.take();
         self.focus_input();
+    }
+
+    /// Update hover highlight; returns whether the UI should redraw.
+    pub fn set_hover_block(&mut self, idx: Option<usize>) -> bool {
+        if self.hover_block == idx {
+            return false;
+        }
+        self.hover_block = idx;
+        true
+    }
+
+    /// Update sidebar row hover; returns whether the UI should redraw.
+    pub fn set_hover_sidebar_item(&mut self, item: Option<SidebarItem>) -> bool {
+        if self.hover_sidebar_item == item {
+            return false;
+        }
+        self.hover_sidebar_item = item;
+        true
+    }
+
+    /// Update `← back` hover; returns whether the UI should redraw.
+    pub fn set_hover_back(&mut self, on: bool) -> bool {
+        if self.hover_back == on {
+            return false;
+        }
+        self.hover_back = on;
+        true
+    }
+
+    /// Update MAKE hover; returns whether the UI should redraw.
+    pub fn set_hover_make(&mut self, on: bool) -> bool {
+        if self.hover_make == on {
+            return false;
+        }
+        self.hover_make = on;
+        true
+    }
+
+    pub fn set_hover_terminal_stop(&mut self, on: bool) -> bool {
+        if self.hover_terminal_stop == on {
+            return false;
+        }
+        self.hover_terminal_stop = on;
+        true
     }
 
     /// Return to the main agent transcript.
@@ -414,61 +720,257 @@ impl App {
 
     pub fn toggle_agent_mode(&mut self) {
         self.agent_mode = self.agent_mode.toggle();
-        // Mode is visible on the BUILD/PLAN chip — no toast.
+        // Mode is visible on the MAKE/PLAN chip — no toast.
     }
 
-    /// Toggle selection of the section under the plan cursor.
-    pub fn plan_toggle_select(&mut self) {
-        if self.plan_view.sections.is_empty() {
+    /// Persist the composer into the active correction comment.
+    pub fn plan_sync_active_note(&mut self) {
+        let Some(i) = self.plan_view.active else {
             return;
-        }
-        let i = self.plan_view.cursor;
-        if self.plan_view.selected.contains(&i) {
-            self.plan_view.selected.remove(&i);
-        } else {
-            self.plan_view.selected.insert(i);
-        }
-        self.plan_view.amending = !self.plan_view.selected.is_empty();
-        if self.plan_view.amending {
-            self.focus_input();
-        } else {
-            self.blur_input();
-            let _ = self.input.take();
-        }
-    }
-
-    pub fn plan_cursor_up(&mut self) {
-        if self.plan_view.cursor > 0 {
-            self.plan_view.cursor -= 1;
-        }
-    }
-
-    pub fn plan_cursor_down(&mut self) {
-        if self.plan_view.cursor + 1 < self.plan_view.sections.len() {
-            self.plan_view.cursor += 1;
-        }
-    }
-
-    /// Build the amend user message from selected sections + composer text.
-    pub fn plan_amend_message(&self, notes: &str) -> String {
-        let titles: Vec<&str> = self
-            .plan_view
-            .selected
-            .iter()
-            .filter_map(|i| self.plan_view.sections.get(*i).map(|s| s.title.as_str()))
-            .collect();
-        let list = if titles.is_empty() {
-            "(whole plan)".to_string()
-        } else {
-            titles
-                .iter()
-                .map(|t| format!("- {t}"))
-                .collect::<Vec<_>>()
-                .join("\n")
         };
-        format!(
-            "Revise the plan in `.hive/Plan.md`.\n\nSelected sections:\n{list}\n\nUser notes:\n{notes}"
-        )
+        if let Some(c) = self.plan_view.corrections.get_mut(i) {
+            c.note = self.input.value.clone();
+        }
+    }
+
+    /// True while writing/editing a comment (composer + MARK).
+    /// Idle with saved comments shows ← back + SEND (like ← back + MAKE).
+    pub fn plan_composing(&self) -> bool {
+        self.plan_view
+            .drag_range()
+            .is_some_and(|(start, end)| start < end)
+            || self.plan_view.active.is_some()
+            || (!self.input.is_empty() && self.plan_view.has_corrections())
+    }
+
+    /// Enter / MARK: attach composer text to the selection, then idle → SEND.
+    /// Returns whether anything changed.
+    pub fn plan_commit_note(&mut self) -> bool {
+        if !self.plan_composing() && !self.plan_view.has_corrections() {
+            return false;
+        }
+        if self.plan_view.active.is_none() && self.plan_view.drag.is_none() {
+            return false;
+        }
+        self.plan_sync_active_note();
+        let _ = self.input.take();
+        self.plan_view.active = None;
+        self.blur_input();
+        let n = self.plan_view.corrections.len();
+        if n == 0 {
+            self.flash("Nothing to add");
+        } else if n == 1 {
+            self.flash("Comment added · select more or SEND");
+        } else {
+            self.flash(format!("{n} comments · select more or SEND"));
+        }
+        true
+    }
+
+    /// Which right-chip: MAKE (no comments) / MARK (composing) / SEND (idle with comments).
+    pub fn plan_action(&self) -> PlanAction {
+        if self.plan_composing() {
+            PlanAction::Add
+        } else if !self.plan_view.has_corrections() {
+            PlanAction::Make
+        } else {
+            PlanAction::Send
+        }
+    }
+
+    /// Four-cell chip labels keep every action exactly centered in the same button.
+    pub fn plan_action_word(&self) -> &'static str {
+        match self.plan_action() {
+            PlanAction::Make => "MAKE",
+            PlanAction::Add => "MARK",
+            PlanAction::Send => "SEND",
+        }
+    }
+
+    /// Focus a correction and load its comment into the composer (read / edit).
+    pub fn plan_focus_correction(&mut self, idx: usize) -> bool {
+        if idx >= self.plan_view.corrections.len() {
+            return false;
+        }
+        self.plan_sync_active_note();
+        self.plan_view.active = Some(idx);
+        let note = self.plan_view.corrections[idx].note.clone();
+        self.input.clear();
+        if !note.is_empty() {
+            self.input.insert_str(&note);
+        }
+        self.focus_input();
+        self.flash("Edit comment · MARK saves");
+        true
+    }
+
+    /// Leave the composer; keep saved comments (back + SEND).
+    pub fn plan_stop_composing(&mut self) -> bool {
+        if !self.plan_composing() {
+            return false;
+        }
+        // Drop an unfinished mark with no comment yet.
+        if let Some(i) = self.plan_view.active {
+            if self
+                .plan_view
+                .corrections
+                .get(i)
+                .is_some_and(|c| c.note.trim().is_empty() && self.input.is_empty())
+            {
+                self.plan_view.corrections.remove(i);
+            } else {
+                self.plan_sync_active_note();
+            }
+        }
+        self.plan_view.active = None;
+        self.plan_view.drag = None;
+        let _ = self.input.take();
+        self.blur_input();
+        true
+    }
+
+    /// Finalize a drag range into a new correction (or focus an overlapping one).
+    pub fn plan_finish_selection(&mut self, mut start: usize, mut end: usize) -> bool {
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        self.plan_view.drag = None;
+        if start > end {
+            return false;
+        }
+        let Some(body) = self.plan_card().map(|c| c.body.clone()) else {
+            return false;
+        };
+        if end > body.len() || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+            return false;
+        }
+        // Click or selection fully inside an existing mark → open note to read/edit.
+        if let Some(i) = self.plan_view.corrections.iter().position(|c| {
+            start >= c.start && start < c.end && end <= c.end
+        }) {
+            return self.plan_focus_correction(i);
+        }
+        // Empty click outside any mark.
+        if start == end {
+            return false;
+        }
+        let slice = &body[start..end];
+        let Some(rel_start) = slice.find(|c: char| !c.is_whitespace()) else {
+            return false;
+        };
+        let rel_end = slice
+            .rfind(|c: char| !c.is_whitespace())
+            .map(|i| {
+                i + slice[i..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1)
+            })
+            .unwrap_or(rel_start);
+        let new_start = start + rel_start;
+        let new_end = start + rel_end;
+        start = new_start;
+        end = new_end;
+        if start >= end || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+            return false;
+        }
+        let excerpt = body[start..end].to_string();
+        self.plan_sync_active_note();
+        self.plan_view.corrections.push(PlanCorrection {
+            start,
+            end,
+            excerpt,
+            note: String::new(),
+        });
+        let idx = self.plan_view.corrections.len() - 1;
+        self.plan_view.active = Some(idx);
+        let _ = self.input.take();
+        self.focus_input();
+        true
+    }
+
+    /// Build the revise-plan user message from text corrections.
+    pub fn plan_corrections_message(&self) -> String {
+        let mut out = String::from(
+            "Revise the plan in `.hive/Plan.md` based on these corrections. \
+Keep everything else unless a note says otherwise.\n",
+        );
+        for (i, c) in self.plan_view.corrections.iter().enumerate() {
+            out.push_str(&format!("\n### Correction {}\n\n", i + 1));
+            for line in c.excerpt.lines() {
+                out.push_str("> ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            if !c.note.trim().is_empty() {
+                out.push_str("\nNote: ");
+                out.push_str(c.note.trim());
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Clear corrections and leave the composer (stay in plan view).
+    pub fn plan_clear_corrections(&mut self) {
+        self.plan_view.corrections.clear();
+        self.plan_view.active = None;
+        self.plan_view.drag = None;
+        let _ = self.input.take();
+        self.blur_input();
+    }
+
+    /// Map a screen cell in the plan transcript to a source byte offset.
+    pub fn plan_byte_at(&self, col: u16, row: u16) -> Option<usize> {
+        use crate::render::tools::{col_to_offset, PlanRowSpan};
+
+        let hit = self.transcript_hit?;
+        if !hit.contains(col, row) {
+            return None;
+        }
+        let scroll = self
+            .transcript_max_scroll
+            .saturating_sub(self.scroll_from_bottom);
+        let line_idx = scroll + (row - hit.y) as usize;
+        let body_i = line_idx.checked_sub(self.plan_view.body_line0)?;
+        let &(start, end) = self.plan_view.row_spans.get(body_i)?;
+        let body = self.plan_card()?.body.as_str();
+        if start > body.len() || end > body.len() {
+            return None;
+        }
+        let x = col.saturating_sub(hit.x) as usize;
+        let content_col = x.saturating_sub(2);
+        Some(col_to_offset(
+            body,
+            &PlanRowSpan { start, end },
+            content_col,
+        ))
+    }
+
+    /// Start / update / finish a drag selection over the plan body.
+    pub fn plan_drag_to(&mut self, col: u16, row: u16, finish: bool) -> bool {
+        let Some(off) = self.plan_byte_at(col, row) else {
+            if finish {
+                self.plan_view.drag = None;
+            }
+            return false;
+        };
+        match &mut self.plan_view.drag {
+            Some(d) => d.current = off,
+            None => {
+                self.plan_view.drag = Some(crate::app::state::PlanDrag {
+                    anchor: off,
+                    current: off,
+                });
+            }
+        }
+        if finish {
+            let (a, b) = self.plan_view.drag_range().unwrap_or((0, 0));
+            self.plan_finish_selection(a, b)
+        } else {
+            true
+        }
     }
 
     pub fn focus_input(&mut self) {
@@ -511,6 +1013,267 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Begin a selection only when the pointer is on visible assistant text.
+    pub fn start_assistant_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some((block, point)) = self.assistant_point_at(col, row, None, false) else {
+            return false;
+        };
+        self.assistant_selection = Some(AssistantSelection {
+            block,
+            anchor: point,
+            current: point,
+            dragged: false,
+            active: true,
+        });
+        true
+    }
+
+    /// Update the active selection, clamping it to the response where it began.
+    pub fn update_assistant_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some((block, active)) = self
+            .assistant_selection
+            .as_ref()
+            .map(|selection| (selection.block, selection.active))
+        else {
+            return false;
+        };
+        if !active {
+            return false;
+        }
+        let Some((_, point)) = self.assistant_point_at(col, row, Some(block), true) else {
+            return false;
+        };
+        let selection = self.assistant_selection.as_mut().expect("checked above");
+        let changed = selection.current != point;
+        selection.current = point;
+        selection.dragged |= selection.current != selection.anchor;
+        changed
+    }
+
+    /// Finish a drag, consume its highlight, and return clean rendered text.
+    /// A plain click is discarded.
+    pub fn finish_assistant_selection(&mut self, col: u16, row: u16) -> Option<String> {
+        if !self.assistant_selection_active() {
+            return None;
+        }
+        let _ = self.update_assistant_selection(col, row);
+        let selection = self.assistant_selection.clone()?;
+        if !selection.dragged {
+            self.assistant_selection = None;
+            return None;
+        }
+        let text = self.assistant_selection_text(&selection);
+        self.assistant_selection = None;
+        text
+    }
+
+    pub fn assistant_selection_active(&self) -> bool {
+        self.assistant_selection
+            .as_ref()
+            .is_some_and(|selection| selection.active)
+    }
+
+    /// Clear the current selection; returns whether a redraw is needed.
+    pub fn clear_assistant_selection(&mut self) -> bool {
+        self.assistant_selection.take().is_some()
+    }
+
+    fn assistant_row_data(&self, block: usize, row: usize) -> Option<(&str, AssistantRowJoin)> {
+        self.assistant_rows
+            .iter()
+            .find(|candidate| candidate.block == block && candidate.response_row == row)
+            .map(|candidate| (candidate.text.as_str(), candidate.join_before))
+            .or_else(|| {
+                self.assistant_row_hits
+                    .iter()
+                    .find(|candidate| candidate.block == block && candidate.response_row == row)
+                    .map(|candidate| (candidate.text.as_str(), candidate.join_before))
+            })
+    }
+
+    /// Selected half-open display-column range for one rendered response row.
+    pub fn assistant_selected_cols(&self, block: usize, row: usize) -> Option<(usize, usize)> {
+        let selection = self.assistant_selection.as_ref()?;
+        if selection.block != block {
+            return None;
+        }
+        let (first, last) = normalized_points(selection.anchor, selection.current);
+        if row < first.row || row > last.row {
+            return None;
+        }
+        let (text, _) = self.assistant_row_data(block, row)?;
+        assistant_row_selected_cols(first, last, row, text)
+    }
+
+    fn assistant_point_from_rendered_rows(
+        &self,
+        col: u16,
+        row: u16,
+        block: usize,
+    ) -> Option<AssistantPoint> {
+        let viewport = self.transcript_hit?;
+        let viewport_row = usize::from(row.saturating_sub(viewport.y))
+            .min(usize::from(viewport.height.saturating_sub(1)));
+        let line_idx = self
+            .transcript_max_scroll
+            .saturating_sub(self.scroll_from_bottom)
+            .saturating_add(viewport_row);
+        let first = self
+            .assistant_rows
+            .iter()
+            .filter(|candidate| candidate.block == block)
+            .min_by_key(|candidate| candidate.line_idx)?;
+        let last = self
+            .assistant_rows
+            .iter()
+            .filter(|candidate| candidate.block == block)
+            .max_by_key(|candidate| candidate.line_idx)?;
+        let candidate = if line_idx <= first.line_idx {
+            first
+        } else if line_idx >= last.line_idx {
+            last
+        } else {
+            self.assistant_rows
+                .iter()
+                .filter(|candidate| candidate.block == block)
+                .min_by_key(|candidate| candidate.line_idx.abs_diff(line_idx))?
+        };
+        let width = display_width(&candidate.text);
+        let relative = if width == 0 || line_idx < candidate.line_idx {
+            0
+        } else if line_idx > candidate.line_idx {
+            width - 1
+        } else {
+            usize::from(col.saturating_sub(viewport.x.saturating_add(2))).min(width - 1)
+        };
+        Some(AssistantPoint {
+            row: candidate.response_row,
+            col: display_cell_start(&candidate.text, relative),
+        })
+    }
+
+    fn assistant_point_at(
+        &self,
+        col: u16,
+        row: u16,
+        block: Option<usize>,
+        clamp: bool,
+    ) -> Option<(usize, AssistantPoint)> {
+        let exact = self.assistant_row_hits.iter().find(|hit| {
+            if block.is_some_and(|wanted| wanted != hit.block) || hit.screen_row != row {
+                return false;
+            }
+            let width = display_width(&hit.text) as u16;
+            width > 0 && col >= hit.x && col < hit.x.saturating_add(width)
+        });
+        let (hit, nearest) = match exact {
+            Some(hit) => (hit, false),
+            None if clamp => {
+                if let Some(block) = block {
+                    if let Some(point) = self.assistant_point_from_rendered_rows(col, row, block) {
+                        return Some((block, point));
+                    }
+                }
+                (
+                    self.assistant_row_hits
+                        .iter()
+                        .filter(|hit| block.is_none_or(|wanted| wanted == hit.block))
+                        .min_by_key(|hit| hit.screen_row.abs_diff(row))?,
+                    true,
+                )
+            }
+            None => return None,
+        };
+        let width = display_width(&hit.text);
+        if width == 0 {
+            return None;
+        }
+        let relative = if nearest && row < hit.screen_row {
+            0
+        } else if nearest && row > hit.screen_row {
+            width - 1
+        } else {
+            usize::from(col.saturating_sub(hit.x)).min(width - 1)
+        };
+        Some((
+            hit.block,
+            AssistantPoint {
+                row: hit.response_row,
+                col: display_cell_start(&hit.text, relative),
+            },
+        ))
+    }
+
+    fn assistant_selection_text(&self, selection: &AssistantSelection) -> Option<String> {
+        let (first, last) = normalized_points(selection.anchor, selection.current);
+        let has_full_rows = self
+            .assistant_rows
+            .iter()
+            .any(|row| row.block == selection.block);
+        let mut rows: Vec<(usize, &str, AssistantRowJoin)> = if has_full_rows {
+            self.assistant_rows
+                .iter()
+                .filter(|row| {
+                    row.block == selection.block
+                        && row.response_row >= first.row
+                        && row.response_row <= last.row
+                })
+                .map(|row| (row.response_row, row.text.as_str(), row.join_before))
+                .collect()
+        } else {
+            self.assistant_row_hits
+                .iter()
+                .filter(|hit| {
+                    hit.block == selection.block
+                        && hit.response_row >= first.row
+                        && hit.response_row <= last.row
+                })
+                .map(|hit| (hit.response_row, hit.text.as_str(), hit.join_before))
+                .collect()
+        };
+        rows.sort_by_key(|(response_row, _, _)| *response_row);
+        let expected_len = last.row.checked_sub(first.row)?.checked_add(1)?;
+        if rows.len() != expected_len
+            || rows
+                .iter()
+                .enumerate()
+                .any(|(i, (response_row, _, _))| *response_row != first.row + i)
+        {
+            return None;
+        }
+
+        let mut out = String::new();
+        for (i, (response_row, text, join_before)) in rows.into_iter().enumerate() {
+            let (start, end) = assistant_row_selected_cols(first, last, response_row, text)?;
+            let mut fragment = slice_display_range(text, start, end);
+            if matches!(
+                join_before,
+                AssistantRowJoin::SoftSpace | AssistantRowJoin::SoftNone
+            ) {
+                fragment = fragment.trim_start_matches([' ', '\t']).to_string();
+            }
+            if i > 0 {
+                match join_before {
+                    AssistantRowJoin::Hard => {
+                        trim_horizontal_end(&mut out);
+                        out.push('\n');
+                    }
+                    AssistantRowJoin::SoftSpace => {
+                        let separated = out.chars().last().is_some_and(char::is_whitespace)
+                            || fragment.chars().next().is_some_and(char::is_whitespace);
+                        if !separated && !out.is_empty() && !fragment.is_empty() {
+                            out.push(' ');
+                        }
+                    }
+                    AssistantRowJoin::SoftNone => {}
+                }
+            }
+            out.push_str(&fragment);
+        }
+        let clean = clean_selected_text(&out);
+        (!clean.is_empty()).then_some(clean)
+    }
+
     pub fn spinner_char(&self) -> &'static str {
         spinner::frame(self.spinner)
     }
@@ -535,10 +1298,17 @@ impl App {
         if self.running {
             return true;
         }
+        let viewed_terminal = self.terminal_view_id();
         self.blocks.iter().any(|b| match b {
             Block::Tool(c) => c.status == ToolStatus::Running,
             Block::Subagent(c) => c.status == SubagentStatus::Running,
             Block::Plan(c) => c.status == PlanStatus::Writing,
+            // Backgrounded long-lived PTYs (dev servers, watchers) must not
+            // pin the UI at ANIM_TICK forever — only animate when on-screen.
+            Block::Terminal(c) => {
+                matches!(c.process, hive_core::TerminalProcessState::Running)
+                    && viewed_terminal == Some(c.id.as_str())
+            }
             Block::Reasoning(th) => th.elapsed_ms.is_none(),
             Block::Assistant {
                 streaming: true, ..
@@ -619,11 +1389,30 @@ impl App {
         Some(rest)
     }
 
-    pub fn slash_items(&self) -> Vec<&'static commands::SlashCmd> {
-        match self.slash_prefix() {
-            Some(prefix) => commands::filtered(prefix),
-            None => Vec::new(),
+    pub fn slash_items(&self) -> Vec<SlashItem> {
+        let Some(prefix) = self.slash_prefix() else {
+            return Vec::new();
+        };
+        let prefix_l = prefix.to_ascii_lowercase();
+        let mut items: Vec<SlashItem> = commands::filtered(prefix)
+            .into_iter()
+            .map(SlashItem::Command)
+            .collect();
+        for s in &self.skills {
+            if commands::is_builtin_name(&s.name) {
+                continue;
+            }
+            let name_l = s.name.to_ascii_lowercase();
+            let desc_l = s.description.to_ascii_lowercase();
+            if prefix_l.is_empty()
+                || name_l.starts_with(&prefix_l)
+                || name_l.contains(&prefix_l)
+                || desc_l.contains(&prefix_l)
+            {
+                items.push(SlashItem::Skill(s.clone()));
+            }
         }
+        items
     }
 
     /// Active `@path` query at the cursor (disabled while slash menu owns input).
@@ -677,12 +1466,19 @@ impl App {
         }
     }
 
-    pub fn menu_selected(&self) -> Option<&'static commands::SlashCmd> {
+    pub fn menu_selected(&self) -> Option<SlashItem> {
         let items = self.slash_items();
         if items.is_empty() {
             return None;
         }
-        Some(items[self.menu_index.min(items.len() - 1)])
+        Some(items[self.menu_index.min(items.len() - 1)].clone())
+    }
+
+    pub fn find_skill(&self, name: &str) -> Option<&SkillChoice> {
+        let name = name.to_ascii_lowercase();
+        self.skills
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&name))
     }
 
     pub fn file_menu_selected(&mut self) -> Option<String> {
@@ -693,15 +1489,28 @@ impl App {
         Some(items[self.menu_index.min(items.len() - 1)].clone())
     }
 
-    /// Replace `@query` with `` `path` `` and leave a trailing space.
+    /// Turn `@query` into a pending `@file` chip (removes the typed mention).
     pub fn complete_at_file(&mut self, rel: &str) {
         let Some(q) = self.at_mention() else {
             return;
         };
         let end = self.input.cursor;
-        let insert = format!("`{rel}` ");
-        self.input.replace_chars(q.at, end, &insert);
-        self.reset_menu();
+        self.input.replace_chars(q.at, end, "");
+        // Collapse a double space left when `@…` sat mid-sentence.
+        let v = self.input.value.clone();
+        if let Some(i) = v.find("  ") {
+            let chars: Vec<char> = v.chars().collect();
+            if i + 1 < chars.len() {
+                self.input.replace_chars(i, i + 2, " ");
+            }
+        }
+        match self.attach_rel(rel) {
+            Ok(_) => self.reset_menu(),
+            Err(e) => {
+                self.flash(e);
+                self.reset_menu();
+            }
+        }
     }
 
     pub fn reset_menu(&mut self) {
@@ -750,23 +1559,84 @@ impl App {
         self.blocks.clear();
         self.blocks.push(Block::Welcome);
         self.usage = Usage::default();
+        self.context_tokens = 0;
         self.scroll_from_bottom = 0;
         self.pending_attaches.clear();
+        self.follow_up = None;
         self.input.clear();
         self.reset_menu();
         self.close_palette();
         self.close_about();
         self.running = false;
         self.click_hits.clear();
+        self.assistant_row_hits.clear();
+        self.assistant_rows.clear();
+        self.assistant_selection = None;
+        self.assistant_selection_width = 0;
+        self.hover_block = None;
+        self.hover_sidebar_item = None;
+        self.hover_back = false;
+        self.hover_make = false;
+        self.hover_terminal_stop = false;
         self.view = ChatView::Main;
         self.back_hit = None;
-        self.build_hit = None;
+        self.make_hit = None;
+        self.terminal_stop_hit = None;
         self.plan_view = PlanViewState::default();
+        self.terminal_view = TerminalViewState::default();
+        self.pending_terminal_resize = None;
         self.md_cache = MdCache::default();
     }
 
     pub fn has_pending_attaches(&self) -> bool {
         !self.pending_attaches.is_empty()
+    }
+
+    pub fn has_follow_up(&self) -> bool {
+        self.follow_up.is_some()
+    }
+
+    /// Queue (or replace) a follow-up while the agent is busy.
+    pub fn queue_follow_up(&mut self, fu: QueuedFollowUp) {
+        self.follow_up = Some(fu);
+        self.flash("Follow-up queued · Enter again → next step");
+    }
+
+    /// Pull the queued follow-up into the composer for editing (↑).
+    pub fn recall_follow_up(&mut self) -> bool {
+        let Some(fu) = self.follow_up.take() else {
+            return false;
+        };
+        self.pending_attaches = fu.attaches;
+        self.agent_mode = fu.mode;
+        self.input.value = fu.composer;
+        self.input.end();
+        self.reset_menu();
+        self.flash("Edit follow-up · Enter to re-queue");
+        true
+    }
+
+    /// Clear a queued follow-up without sending.
+    pub fn clear_follow_up(&mut self) -> bool {
+        if self.follow_up.take().is_some() {
+            self.flash("Follow-up cleared");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One-line preview for the banner above the input.
+    pub fn follow_up_preview(&self, max_chars: usize) -> Option<String> {
+        let fu = self.follow_up.as_ref()?;
+        let t = fu.display.replace('\n', " ");
+        let t = t.trim();
+        if t.chars().count() <= max_chars {
+            return Some(t.to_string());
+        }
+        let mut s: String = t.chars().take(max_chars.saturating_sub(1)).collect();
+        s.push('…');
+        Some(s)
     }
 
     pub fn attachment_tags_line(&self) -> String {
@@ -777,52 +1647,85 @@ impl App {
             .join(" ")
     }
 
+    /// Attach a project-relative path from the `@` picker.
+    pub fn attach_rel(&mut self, rel: &str) -> Result<String, String> {
+        let rel = rel.trim().trim_start_matches("./");
+        if rel.is_empty() {
+            return Err("empty path".into());
+        }
+        let abs = std::path::Path::new(&self.cwd).join(rel);
+        self.attach_path_inner(&abs, rel)
+    }
+
     /// Attach a path: images become vision sources; other files are path notes.
     pub fn attach_path(&mut self, path: &str) -> Result<String, String> {
         let path = path.trim();
         if path.is_empty() {
             return Err("paste a file path to attach".into());
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        let is_image = is_image_path(path);
-        let n = self.pending_attaches.len() + 1;
-        let (label, image) = if is_image {
-            let data = base64_encode(&bytes);
-            (
-                format!("Image #{n}"),
-                Some(ImageSource::Base64 {
-                    media_type: media_type_for(path),
-                    data,
-                }),
-            )
+        let abs = std::path::Path::new(path);
+        let abs = if abs.is_absolute() {
+            abs.to_path_buf()
         } else {
-            (format!("File #{n}"), None)
+            std::path::Path::new(&self.cwd).join(abs)
         };
-        let tag = format!("[{label}]");
+        let label = abs
+            .strip_prefix(&self.cwd)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| {
+                abs.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| abs.to_string_lossy().into_owned())
+            });
+        self.attach_path_inner(&abs, &label)
+    }
+
+    fn attach_path_inner(
+        &mut self,
+        abs: &std::path::Path,
+        label: &str,
+    ) -> Result<String, String> {
+        let bytes =
+            std::fs::read(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        let is_image = is_image_path(abs.to_string_lossy().as_ref());
+        let image = if is_image {
+            Some(ImageSource::Base64 {
+                media_type: media_type_for(abs.to_string_lossy().as_ref()),
+                data: base64_encode(&bytes),
+            })
+        } else {
+            None
+        };
+        let label = label.trim().trim_start_matches("./").to_string();
+        let path = label.clone();
+        let tag = format!("@{label}");
+        // Skip duplicates (same path already queued).
+        if self.pending_attaches.iter().any(|a| a.path == path) {
+            return Ok(tag);
+        }
         self.pending_attaches.push(PendingAttach {
             label,
-            path: path.to_string(),
+            path,
             image,
         });
         Ok(tag)
     }
 
-    /// If `text` is (or ends with) an existing image/file path, attach it.
-    /// Returns the leftover text with the path removed when attached.
+    /// Attach existing file path(s) parsed from pasted / drag-and-dropped `text`
+    /// as `@chips`, exactly like the `@` picker. Handles the quirks terminals
+    /// apply on drop: surrounding quotes, backslash-escaped spaces, and
+    /// (percent-encoded) `file://` URIs — including a multi-file drop. Returns
+    /// `Some("")` when at least one file was attached, or `None` when the text
+    /// isn't purely path(s) to existing file(s) (so the caller keeps it as text).
     pub fn try_attach_pasted_path(&mut self, text: &str) -> Option<String> {
-        let trimmed = text.trim();
-        if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains(' ') {
-            return None;
+        let candidates = drop_path_candidates(text)?;
+        let mut attached = false;
+        for cand in candidates {
+            if std::path::Path::new(&cand).is_file() && self.attach_path(&cand).is_ok() {
+                attached = true;
+            }
         }
-        let path = trimmed.trim_matches('"').trim_matches('\'');
-        if !std::path::Path::new(path).is_file() {
-            return None;
-        }
-        if self.attach_path(path).is_ok() {
-            Some(String::new())
-        } else {
-            None
-        }
+        attached.then_some(String::new())
     }
 
     pub fn take_pending_attaches(&mut self) -> Vec<PendingAttach> {
@@ -913,13 +1816,21 @@ impl App {
                 args_preview,
             } => {
                 self.close_thought();
-                if (name == "write_file" || name == "edit_file")
-                    && (args_preview.contains("Plan.md") || args_preview.contains(".hive/Plan"))
-                {
+                let plan_write = name == "write_plan"
+                    || ((name == "write_file" || name == "edit_file")
+                        && (args_preview.contains("Plan.md")
+                            || args_preview.contains(".hive/Plan")));
+                if plan_write {
                     self.mark_plan_writing();
                 }
+                // Plan writes are card-only (no green/orange tool chrome).
                 // Subagent tools render as Subagent cards, not tool rows.
-                if !is_subagent_tool(&name) {
+                // `switch_mode` renders as its own "Switched to … Mode" card.
+                if !plan_write
+                    && !is_subagent_tool(&name)
+                    && name != "switch_mode"
+                    && !hive_core::terminal::is_terminal_tool(&name)
+                {
                     self.blocks.push(Block::Tool(ToolCard {
                         id,
                         name,
@@ -942,6 +1853,10 @@ impl App {
             }
             AgentEvent::Usage(u) => {
                 self.usage = u;
+                true
+            }
+            AgentEvent::ContextTokens(n) => {
+                self.context_tokens = n;
                 true
             }
             AgentEvent::SubagentSpawned { id, label, prompt } => {
@@ -976,9 +1891,133 @@ impl App {
                 self.upsert_plan(summary, body);
                 true
             }
-            AgentEvent::ModelChanged { id, display } => {
+            AgentEvent::ModeSwitched { mode, reason } => {
+                self.agent_mode = mode;
+                self.blocks.push(Block::ModeSwitch(ModeSwitchCard { mode, reason }));
+                self.scroll_from_bottom = 0;
+                self.flash(format!("Switched to {} mode", mode.title()));
+                true
+            }
+            AgentEvent::TerminalStarted {
+                id,
+                command,
+                rows,
+                cols,
+            } => {
+                self.close_thought();
+                if !self.blocks.iter().any(
+                    |block| matches!(block, Block::Terminal(card) if card.id == id),
+                ) {
+                    let parser = vt100::Parser::new(rows.max(1), cols.max(1), 10_000);
+                    self.blocks.push(Block::Terminal(Box::new(TerminalCard {
+                        id,
+                        command,
+                        controller: TerminalController::Agent,
+                        process: TerminalProcessState::Running,
+                        revision: 0,
+                        screen: parser.screen().clone(),
+                        started: std::time::Instant::now(),
+                        elapsed_ms: None,
+                    })));
+                }
+                true
+            }
+            AgentEvent::TerminalStartFailed {
+                id,
+                command,
+                message,
+            } => {
+                self.close_thought();
+                if !self.blocks.iter().any(
+                    |block| matches!(block, Block::Terminal(card) if card.id == id),
+                ) {
+                    let parser = vt100::Parser::new(1, 1, 0);
+                    self.blocks.push(Block::Terminal(Box::new(TerminalCard {
+                        id,
+                        command,
+                        controller: TerminalController::Agent,
+                        process: TerminalProcessState::Failed {
+                            message: message.clone(),
+                        },
+                        revision: 0,
+                        screen: parser.screen().clone(),
+                        started: std::time::Instant::now(),
+                        elapsed_ms: Some(0),
+                    })));
+                }
+                self.flash(message);
+                true
+            }
+            AgentEvent::TerminalOutput { id, frame } => {
+                let Some((screen, revision)) = frame.snapshot() else {
+                    return false;
+                };
+                let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
+                    Block::Terminal(card) if card.id == id => Some(card),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                card.screen = screen;
+                card.revision = card.revision.max(revision);
+                true
+            }
+            AgentEvent::TerminalState {
+                id,
+                controller,
+                process,
+                revision,
+            } => {
+                let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
+                    Block::Terminal(card) if card.id == id => Some(card),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                card.controller = controller;
+                card.process = process;
+                card.revision = card.revision.max(revision);
+                if !matches!(card.process, TerminalProcessState::Running)
+                    && card.elapsed_ms.is_none()
+                {
+                    card.elapsed_ms = Some(card.started.elapsed().as_millis());
+                }
+                let phase = if !matches!(card.process, TerminalProcessState::Running) {
+                    TerminalViewPhase::ReadOnly
+                } else if card.controller == TerminalController::User {
+                    TerminalViewPhase::UserControl
+                } else {
+                    TerminalViewPhase::Attaching
+                };
+                if self.terminal_view_id() == Some(id.as_str()) {
+                    self.terminal_view.phase = phase;
+                }
+                true
+            }
+            AgentEvent::TerminalResized { id, rows, cols } => {
+                let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
+                    Block::Terminal(card) if card.id == id => Some(card),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                card.screen.set_size(rows.max(1), cols.max(1));
+                true
+            }
+            AgentEvent::TerminalError { id, message } => {
+                if self.terminal_view_id() == Some(id.as_str())
+                    && self.terminal_view.phase == TerminalViewPhase::Attaching
+                {
+                    self.terminal_view.phase = TerminalViewPhase::Failed;
+                }
+                self.flash(message);
+                true
+            }
+            AgentEvent::ModelChanged { id, display, cost_input, cost_output } => {
                 self.model = id;
                 self.model_display = display;
+                self.cost_input = cost_input;
+                self.cost_output = cost_output;
                 true
             }
             AgentEvent::ModelsListed { models } => {
@@ -989,6 +2028,10 @@ impl App {
                         display: m.name,
                         detail: m.detail,
                         group: m.group,
+                        connection_id: m.connection_id,
+                        vision: m.vision,
+                        cost_input: m.cost_input,
+                        cost_output: m.cost_output,
                     })
                     .collect();
                 self.models_catalog = ModelsCatalogState::Ready;
@@ -1113,17 +2156,42 @@ impl App {
             Some(Block::Plan(_)) => {
                 self.open_plan_view();
             }
+            Some(Block::Terminal(card)) => {
+                let id = card.id.clone();
+                self.open_terminal_view(id);
+            }
             _ => {}
         }
     }
 
+    /// Index of the most recent plan card in the transcript.
+    fn last_plan_idx(&self) -> Option<usize> {
+        self.blocks.iter().rposition(|b| matches!(b, Block::Plan(_)))
+    }
+
     fn mark_plan_writing(&mut self) {
-        for block in self.blocks.iter_mut().rev() {
-            if let Block::Plan(card) = block {
+        // Rewriting a finished plan moves the single card to the bottom of the
+        // transcript (with the UPDATED badge) so the change is visible next to
+        // the latest messages — one Plan.md card total, never a stack of copies.
+        // A still-empty / in-progress card is reused in place.
+        if let Some(i) = self.last_plan_idx() {
+            {
+                let Block::Plan(card) = &mut self.blocks[i] else {
+                    return;
+                };
+                let rewrite = card.status == PlanStatus::Ready && !card.body.is_empty();
                 card.status = PlanStatus::Writing;
                 card.elapsed_ms = None;
-                return;
+                if !rewrite {
+                    return;
+                }
+                card.revised = true;
             }
+            self.clear_assistant_selection();
+            let card = self.blocks.remove(i);
+            self.blocks.push(card);
+            self.scroll_from_bottom = 0;
+            return;
         }
         self.blocks.push(Block::Plan(PlanCard {
             summary: String::new(),
@@ -1131,41 +2199,65 @@ impl App {
             status: PlanStatus::Writing,
             started: std::time::Instant::now(),
             elapsed_ms: None,
+            revised: false,
         }));
     }
 
     fn upsert_plan(&mut self, summary: String, body: String) {
-        let sections = parse_sections(&body);
-        for block in self.blocks.iter_mut().rev() {
-            if let Block::Plan(card) = block {
-                card.summary = summary;
-                card.body = body;
-                card.status = PlanStatus::Ready;
-                if card.elapsed_ms.is_none() {
-                    card.elapsed_ms = Some(card.started.elapsed().as_millis());
+        let summary = summary.trim().to_string();
+        let revised;
+        match self.last_plan_idx() {
+            None => {
+                self.blocks.push(Block::Plan(PlanCard {
+                    summary,
+                    body,
+                    status: PlanStatus::Ready,
+                    started: std::time::Instant::now(),
+                    elapsed_ms: Some(0),
+                    revised: false,
+                }));
+                revised = false;
+            }
+            Some(i) => {
+                // Rewrite arriving without a "writing…" placeholder (e.g. a
+                // direct event) — same rule as mark_plan_writing: move the one
+                // card to the bottom and badge it.
+                let rewrite = {
+                    let Block::Plan(card) = &self.blocks[i] else {
+                        return;
+                    };
+                    card.status == PlanStatus::Ready && !card.body.is_empty()
+                };
+                {
+                    let Block::Plan(card) = &mut self.blocks[i] else {
+                        return;
+                    };
+                    card.summary = summary;
+                    card.body = body;
+                    card.status = PlanStatus::Ready;
+                    card.revised = card.revised || rewrite;
+                    if card.elapsed_ms.is_none() {
+                        card.elapsed_ms = Some(card.started.elapsed().as_millis());
+                    }
+                    revised = card.revised;
                 }
-                if matches!(self.view, ChatView::Plan) {
-                    let selected = self.plan_view.selected.clone();
-                    let cursor = self.plan_view.cursor.min(sections.len().saturating_sub(1));
-                    self.plan_view.sections = sections;
-                    self.plan_view.cursor = cursor;
-                    self.plan_view.selected = selected
-                        .into_iter()
-                        .filter(|i| *i < self.plan_view.sections.len())
-                        .collect();
+                if rewrite {
+                    self.clear_assistant_selection();
+                    let card = self.blocks.remove(i);
+                    self.blocks.push(card);
+                    self.scroll_from_bottom = 0;
                 }
-                return;
             }
         }
-        self.blocks.push(Block::Plan(PlanCard {
-            summary,
-            body,
-            status: PlanStatus::Ready,
-            started: std::time::Instant::now(),
-            elapsed_ms: Some(0),
-        }));
+        // Body rewrite invalidates highlight ranges — drop them.
         if matches!(self.view, ChatView::Plan) {
-            self.plan_view.sections = sections;
+            self.plan_clear_corrections();
+            // Show the revised plan from the top, like a fresh open, so
+            // the reader isn't stranded mid-scroll over new content.
+            self.scroll_from_bottom = usize::MAX;
+            if revised {
+                self.flash("plan revised");
+            }
         }
     }
 
@@ -1284,6 +2376,25 @@ impl App {
         cards
     }
 
+    /// Terminal cards for the sidebar (running first, then failed, then exited).
+    pub fn sidebar_terminals(&self) -> Vec<&TerminalCard> {
+        let mut cards: Vec<&TerminalCard> = self
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Terminal(c) => Some(c.as_ref()),
+                _ => None,
+            })
+            .collect();
+        cards.sort_by_key(|c| match &c.process {
+            TerminalProcessState::Running => 0u8,
+            TerminalProcessState::Failed { .. } => 1,
+            TerminalProcessState::Exited { code } if *code != 0 => 2,
+            TerminalProcessState::Exited { .. } => 3,
+        });
+        cards
+    }
+
     fn append_subagent_line(&mut self, id: &str, line: SubagentLine) {
         for block in self.blocks.iter_mut().rev() {
             if let Block::Subagent(card) = block {
@@ -1336,6 +2447,129 @@ impl App {
     }
 }
 
+fn normalized_points(a: AssistantPoint, b: AssistantPoint) -> (AssistantPoint, AssistantPoint) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn assistant_row_selected_cols(
+    first: AssistantPoint,
+    last: AssistantPoint,
+    row: usize,
+    text: &str,
+) -> Option<(usize, usize)> {
+    let width = display_width(text);
+    if width == 0 {
+        return Some((0, 0));
+    }
+    let start = if row == first.row {
+        first.col.min(width)
+    } else {
+        0
+    };
+    let end = if row == last.row {
+        display_char_end(text, last.col).min(width)
+    } else {
+        width
+    };
+    (start < end).then_some((start, end))
+}
+
+fn display_width(text: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
+}
+
+/// Start display column of the glyph occupying `col`.
+fn display_cell_start(text: &str, col: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut x = 0;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width == 0 {
+            continue;
+        }
+        if col < x + width {
+            return x;
+        }
+        x += width;
+    }
+    x
+}
+
+/// End display column of the glyph occupying `col`.
+fn display_char_end(text: &str, col: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut x = 0;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width == 0 {
+            continue;
+        }
+        if col < x + width {
+            return x + width;
+        }
+        x += width;
+    }
+    x
+}
+
+fn slice_display_range(text: &str, start: usize, end: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    if start >= end {
+        return String::new();
+    }
+    let mut x = 0;
+    let mut byte_start = None;
+    let mut byte_end = 0;
+    let mut selected = false;
+    for (byte, ch) in text.char_indices() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width == 0 {
+            if selected {
+                byte_end = byte + ch.len_utf8();
+            }
+            continue;
+        }
+        if x >= end && selected {
+            break;
+        }
+        if x < end && x + width > start {
+            byte_start.get_or_insert(byte);
+            byte_end = byte + ch.len_utf8();
+            selected = true;
+        }
+        x += width;
+    }
+    byte_start
+        .map(|from| text[from..byte_end].to_string())
+        .unwrap_or_default()
+}
+
+fn trim_horizontal_end(text: &mut String) {
+    while text.ends_with(' ') || text.ends_with('\t') {
+        text.pop();
+    }
+}
+
+fn clean_selected_text(text: &str) -> String {
+    text.split('\n')
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_string()
+}
+
 /// Tools whose activity belongs in a Subagent transcript card, not a tool row.
 fn is_subagent_tool(name: &str) -> bool {
     matches!(name, "verify_project" | "spawn_subagent" | "spawn_swarm")
@@ -1366,23 +2600,120 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// Parse pasted / drag-and-dropped text into candidate local file paths.
+///
+/// Terminals emit dropped files in inconsistent ways: a bare path, a quoted
+/// path, a path with backslash-escaped spaces (kitty / iTerm2), or one or more
+/// `file://` URIs with percent-encoding (GNOME / VTE). This normalizes all of
+/// those. Returns `None` when the text clearly isn't just path(s) — e.g.
+/// multi-line prose — so the caller can treat it as an ordinary text paste.
+fn drop_path_candidates(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // A `file://` URI list — possibly several, one per line (text/uri-list).
+    if trimmed.starts_with("file://") {
+        let mut out = Vec::new();
+        for tok in trimmed.split_whitespace() {
+            let rest = tok.strip_prefix("file://")?;
+            // Skip an optional host component: everything up to the first '/'.
+            let slash = rest.find('/')?;
+            out.push(decode_file_uri_path(&rest[slash..]));
+        }
+        return (!out.is_empty()).then_some(out);
+    }
+
+    // Otherwise a single path. Multi-line text is prose, not a dropped path.
+    if trimmed.contains('\n') {
+        return None;
+    }
+    let unquoted = strip_matching_quotes(trimmed);
+    Some(vec![unescape_backslashes(unquoted)])
+}
+
+/// Strip one layer of matching surrounding quotes (`"…"` or `'…'`).
+fn strip_matching_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Drop shell escape backslashes (`My\ Photos` → `My Photos`).
+fn unescape_backslashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Percent-decode a `file://` path, normalizing a Windows `/C:/…` drive prefix.
+fn decode_file_uri_path(path: &str) -> String {
+    let decoded = percent_decode(path);
+    let bytes = decoded.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        return decoded[1..].to_string();
+    }
+    decoded
+}
+
+/// Minimal percent-decoding for `file://` URIs (`%20` → space, etc.).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TuiInit;
     use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
+    use hive_core::{TerminalController, TerminalProcessState};
 
     fn app() -> App {
         App::new(TuiInit {
             model: "m".into(),
             model_display: "m".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         })
     }
 
@@ -1445,6 +2776,26 @@ mod tests {
     }
 
     #[test]
+    fn background_running_terminal_does_not_force_animation() {
+        let mut a = app();
+        a.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "sleep 999".into(),
+            rows: 20,
+            cols: 80,
+        });
+        a.apply(AgentEvent::TerminalState {
+            id: "term-1".into(),
+            controller: TerminalController::Agent,
+            process: TerminalProcessState::Running,
+            revision: 1,
+        });
+        assert!(!a.needs_animation());
+        a.open_terminal_view("term-1".into());
+        assert!(a.needs_animation());
+    }
+
+    #[test]
     fn subagent_usage_updates_card_and_sidebar_list() {
         let mut a = app();
         a.apply(AgentEvent::SubagentSpawned {
@@ -1470,11 +2821,111 @@ mod tests {
         use hive_core::AgentMode;
 
         let mut a = app();
-        assert_eq!(a.agent_mode, AgentMode::Build);
+        assert_eq!(a.agent_mode, AgentMode::Make);
         a.toggle_agent_mode();
         assert_eq!(a.agent_mode, AgentMode::Plan);
         a.toggle_agent_mode();
-        assert_eq!(a.agent_mode, AgentMode::Build);
+        assert_eq!(a.agent_mode, AgentMode::Multitask);
+        a.toggle_agent_mode();
+        assert_eq!(a.agent_mode, AgentMode::Make);
+    }
+
+    #[test]
+    fn mode_switched_updates_chip_and_adds_card() {
+        use hive_core::AgentMode;
+
+        let mut a = app();
+        assert_eq!(a.agent_mode, AgentMode::Make);
+        assert!(a.apply(AgentEvent::ModeSwitched {
+            mode: AgentMode::Plan,
+            reason: "This is a large multi-part feature.".into(),
+        }));
+        // Footer chip / next-turn default now follow the agent's choice.
+        assert_eq!(a.agent_mode, AgentMode::Plan);
+        let Some(Block::ModeSwitch(card)) = a.blocks.last() else {
+            panic!("expected a mode-switch card");
+        };
+        assert_eq!(card.mode, AgentMode::Plan);
+        assert!(card.reason.contains("large multi-part"));
+
+        // The card renders the title and the reason in the transcript.
+        let buf = comb::render(comb::Size::new(120, 40), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Switched to Plan Mode"), "{text}");
+        assert!(text.contains("large multi-part"), "{text}");
+    }
+
+    #[test]
+    fn terminal_events_update_one_persistent_card() {
+        let mut app = app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "theme-installer".into(),
+            rows: 30,
+            cols: 120,
+        });
+        app.apply(AgentEvent::TerminalOutput {
+            id: "term-1".into(),
+            frame: hive_core::TerminalOutputFrame::from_bytes(
+                30,
+                120,
+                10_000,
+                b"Choose preset:\r\n",
+                1,
+            ),
+        });
+        app.apply(AgentEvent::TerminalState {
+            id: "term-1".into(),
+            controller: TerminalController::Agent,
+            process: TerminalProcessState::Running,
+            revision: 1,
+        });
+
+        let cards: Vec<_> = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Terminal(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].preview().contains("Choose preset"));
+    }
+
+    #[test]
+    fn failed_terminal_start_creates_a_visible_failed_card() {
+        let mut app = app();
+        app.apply(AgentEvent::TerminalStartFailed {
+            id: "term-failed".into(),
+            command: "installer".into(),
+            message: "cannot spawn".into(),
+        });
+
+        let card = app.terminal_card("term-failed").unwrap();
+        assert!(matches!(
+            card.process,
+            TerminalProcessState::Failed { .. }
+        ));
+        assert!(card.status_text().contains("cannot spawn"));
+    }
+
+    #[test]
+    fn terminal_tool_calls_do_not_create_generic_tool_cards() {
+        let mut app = app();
+        for name in [
+            "terminal_start",
+            "terminal_read",
+            "terminal_write",
+            "terminal_stop",
+        ] {
+            app.apply(AgentEvent::ToolStarted {
+                id: format!("{name}-call"),
+                name: name.into(),
+                args_preview: "term-1".into(),
+            });
+        }
+        assert!(!app.blocks.iter().any(|block| matches!(block, Block::Tool(_))));
     }
 
     #[test]
@@ -1498,7 +2949,77 @@ mod tests {
     }
 
     #[test]
-    fn plan_amend_message_lists_sections() {
+    fn plan_rewrite_moves_single_card_to_bottom_with_updated_badge() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        let plans = |a: &App| {
+            a.blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Plan(_)))
+                .count()
+        };
+
+        // First plan: one card, no badge.
+        a.apply(AgentEvent::ToolStarted {
+            id: "t1".into(),
+            name: "write_plan".into(),
+            args_preview: "Initial plan".into(),
+        });
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "Initial".into(),
+            body: "## Alpha\n\nx\n".into(),
+        });
+        assert_eq!(plans(&a), 1);
+
+        // Conversation continues, then the agent rewrites the plan — twice.
+        a.push_user("note: change it".into());
+        for (id, summary, body) in [
+            ("t2", "Revised", "## Alpha\n\nrewritten\n"),
+            ("t3", "Revised again", "## Alpha\n\nrewritten again\n"),
+        ] {
+            a.apply(AgentEvent::ToolStarted {
+                id: id.into(),
+                name: "write_plan".into(),
+                args_preview: summary.into(),
+            });
+            a.apply(AgentEvent::PlanUpdated {
+                summary: summary.into(),
+                body: body.into(),
+            });
+        }
+
+        // Still exactly one card; it moved below the user note and is badged.
+        assert_eq!(plans(&a), 1, "rewrites must not stack extra plan cards");
+        let Some(Block::Plan(card)) = a.blocks.last() else {
+            panic!("expected the plan card at the bottom");
+        };
+        assert!(card.revised, "card carries the UPDATED badge");
+        assert_eq!(card.summary, "Revised again");
+        assert_eq!(a.plan_card().unwrap().summary, "Revised again");
+    }
+
+    #[test]
+    fn plan_rewrite_in_view_pins_top_and_flashes() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "A".into(),
+            body: "## Alpha\n\nx\n".into(),
+        });
+        a.open_plan_view();
+        a.scroll_from_bottom = 0; // pretend the reader scrolled to the bottom
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "A2".into(),
+            body: "## Alpha\n\nrewritten\n".into(),
+        });
+        assert_eq!(a.scroll_from_bottom, usize::MAX, "rewrite pins to top");
+        assert_eq!(a.flash_text(), Some("plan revised"));
+    }
+
+    #[test]
+    fn plan_corrections_message_lists_excerpts() {
         use hive_core::event::AgentEvent;
 
         let mut a = app();
@@ -1507,9 +3028,14 @@ mod tests {
             body: "## Alpha\n\nx\n\n## Beta\n\ny\n".into(),
         });
         a.open_plan_view();
-        a.plan_view.selected.insert(0);
-        let msg = a.plan_amend_message("make it shorter");
-        assert!(msg.contains("Alpha"), "{msg}");
+        a.plan_view.corrections.push(PlanCorrection {
+            start: 0,
+            end: 8,
+            excerpt: "## Alpha".into(),
+            note: "make it shorter".into(),
+        });
+        let msg = a.plan_corrections_message();
+        assert!(msg.contains("## Alpha"), "{msg}");
         assert!(msg.contains("make it shorter"), "{msg}");
         assert!(msg.contains(".hive/Plan.md"), "{msg}");
     }
@@ -1557,5 +3083,314 @@ mod tests {
         a.note_input_activity();
         assert!(!a.tick());
         assert!(a.input_focused);
+    }
+
+    #[test]
+    fn percent_decode_handles_spaces_and_partials() {
+        assert_eq!(super::percent_decode("a%20b"), "a b");
+        assert_eq!(super::percent_decode("%2Fx%2Fy"), "/x/y");
+        // Incomplete / invalid escapes are left untouched.
+        assert_eq!(super::percent_decode("a%2"), "a%2");
+        assert_eq!(super::percent_decode("a%zz"), "a%zz");
+    }
+
+    #[test]
+    fn strips_quotes_and_escapes() {
+        assert_eq!(super::strip_matching_quotes("\"/a b/c.png\""), "/a b/c.png");
+        assert_eq!(super::strip_matching_quotes("'/a/c.png'"), "/a/c.png");
+        assert_eq!(super::strip_matching_quotes("/a/c.png"), "/a/c.png");
+        assert_eq!(super::unescape_backslashes("/a/My\\ Photos/c.png"), "/a/My Photos/c.png");
+    }
+
+    #[test]
+    fn drop_candidates_cover_terminal_quirks() {
+        // Plain path.
+        assert_eq!(
+            super::drop_path_candidates("/a/b.png"),
+            Some(vec!["/a/b.png".to_string()])
+        );
+        // Quoted path with spaces.
+        assert_eq!(
+            super::drop_path_candidates("\"/a/My Photos/b.png\""),
+            Some(vec!["/a/My Photos/b.png".to_string()])
+        );
+        // Backslash-escaped spaces (kitty / iTerm2).
+        assert_eq!(
+            super::drop_path_candidates("/a/My\\ Photos/b.png"),
+            Some(vec!["/a/My Photos/b.png".to_string()])
+        );
+        // Percent-encoded file:// URI (GNOME / VTE).
+        assert_eq!(
+            super::drop_path_candidates("file:///a/My%20Photos/b.png"),
+            Some(vec!["/a/My Photos/b.png".to_string()])
+        );
+        // Multiple file:// URIs from a multi-file drop.
+        assert_eq!(
+            super::drop_path_candidates("file:///a/x.png\nfile:///a/y.png"),
+            Some(vec!["/a/x.png".to_string(), "/a/y.png".to_string()])
+        );
+        // Multi-line prose is not treated as a path.
+        assert_eq!(super::drop_path_candidates("hello\nworld"), None);
+        assert_eq!(super::drop_path_candidates("   "), None);
+    }
+
+    #[test]
+    fn dropped_path_with_spaces_attaches_as_chip() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("hive-drop-{n}")).join("My Photos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shot.png");
+        std::fs::write(&file, b"fakepng").unwrap();
+
+        let mut a = app();
+        // Quoted absolute path, as many terminals emit on drop.
+        let quoted = format!("\"{}\"", file.display());
+        assert_eq!(a.try_attach_pasted_path(&quoted), Some(String::new()));
+        assert!(a.has_pending_attaches());
+        // Chip shows the filename (label ends with the dropped file name).
+        assert!(a.attachment_tags_line().ends_with("shot.png"));
+
+        // Non-file text is left for the composer.
+        assert_eq!(a.try_attach_pasted_path("just some text"), None);
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("hive-drop-{n}")));
+    }
+
+    fn assistant_hit(
+        block: usize,
+        response_row: usize,
+        screen_row: u16,
+        text: &str,
+        join_before: crate::app::state::AssistantRowJoin,
+    ) -> crate::app::state::AssistantRowHit {
+        crate::app::state::AssistantRowHit {
+            block,
+            response_row,
+            screen_row,
+            x: 2,
+            text: text.into(),
+            join_before,
+        }
+    }
+
+    #[test]
+    fn assistant_selection_extracts_partial_visible_text() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![assistant_hit(
+            3,
+            0,
+            8,
+            "hello world",
+            AssistantRowJoin::Hard,
+        )];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(6, 8));
+        assert_eq!(a.finish_assistant_selection(6, 8).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn assistant_selection_reconstructs_soft_and_hard_breaks() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "hello", AssistantRowJoin::Hard),
+            assistant_hit(3, 1, 9, "world", AssistantRowJoin::SoftSpace),
+            assistant_hit(3, 2, 10, "code", AssistantRowJoin::Hard),
+        ];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(5, 10));
+        assert_eq!(
+            a.finish_assistant_selection(5, 10).as_deref(),
+            Some("hello world\ncode")
+        );
+    }
+
+    #[test]
+    fn assistant_selection_preserves_blank_paragraph_rows() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "hello", AssistantRowJoin::Hard),
+            assistant_hit(3, 1, 9, "", AssistantRowJoin::Hard),
+            assistant_hit(3, 2, 10, "world", AssistantRowJoin::Hard),
+        ];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(6, 10));
+        assert_eq!(
+            a.finish_assistant_selection(6, 10).as_deref(),
+            Some("hello\n\nworld")
+        );
+    }
+
+    #[test]
+    fn assistant_selection_drops_visual_indent_on_soft_wraps() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "  bullet text", AssistantRowJoin::Hard),
+            assistant_hit(3, 1, 9, "  continues", AssistantRowJoin::SoftSpace),
+        ];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(12, 9));
+        assert_eq!(
+            a.finish_assistant_selection(12, 9).as_deref(),
+            Some("  bullet text continues")
+        );
+    }
+
+    #[test]
+    fn assistant_selection_supports_reverse_drag() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "hello", AssistantRowJoin::Hard),
+            assistant_hit(3, 1, 9, "world", AssistantRowJoin::SoftSpace),
+        ];
+
+        assert!(a.start_assistant_selection(6, 9));
+        assert!(a.update_assistant_selection(2, 8));
+        assert_eq!(
+            a.finish_assistant_selection(2, 8).as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn assistant_selection_clamps_to_starting_response() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "first", AssistantRowJoin::Hard),
+            assistant_hit(3, 1, 9, "answer", AssistantRowJoin::Hard),
+            assistant_hit(4, 0, 10, "other", AssistantRowJoin::Hard),
+        ];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(6, 10));
+        assert_eq!(
+            a.finish_assistant_selection(6, 10).as_deref(),
+            Some("first\nanswer")
+        );
+    }
+
+    #[test]
+    fn assistant_selection_rejects_incomplete_row_coverage() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![
+            assistant_hit(3, 0, 8, "first", AssistantRowJoin::Hard),
+            assistant_hit(3, 2, 9, "third", AssistantRowJoin::Hard),
+        ];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(6, 9));
+        assert_eq!(a.finish_assistant_selection(6, 9), None);
+        assert!(a.assistant_selection.is_none());
+    }
+
+    #[test]
+    fn assistant_click_without_drag_does_not_copy() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![assistant_hit(3, 0, 8, "hello", AssistantRowJoin::Hard)];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert_eq!(a.finish_assistant_selection(2, 8), None);
+        assert!(a.assistant_selection.is_none());
+    }
+
+    #[test]
+    fn completed_assistant_selection_is_consumed_and_cannot_be_reused() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![assistant_hit(
+            3,
+            0,
+            8,
+            "hello world",
+            AssistantRowJoin::Hard,
+        )];
+
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(6, 8));
+        assert_eq!(a.finish_assistant_selection(6, 8).as_deref(), Some("hello"));
+        assert!(!a.update_assistant_selection(7, 8));
+        assert_eq!(a.finish_assistant_selection(7, 8), None);
+        assert!(
+            a.assistant_selection.is_none(),
+            "highlight disappears after copying"
+        );
+    }
+
+    #[test]
+    fn moving_a_plan_card_clears_block_indexed_assistant_selection() {
+        use crate::app::state::{AssistantRowJoin, Block};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "first".into(),
+            body: "# Plan\n\nOld".into(),
+        });
+        a.blocks.push(Block::Assistant {
+            text: "answer".into(),
+            streaming: false,
+        });
+        let block = a.blocks.len() - 1;
+        a.assistant_row_hits = vec![assistant_hit(block, 0, 8, "answer", AssistantRowJoin::Hard)];
+        assert!(a.start_assistant_selection(2, 8));
+        assert!(a.update_assistant_selection(4, 8));
+
+        a.apply(AgentEvent::PlanUpdated {
+            summary: "second".into(),
+            body: "# Plan\n\nRewritten".into(),
+        });
+        assert!(a.assistant_selection.is_none());
+    }
+
+    #[test]
+    fn assistant_selection_uses_display_columns_for_wide_glyphs() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![assistant_hit(3, 0, 8, "a界b", AssistantRowJoin::Hard)];
+
+        assert!(a.start_assistant_selection(3, 8));
+        assert!(a.update_assistant_selection(5, 8));
+        assert_eq!(a.finish_assistant_selection(5, 8).as_deref(), Some("界b"));
+    }
+
+    #[test]
+    fn assistant_selection_width_matches_renderer_for_zwj_sequences() {
+        use crate::app::state::AssistantRowJoin;
+
+        let mut a = app();
+        a.assistant_row_hits = vec![assistant_hit(3, 0, 8, "👩‍💻x", AssistantRowJoin::Hard)];
+
+        // comb renders the two emoji scalars as two wide glyphs and skips ZWJ,
+        // so `x` starts four display columns after the row origin.
+        assert!(a.start_assistant_selection(6, 8));
+        assert_eq!(
+            a.assistant_selection.as_ref().map(|s| s.anchor.col),
+            Some(4)
+        );
     }
 }

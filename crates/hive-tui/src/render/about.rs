@@ -236,12 +236,16 @@ mod tests {
             model: "m".into(),
             model_display: "Kimi 2.6".into(),
             model_choices: Vec::new(),
+            skills: Vec::new(),
             connections: Vec::new(),
             active_connection: String::new(),
             cwd: "/tmp".into(),
             theme: "gray".into(),
             version: "0.1.0".into(),
             ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
         });
         a.open_about();
         a

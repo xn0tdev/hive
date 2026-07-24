@@ -1,7 +1,8 @@
 //! `comb` — a tiny, native terminal-UI engine.
 //!
-//! No ratatui, no crossterm. Raw terminal control lives in [`terminal`] (termios
-//! and ANSI), the screen is a diffed grid of [`Cell`]s in [`buffer`], and the
+//! No ratatui, no crossterm. Raw terminal control lives in [`terminal`] (Unix
+//! termios / Windows Console VT + ANSI), the screen is a diffed grid of [`Cell`]s
+//! in [`buffer`], and the
 //! headline feature is compositing: [`Surface`]s stacked as [`Compositor`]
 //! layers with z-order and transparency, so overlays (menus, popups, toasts)
 //! paint on top of the scene without disturbing it.
@@ -37,8 +38,8 @@ pub use crate::widgets::{
     ScrollView, Scrollbar, ScrollbarStyle, Tabs, TextInput, Toasts, Window,
 };
 
-pub use crate::core::buffer::{Buffer, Cell};
-pub use crate::core::geom::{Pos, Rect, Size};
+pub use crate::core::buffer::{center_pad, chip_cols, label_cols, Buffer, Cell};
+pub use crate::core::geom::{Align, Pos, Rect, Size};
 pub use crate::core::style::{Color, Modifier, Style};
 pub use crate::core::text::{Line, Span};
 pub use crate::draw::border::Border;

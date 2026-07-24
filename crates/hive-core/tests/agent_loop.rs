@@ -13,7 +13,6 @@ use hive_core::provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, Usage};
 use hive_core::skill::no_skills;
 use hive_core::spawner::noop_spawner;
 use hive_core::tool::{Tool, ToolContext, ToolResult};
-use hive_core::vision::no_vision;
 use hive_core::{AgentBuilder, UserInput};
 
 struct MockProvider {
@@ -94,7 +93,6 @@ async fn runs_tool_then_answers() {
         }),
         tools: vec![Arc::new(EchoTool)],
         skills: no_skills(),
-        vision: no_vision(),
         config: Arc::new(AppConfig::default()),
     };
 
@@ -106,7 +104,10 @@ async fn runs_tool_then_answers() {
     );
 
     let interrupt = Arc::new(AtomicBool::new(false));
-    let final_text = agent.run_turn(UserInput::from("hi"), interrupt).await;
+    let follow_up = Arc::new(std::sync::Mutex::new(None));
+    let final_text = agent
+        .run_turn(UserInput::from("hi"), interrupt, follow_up)
+        .await;
     assert_eq!(final_text, "all done");
 
     let mut saw_tool_started = false;

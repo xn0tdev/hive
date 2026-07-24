@@ -27,6 +27,10 @@ pub struct ModelMeta {
     pub input_modalities: Vec<String>,
     pub context: u64,
     pub max_output: u64,
+    /// USD per 1M input tokens (0 if unknown).
+    pub cost_input: f64,
+    /// USD per 1M output tokens (0 if unknown).
+    pub cost_output: f64,
 }
 
 impl ModelMeta {
@@ -69,6 +73,7 @@ struct RawModel {
     tool_call: bool,
     modalities: Option<RawModalities>,
     limit: Option<RawLimit>,
+    cost: Option<RawCost>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +88,14 @@ struct RawLimit {
     context: u64,
     #[serde(default)]
     output: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCost {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    output: f64,
 }
 
 pub async fn fetch_models_dev() -> Result<ModelsDevCatalog> {
@@ -128,6 +141,8 @@ pub(crate) fn parse_models_dev_json(text: &str) -> Result<ModelsDevCatalog> {
                 input_modalities: raw.modalities.map(|m| m.input).unwrap_or_default(),
                 context: raw.limit.as_ref().map(|l| l.context).unwrap_or(0),
                 max_output: raw.limit.as_ref().map(|l| l.output).unwrap_or(0),
+                cost_input: raw.cost.as_ref().map(|c| c.input).unwrap_or(0.0),
+                cost_output: raw.cost.as_ref().map(|c| c.output).unwrap_or(0.0),
             };
             catalog.by_id.insert(id.clone(), meta.clone());
             map.insert(id, meta);
@@ -175,7 +190,8 @@ mod tests {
                 "reasoning": true,
                 "tool_call": true,
                 "modalities": { "input": ["text", "image"], "output": ["text"] },
-                "limit": { "context": 128000, "output": 8192 }
+                "limit": { "context": 128000, "output": 8192 },
+                "cost": { "input": 2.1, "output": 6.6, "cache_read": 0.3, "cache_write": 0 }
               }
             }
           }
@@ -187,5 +203,7 @@ mod tests {
         assert!(m.has_image());
         assert!(m.reasoning);
         assert_eq!(m.context, 128000);
+        assert!((m.cost_input - 2.1).abs() < 0.001);
+        assert!((m.cost_output - 6.6).abs() < 0.001);
     }
 }

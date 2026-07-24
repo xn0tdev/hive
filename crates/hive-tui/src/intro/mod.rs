@@ -1064,6 +1064,8 @@ mod step_tests {
             tools: true,
             context: 128_000,
             enriched: true,
+            cost_input: 0.0,
+            cost_output: 0.0,
         }
     }
 

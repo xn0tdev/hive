@@ -4,6 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmdId {
     Clear,
+    Compact,
     Model,
     Connect,
     Copy,
@@ -35,6 +36,7 @@ impl Category {
     }
 }
 
+#[derive(Debug)]
 pub struct CommandDef {
     pub id: CmdId,
     /// Canonical slash name (without `/`).
@@ -57,7 +59,7 @@ pub const COMMANDS: &[CommandDef] = &[
     CommandDef {
         id: CmdId::Model,
         name: "model",
-        aliases: &[],
+        aliases: &["models"],
         label: "Switch model",
         desc: "Change the active model",
         hint: "[id]",
@@ -84,6 +86,18 @@ pub const COMMANDS: &[CommandDef] = &[
         aliases: &["new", "reset"],
         label: "Clear",
         desc: "New chat",
+        hint: "",
+        takes_arg: false,
+        category: Category::Session,
+        shortcut: None,
+        suggested: true,
+    },
+    CommandDef {
+        id: CmdId::Compact,
+        name: "compact",
+        aliases: &[],
+        label: "Compact context",
+        desc: "Compress chat history; keeps the task",
         hint: "",
         takes_arg: false,
         category: Category::Session,
@@ -152,9 +166,6 @@ pub const COMMANDS: &[CommandDef] = &[
     },
 ];
 
-/// Backward-compatible alias used by the slash menu renderer.
-pub type SlashCmd = CommandDef;
-
 /// Commands matching the typed slash prefix (canonical name or any alias).
 /// Each command appears at most once.
 pub fn filtered(prefix: &str) -> Vec<&'static CommandDef> {
@@ -167,6 +178,14 @@ pub fn filtered(prefix: &str) -> Vec<&'static CommandDef> {
 
 fn matches_prefix(c: &CommandDef, prefix: &str) -> bool {
     c.name.starts_with(prefix) || c.aliases.iter().any(|a| a.starts_with(prefix))
+}
+
+/// True when `name` would collide with a built-in slash command.
+pub fn is_builtin_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    COMMANDS
+        .iter()
+        .any(|c| c.name == name || c.aliases.iter().any(|a| *a == name))
 }
 
 /// Resolve a typed slash name (canonical or alias) to its definition.

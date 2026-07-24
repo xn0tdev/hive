@@ -7,7 +7,7 @@ use crate::app::App;
 /// Draw the current flash centered on the last row of `area`.
 ///
 /// Callers choose the band: landing uses the screen bottom; active chat uses
-/// the transcript band so the toast sits above the input and never fights BUILD.
+/// the transcript band so the toast sits above the input and never fights MAKE.
 pub fn draw(f: &mut Frame, area: Rect, app: &App) -> bool {
     let Some(msg) = app.flash_text() else {
         return false;

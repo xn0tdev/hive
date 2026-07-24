@@ -200,12 +200,18 @@ impl InputState {
     }
 
     /// Visual rows for one hard line of display-width `len` at wrap width `w`.
+    ///
+    /// When `len` is an exact multiple of `w`, count one extra empty row: the
+    /// caret sits there after the last glyph (same as `cursor_visual`). Without
+    /// it, `view_scroll` can push the only row off-screen and the strip looks empty.
     fn rows_for_width(len: usize, w: usize) -> usize {
         if w == 0 {
             return 1;
         }
         if len == 0 {
             1
+        } else if len.is_multiple_of(w) {
+            len / w + 1
         } else {
             len.div_ceil(w)
         }
@@ -334,6 +340,9 @@ fn normalize_paste(text: &str) -> String {
 }
 
 /// Wrap one hard line into display-width chunks of at most `w` columns.
+///
+/// If the line fills the width exactly, append an empty trailing chunk so the
+/// end-caret has a row (matches [`InputState::cursor_visual`] / `rows_for_width`).
 fn wrap_hard_line(line: &str, w: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
@@ -359,6 +368,9 @@ fn wrap_hard_line(line: &str, w: usize) -> Vec<String> {
     }
     if !cur.is_empty() || rows.is_empty() {
         rows.push(cur);
+    } else {
+        // Exact multiple of `w` — keep an empty row for the end caret.
+        rows.push(String::new());
     }
     rows
 }
@@ -533,5 +545,47 @@ mod tests {
                 (false, "b".into()),
             ]
         );
+    }
+
+    #[test]
+    fn exact_wrap_width_keeps_end_caret_row() {
+        // Line fills the strip exactly — first space that lands on the boundary
+        // used to scroll the only row away (looked like the line "cleared").
+        let i = InputState {
+            value: "abcd".into(),
+            cursor: 4,
+            text_cols: 4,
+        };
+        assert_eq!(i.visual_row_count(4), 2);
+        assert_eq!(
+            i.wrapped_rows(4),
+            vec![(true, "abcd".into()), (false, String::new())]
+        );
+        assert_eq!(i.cursor_visual(4), (1, 0));
+        // Band height matches caret row → no phantom scroll.
+        assert_eq!(i.view_scroll(i.visible_line_count(4), 4), 0);
+    }
+
+    #[test]
+    fn space_after_near_full_line_does_not_blank_strip() {
+        let mut i = InputState {
+            text_cols: 4,
+            ..Default::default()
+        };
+        for ch in ['a', 'b', 'c'] {
+            i.insert(ch);
+        }
+        assert_eq!(i.visual_row_count(4), 1);
+        assert_eq!(i.view_scroll(1, 4), 0);
+
+        i.insert(' '); // now exact width 4
+        assert_eq!(i.value, "abc ");
+        assert_eq!(i.visual_row_count(4), 2);
+        assert_eq!(i.cursor_visual(4), (1, 0));
+        assert_eq!(i.view_scroll(2, 4), 0);
+
+        i.insert(' '); // past the boundary — still stable
+        assert_eq!(i.visual_row_count(4), 2);
+        assert_eq!(i.view_scroll(2, 4), 0);
     }
 }
