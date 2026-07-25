@@ -158,8 +158,8 @@ pub fn fetch(cwd: &str) -> ProjectSnapshot {
             if line.len() < 4 {
                 continue;
             }
-            let code = &line[..2];
-            let path = line[3..].trim();
+            let code = line.get(..2).unwrap_or(line);
+            let path = line.get(3..).unwrap_or("").trim();
             if path.is_empty() {
                 continue;
             }
@@ -757,6 +757,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: String::new(),
             rows: 12,
             cols: 40,
         });
@@ -903,6 +904,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: String::new(),
             rows: 12,
             cols: 40,
         });

@@ -377,11 +377,11 @@ fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
         }
 
         if end < chars.len() {
-            let text: String = chars[start..end].iter().collect();
+            let text: String = chars[start.min(chars.len())..end.min(chars.len())].iter().collect();
             rows.push((text, start));
             start = end;
         } else {
-            let text: String = chars[start..].iter().collect();
+            let text: String = chars[start.min(chars.len())..].iter().collect();
             rows.push((text.clone(), start));
             if display_width(&text) >= w {
                 rows.push((String::new(), chars.len()));

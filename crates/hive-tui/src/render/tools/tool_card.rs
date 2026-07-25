@@ -82,7 +82,7 @@ pub(crate) fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> 
         )));
     }
     let start = lines.len().saturating_sub(preview_n);
-    let raw: Vec<Line> = lines[start..]
+    let raw: Vec<Line> = lines[start.min(lines.len())..]
         .iter()
         .map(|l| Line::from(Span::styled(format!("    {l}"), meta_st)))
         .collect();

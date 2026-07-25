@@ -886,7 +886,7 @@ impl App {
         if start == end {
             return false;
         }
-        let slice = &body[start..end];
+        let slice = body.get(start..end).unwrap_or("");
         let Some(rel_start) = slice.find(|c: char| !c.is_whitespace()) else {
             return false;
         };
@@ -901,7 +901,7 @@ impl App {
         if start >= end || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
             return false;
         }
-        let excerpt = body[start..end].to_string();
+        let excerpt = body.get(start..end).unwrap_or("").to_string();
         self.plan_sync_active_note();
         self.plan_view.corrections.push(PlanCorrection {
             start,
@@ -2780,7 +2780,7 @@ fn slice_display_range(text: &str, start: usize, end: usize) -> String {
         x += width;
     }
     byte_start
-        .map(|from| text[from..byte_end].to_string())
+        .map(|from| text.get(from..byte_end).unwrap_or("").to_string())
         .unwrap_or_default()
 }
 
@@ -2868,7 +2868,7 @@ fn strip_matching_quotes(s: &str) -> &str {
     if bytes.len() >= 2 {
         let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return &s[1..s.len() - 1];
+            return s.get(1..s.len().saturating_sub(1)).unwrap_or(s);
         }
     }
     s

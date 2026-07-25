@@ -53,7 +53,7 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
     buf.paint(area, Style::default().bg(panel_bg));
 
     let window = window_start(selected, items.len(), MAX_MENU_ROWS);
-    let visible = &items[window..items.len().min(window + MAX_MENU_ROWS)];
+    let visible = &items[window.min(items.len())..items.len().min(window + MAX_MENU_ROWS)];
 
     let name_w = visible
         .iter()
@@ -143,7 +143,7 @@ fn draw_files(buf: &mut Buffer, area: Rect, app: &mut App) {
 
     let selected = selected.min(items.len() - 1);
     let window = window_start(selected, items.len(), MAX_MENU_ROWS);
-    let visible = &items[window..items.len().min(window + MAX_MENU_ROWS)];
+    let visible = &items[window.min(items.len())..items.len().min(window + MAX_MENU_ROWS)];
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len() + 1);
     for (i, path) in visible.iter().enumerate() {

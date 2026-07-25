@@ -272,8 +272,8 @@ fn compact_diff(old: &str, new: &str) -> String {
         suf += 1;
     }
 
-    let removed = &o[pre..o.len() - suf];
-    let added = &n[pre..n.len() - suf];
+    let removed = &o[pre..o.len().saturating_sub(suf).max(pre)];
+    let added = &n[pre..n.len().saturating_sub(suf).max(pre)];
 
     const CAP: usize = 14;
     let mut out = String::new();
