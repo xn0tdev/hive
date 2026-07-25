@@ -1937,18 +1937,10 @@ Keep everything else unless a note says otherwise.\n",
             Some(Block::User(_)) => {}
             _ => return,
         };
-        let mut items = Vec::new();
-        // Recall only makes sense if the agent isn't running.
-        if !self.running {
-            items.push(ContextMenuItem {
-                label: "Recall to input".into(),
-                action: ContextAction::RecallPrompt,
-            });
-        }
-        items.push(ContextMenuItem {
+        let items = vec![ContextMenuItem {
             label: "Copy".into(),
             action: ContextAction::CopyPrompt,
-        });
+        }];
         self.open_context_menu(block_idx, items);
     }
 

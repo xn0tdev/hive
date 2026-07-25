@@ -159,8 +159,6 @@ pub struct ContextMenuItem {
 pub enum ContextAction {
     /// Copy the prompt text to the clipboard.
     CopyPrompt,
-    /// Pull the prompt back into the composer for editing.
-    RecallPrompt,
     /// Revert a file-writing tool by restoring the original content.
     RevertFile { path: String, content: String },
     /// Copy the tool output / diff to the clipboard.

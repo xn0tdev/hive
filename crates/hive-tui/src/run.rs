@@ -1496,16 +1496,6 @@ fn activate_context_action(app: &mut App, action: ContextAction) {
                 app.flash("Copied");
             }
         }
-        ContextAction::RecallPrompt => {
-            if let Some(Block::User(text)) = app.blocks.last() {
-                let text = text.clone();
-                app.blocks.pop();
-                app.input.value = text;
-                app.input.end();
-                app.scroll_from_bottom = 0;
-                app.flash("Prompt recalled — edit and resend");
-            }
-        }
         ContextAction::RevertFile { path, content } => {
             let full = std::path::Path::new(&app.cwd).join(&path);
             match std::fs::write(&full, &content) {
