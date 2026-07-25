@@ -21,3 +21,4 @@ ignore = { workspace = true }
 unicode-width = "0.2"
 arboard = "3"
 vt100 = { workspace = true }
+pulldown-cmark = { version = "0.13", default-features = false }
