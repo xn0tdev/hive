@@ -338,9 +338,9 @@ fn normalize_paste(text: &str) -> String {
 
 /// Char-wrap one hard line into chunks of at most `w` display columns.
 /// Returns `(text, char_offset_in_line)` for each chunk. A space that would
-/// land on a new wrapped row is kept on the current row (no empty-looking
-/// next line). A trailing empty chunk is appended when the caret would sit
-/// past the last glyph (exact-width fill).
+/// land on a new row stays on the current row (invisible trailing space) —
+/// only a visible character triggers the wrap. This prevents the cursor
+/// from jumping to a new line that looks empty.
 fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
     if line.is_empty() {
         return vec![(String::new(), 0)];
@@ -364,6 +364,12 @@ fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
         while end < chars.len() {
             let cw = glyph_width(chars[end]);
             if width > 0 && width + cw > w {
+                // Spaces don't trigger a wrap — they stay as invisible
+                // trailing whitespace on the current row.
+                if chars[end] == ' ' {
+                    end += 1;
+                    continue;
+                }
                 break;
             }
             width += cw;
