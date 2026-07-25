@@ -24,12 +24,12 @@ mod input_bars;
 mod menu;
 mod palette;
 mod settings;
-mod terminal_view;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;
+mod terminal_view;
 mod toast;
-pub(crate) mod two_col;
 mod transcript;
+pub(crate) mod two_col;
 
 pub use sidebar::{clamp_width, ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections};
 
@@ -172,7 +172,11 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     // at the exact height of the chat Input, with toasts on the very last row.
     let footer_h: u16 = 2;
     let footer_y = area.bottom().saturating_sub(footer_h);
-    let follow_h: u16 = if !special && app.has_follow_up() { 1 } else { 0 };
+    let follow_h: u16 = if !special && app.has_follow_up() {
+        1
+    } else {
+        0
+    };
     let input_y = footer_y.saturating_sub(input_h);
     let follow_y = input_y.saturating_sub(follow_h);
     let transcript_h = follow_y.saturating_sub(area.y);

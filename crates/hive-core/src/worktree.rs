@@ -26,9 +26,7 @@ pub fn is_git_repo(repo: &Path) -> bool {
 /// Create an isolated worktree on a new branch from HEAD.
 pub fn create(repo: &Path, id: &str) -> Result<(PathBuf, String), String> {
     if !is_git_repo(repo) {
-        return Err(
-            "MULTITASK needs a git repository — initialize git or switch to MAKE".into(),
-        );
+        return Err("MULTITASK needs a git repository — initialize git or switch to MAKE".into());
     }
     let path = worktree_path(repo, id);
     let branch = branch_name(id);
@@ -158,12 +156,7 @@ pub fn remove(repo: &Path, id: &str) -> Result<(), String> {
     let branch = branch_name(id);
     if path.exists() {
         let out = Command::new("git")
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                path.to_str().unwrap_or(""),
-            ])
+            .args(["worktree", "remove", "--force", path.to_str().unwrap_or("")])
             .current_dir(repo)
             .output()
             .map_err(|e| format!("git worktree remove: {e}"))?;

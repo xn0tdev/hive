@@ -1,5 +1,7 @@
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use hive_core::{
     AgentEvent, TerminalController, TerminalError, TerminalManager, TerminalProcessState,
     TerminalReadResult, TerminalWriteRequest,

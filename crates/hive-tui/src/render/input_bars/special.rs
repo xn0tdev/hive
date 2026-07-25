@@ -113,10 +113,7 @@ pub fn draw_plan_bar(f: &mut Frame, area: Rect, app: &mut App) {
         f.buffer().put_label(
             br,
             word,
-            Style::default()
-                .fg(theme.sel_fg)
-                .bg(bg)
-                .add(Modifier::BOLD),
+            Style::default().fg(theme.sel_fg).bg(bg).add(Modifier::BOLD),
         );
         app.make_hit = Some(br);
     } else {
@@ -231,7 +228,10 @@ mod tests {
         for x in 0..size.width {
             row.push(buf.get(x, last).map(|c| c.ch).unwrap_or(' '));
         }
-        assert!(row.contains("Ctrl+C again to quit"), "toast on last row: {row:?}");
+        assert!(
+            row.contains("Ctrl+C again to quit"),
+            "toast on last row: {row:?}"
+        );
 
         // …on the default background, below the reserved bottom band.
         let toast_bg = buf.get(40, last).and_then(|c| c.style.bg);
@@ -263,7 +263,10 @@ mod tests {
 
         let (buf, _) = render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
         let hit = a.make_hit.expect("MAKE");
-        assert_eq!(hit.width, 8, "all action chips use the roomier 8-cell width");
+        assert_eq!(
+            hit.width, 8,
+            "all action chips use the roomier 8-cell width"
+        );
         assert_eq!(hit.height, 3, "hit column matches textarea strip height");
         assert_eq!(a.plan_action(), PlanAction::Make);
         assert!(a.back_hit.is_some(), "idle: back + MAKE");

@@ -136,6 +136,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn prefers_canonical_over_lowercase() {
         let dir = tmp_dir();

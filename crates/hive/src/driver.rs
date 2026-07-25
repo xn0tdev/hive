@@ -193,11 +193,7 @@ async fn handle_terminal_command(
             report_terminal_result(&id, terminal.request_detach(&id), events);
             // Hand geometry back to the agent at a stable default size.
             let _ = terminal
-                .resize(
-                    &id,
-                    hive_core::DEFAULT_ROWS,
-                    hive_core::DEFAULT_COLS,
-                )
+                .resize(&id, hive_core::DEFAULT_ROWS, hive_core::DEFAULT_COLS)
                 .await;
             Ok(())
         }

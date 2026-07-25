@@ -9,7 +9,11 @@ const KNOWN: &[(&str, &str, Option<&str>)] = &[
     ("api.deepseek.com", "DeepSeek", Some("deepseek")),
     ("api.together.xyz", "Together", Some("togetherai")),
     ("api.mistral.ai", "Mistral", Some("mistral")),
-    ("generativelanguage.googleapis.com", "Google AI", Some("google")),
+    (
+        "generativelanguage.googleapis.com",
+        "Google AI",
+        Some("google"),
+    ),
     ("api.x.ai", "xAI", Some("xai")),
     ("api.cerebras.ai", "Cerebras", Some("cerebras")),
     ("api.sambanova.ai", "SambaNova", Some("sambanova")),

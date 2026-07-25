@@ -12,9 +12,7 @@ use comb::{Line, Rect};
 use hive_core::event::{AgentEvent, ConnectionInfo, SubagentLine, SubagentStatus};
 use hive_core::message::ImageSource;
 use hive_core::provider::Usage;
-use hive_core::{
-    AgentMode, SidebarMode, TerminalController, TerminalProcessState, UiConfig,
-};
+use hive_core::{AgentMode, SidebarMode, TerminalController, TerminalProcessState, UiConfig};
 
 use crate::commands;
 use crate::render::spinner;
@@ -69,8 +67,8 @@ use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
     Block, ChatView, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot, ModeSwitchCard,
-    PlanAction, PlanCard, PlanCorrection, PlanStatus, PlanViewState, PromptHistory,
-    SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState, Thought, ToolCard, ToolStatus,
+    PlanAction, PlanCard, PlanCorrection, PlanStatus, PlanViewState, PromptHistory, SubagentCard,
+    TerminalCard, TerminalViewPhase, TerminalViewState, Thought, ToolCard, ToolStatus,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -872,9 +870,12 @@ impl App {
             return false;
         }
         // Click or selection fully inside an existing mark → open note to read/edit.
-        if let Some(i) = self.plan_view.corrections.iter().position(|c| {
-            start >= c.start && start < c.end && end <= c.end
-        }) {
+        if let Some(i) = self
+            .plan_view
+            .corrections
+            .iter()
+            .position(|c| start >= c.start && start < c.end && end <= c.end)
+        {
             return self.plan_focus_correction(i);
         }
         // Empty click outside any mark.
@@ -887,13 +888,7 @@ impl App {
         };
         let rel_end = slice
             .rfind(|c: char| !c.is_whitespace())
-            .map(|i| {
-                i + slice[i..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1)
-            })
+            .map(|i| i + slice[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1))
             .unwrap_or(rel_start);
         let new_start = start + rel_start;
         let new_end = start + rel_end;
@@ -1730,10 +1725,7 @@ Keep everything else unless a note says otherwise.\n",
         let Some(pd) = self.pending_dispatch.take() else {
             return false;
         };
-        if matches!(
-            self.blocks.last(),
-            Some(Block::User(_))
-        ) {
+        if matches!(self.blocks.last(), Some(Block::User(_))) {
             self.blocks.pop();
         }
         self.input.value = pd.composer;
@@ -1800,11 +1792,7 @@ Keep everything else unless a note says otherwise.\n",
         self.attach_path_inner(&abs, &label)
     }
 
-    fn attach_path_inner(
-        &mut self,
-        abs: &std::path::Path,
-        label: &str,
-    ) -> Result<String, String> {
+    fn attach_path_inner(&mut self, abs: &std::path::Path, label: &str) -> Result<String, String> {
         let bytes =
             std::fs::read(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
         let is_image = is_image_path(abs.to_string_lossy().as_ref());
@@ -1823,11 +1811,8 @@ Keep everything else unless a note says otherwise.\n",
         if self.pending_attaches.iter().any(|a| a.path == path) {
             return Ok(tag);
         }
-        self.pending_attaches.push(PendingAttach {
-            label,
-            path,
-            image,
-        });
+        self.pending_attaches
+            .push(PendingAttach { label, path, image });
         Ok(tag)
     }
 
@@ -1873,11 +1858,9 @@ Keep everything else unless a note says otherwise.\n",
         let mut pal = PaletteState::connect();
         pal.clamp_selection(&self.model_choices, &self.connections);
         // Prefer selecting the active profile.
-        if let Some(i) = pal
-            .connect_rows(&self.connections)
-            .iter()
-            .position(|r| matches!(r, palette::ConnectRow::Profile(c) if c.id == self.active_connection))
-        {
+        if let Some(i) = pal.connect_rows(&self.connections).iter().position(
+            |r| matches!(r, palette::ConnectRow::Profile(c) if c.id == self.active_connection),
+        ) {
             pal.selected = i;
         }
         self.palette = Some(pal);
@@ -2106,7 +2089,8 @@ Keep everything else unless a note says otherwise.\n",
             }
             AgentEvent::ModeSwitched { mode, reason } => {
                 self.agent_mode = mode;
-                self.blocks.push(Block::ModeSwitch(ModeSwitchCard { mode, reason }));
+                self.blocks
+                    .push(Block::ModeSwitch(ModeSwitchCard { mode, reason }));
                 self.scroll_from_bottom = 0;
                 self.flash(format!("Switched to {} mode", mode.title()));
                 true
@@ -2118,9 +2102,11 @@ Keep everything else unless a note says otherwise.\n",
                 cols,
             } => {
                 self.close_thought();
-                if !self.blocks.iter().any(
-                    |block| matches!(block, Block::Terminal(card) if card.id == id),
-                ) {
+                if !self
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, Block::Terminal(card) if card.id == id))
+                {
                     let parser = vt100::Parser::new(rows.max(1), cols.max(1), 10_000);
                     self.blocks.push(Block::Terminal(Box::new(TerminalCard {
                         id,
@@ -2141,9 +2127,11 @@ Keep everything else unless a note says otherwise.\n",
                 message,
             } => {
                 self.close_thought();
-                if !self.blocks.iter().any(
-                    |block| matches!(block, Block::Terminal(card) if card.id == id),
-                ) {
+                if !self
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, Block::Terminal(card) if card.id == id))
+                {
                     let parser = vt100::Parser::new(1, 1, 0);
                     self.blocks.push(Block::Terminal(Box::new(TerminalCard {
                         id,
@@ -2226,7 +2214,12 @@ Keep everything else unless a note says otherwise.\n",
                 self.flash(message);
                 true
             }
-            AgentEvent::ModelChanged { id, display, cost_input, cost_output } => {
+            AgentEvent::ModelChanged {
+                id,
+                display,
+                cost_input,
+                cost_output,
+            } => {
                 self.model = id;
                 self.model_display = display;
                 self.cost_input = cost_input;
@@ -2385,7 +2378,9 @@ Keep everything else unless a note says otherwise.\n",
 
     /// Index of the most recent plan card in the transcript.
     fn last_plan_idx(&self) -> Option<usize> {
-        self.blocks.iter().rposition(|b| matches!(b, Block::Plan(_)))
+        self.blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::Plan(_)))
     }
 
     fn mark_plan_writing(&mut self) {
@@ -3133,10 +3128,7 @@ mod tests {
         });
 
         let card = app.terminal_card("term-failed").unwrap();
-        assert!(matches!(
-            card.process,
-            TerminalProcessState::Failed { .. }
-        ));
+        assert!(matches!(card.process, TerminalProcessState::Failed { .. }));
         assert!(card.status_text().contains("cannot spawn"));
     }
 
@@ -3155,7 +3147,10 @@ mod tests {
                 args_preview: "term-1".into(),
             });
         }
-        assert!(!app.blocks.iter().any(|block| matches!(block, Block::Tool(_))));
+        assert!(!app
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Tool(_))));
     }
 
     #[test]
@@ -3329,7 +3324,10 @@ mod tests {
         assert_eq!(super::strip_matching_quotes("\"/a b/c.png\""), "/a b/c.png");
         assert_eq!(super::strip_matching_quotes("'/a/c.png'"), "/a/c.png");
         assert_eq!(super::strip_matching_quotes("/a/c.png"), "/a/c.png");
-        assert_eq!(super::unescape_backslashes("/a/My\\ Photos/c.png"), "/a/My Photos/c.png");
+        assert_eq!(
+            super::unescape_backslashes("/a/My\\ Photos/c.png"),
+            "/a/My Photos/c.png"
+        );
     }
 
     #[test]
@@ -3371,7 +3369,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("hive-drop-{n}")).join("My Photos");
+        let dir = std::env::temp_dir()
+            .join(format!("hive-drop-{n}"))
+            .join("My Photos");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("shot.png");
         std::fs::write(&file, b"fakepng").unwrap();

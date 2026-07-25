@@ -404,10 +404,7 @@ async fn drain_events(mut events: EventReceiver, state: Arc<AcpState>) {
         }
 
         // For ToolFinished of file-writing tools, emit a diff if we have a snapshot.
-        if let AgentEvent::ToolFinished {
-            id, name, ok, ..
-        } = &event
-        {
+        if let AgentEvent::ToolFinished { id, name, ok, .. } = &event {
             if *ok && is_file_write_tool(name) {
                 if let Some((path, old_content)) = snapshots.remove(id) {
                     let new_content = tokio::fs::read_to_string(&path).await.unwrap_or_default();

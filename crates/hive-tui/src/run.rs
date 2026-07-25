@@ -96,11 +96,7 @@ fn run_loop(
             terminal.draw(|f| render::draw(f, app))?;
             if let Some((id, rows, cols)) = app.take_pending_terminal_resize() {
                 if rows > 0 && cols > 0 {
-                    let _ = input_tx.send(InputCommand::TerminalResize {
-                        id,
-                        rows,
-                        cols,
-                    });
+                    let _ = input_tx.send(InputCommand::TerminalResize { id, rows, cols });
                 }
             }
             last_spinner = app.spinner;
@@ -157,11 +153,7 @@ fn drain_events(
 }
 
 /// Bracketed paste / clipboard paste. Returns whether the UI should redraw.
-fn handle_paste(
-    app: &mut App,
-    text: &str,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
+fn handle_paste(app: &mut App, text: &str, input_tx: &UnboundedSender<InputCommand>) -> bool {
     if app.in_terminal_view() {
         if app.terminal_view.phase != TerminalViewPhase::UserControl {
             return false;
@@ -274,11 +266,7 @@ fn write_clipboard_text(text: &str) {
     }
 }
 
-fn handle_terminal_key(
-    app: &mut App,
-    key: Key,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
+fn handle_terminal_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let phase = app.terminal_view.phase;
     let Some(id) = app.terminal_view_id().map(str::to_string) else {
         return false;
@@ -672,17 +660,13 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                     }
                     return true;
                 }
-                if app
-                    .back_hit
-                    .is_some_and(|hit| hit.contains(m.col, m.row))
-                {
-                    let user_owned = app.viewed_terminal().is_some_and(|card| {
-                        card.controller == hive_core::TerminalController::User
-                    });
+                if app.back_hit.is_some_and(|hit| hit.contains(m.col, m.row)) {
+                    let user_owned = app
+                        .viewed_terminal()
+                        .is_some_and(|card| card.controller == hive_core::TerminalController::User);
                     if app.terminal_view.phase == TerminalViewPhase::Attaching || user_owned {
                         if let Some(id) = app.terminal_view_id() {
-                            let _ =
-                                input_tx.send(InputCommand::TerminalDetach { id: id.into() });
+                            let _ = input_tx.send(InputCommand::TerminalDetach { id: id.into() });
                         }
                     }
                     app.leave_terminal_view();
@@ -1159,11 +1143,7 @@ fn inject_follow_up_now(app: &mut App, slot: &FollowUpSlot) -> bool {
     let Some(fu) = app.follow_up.take() else {
         return false;
     };
-    let images = fu
-        .attaches
-        .iter()
-        .filter_map(|a| a.image.clone())
-        .collect();
+    let images = fu.attaches.iter().filter_map(|a| a.image.clone()).collect();
     app.push_user(fu.display);
     if let Ok(mut g) = slot.lock() {
         *g = Some(UserInput {
@@ -1234,11 +1214,7 @@ fn prepare_user_message(app: &mut App, text: String, trimmed: String) -> Option<
 
 /// Deferred dispatch: push the user block now but hold the driver send for a
 /// brief grace period so ESC can recall the prompt before the agent starts.
-fn dispatch_user(
-    app: &mut App,
-    _input_tx: &UnboundedSender<InputCommand>,
-    prepared: PreparedUser,
-) {
+fn dispatch_user(app: &mut App, _input_tx: &UnboundedSender<InputCommand>, prepared: PreparedUser) {
     let images = prepared.images();
     app.push_user(prepared.display);
     app.pending_dispatch = Some(crate::app::PendingDispatch {
@@ -1416,12 +1392,9 @@ fn handle_settings_key(app: &mut App, key: Key, input_tx: &UnboundedSender<Input
             }
         }
         KeyCode::Enter | KeyCode::Right => {
-            let width_row = app
-                .settings
-                .as_ref()
-                .is_some_and(|st| {
-                    st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
-                });
+            let width_row = app.settings.as_ref().is_some_and(|st| {
+                st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+            });
             let changed = if width_row {
                 crate::app::settings::nudge_width(app, 2)
             } else {
@@ -1432,12 +1405,9 @@ fn handle_settings_key(app: &mut App, key: Key, input_tx: &UnboundedSender<Input
             }
         }
         KeyCode::Left => {
-            let width_row = app
-                .settings
-                .as_ref()
-                .is_some_and(|st| {
-                    st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
-                });
+            let width_row = app.settings.as_ref().is_some_and(|st| {
+                st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+            });
             if width_row && crate::app::settings::nudge_width(app, -2) {
                 app.persist_ui(input_tx);
             }
@@ -1902,10 +1872,7 @@ mod tests {
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Models)
         );
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(InputCommand::FetchModels)
-        ));
+        assert!(matches!(rx.try_recv(), Ok(InputCommand::FetchModels)));
         app.models_catalog = crate::app::ModelsCatalogState::Ready;
         if let Some(pal) = app.palette.as_mut() {
             pal.clamp_selection(&app.model_choices.clone(), &app.connections.clone());
@@ -2000,7 +1967,10 @@ mod tests {
         assert!(
             items.iter().any(|i| i.name() == "read-tweet"),
             "items={:?}",
-            items.iter().map(|i| i.name().to_string()).collect::<Vec<_>>()
+            items
+                .iter()
+                .map(|i| i.name().to_string())
+                .collect::<Vec<_>>()
         );
         assert!(items.iter().any(|i| i.desc().contains("summarize")));
 
@@ -2080,10 +2050,16 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
         app.open_about();
-        assert!(!handle_key(&mut app, Key {
+        assert!(!handle_key(
+            &mut app,
+            Key {
                 code: KeyCode::Esc,
                 mods: KeyMods::NONE,
-            }, &tx, &interrupt, &follow_slot()));
+            },
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.about_open());
     }
 
@@ -2100,7 +2076,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
         app.open_palette();
-        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            esc_key(),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.palette_open());
     }
 
@@ -2115,13 +2097,25 @@ mod tests {
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Models)
         );
-        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            esc_key(),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(app.palette_open());
         assert_eq!(
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Commands)
         );
-        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            esc_key(),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.palette_open());
     }
 
@@ -2343,10 +2337,7 @@ mod tests {
         // Trailing spaces gone, surrounding blank lines gone, but interior blank
         // lines and leading indentation (code) preserved.
         let raw = "\n\nHello world   \n\n    let x = 1;  \n\n";
-        assert_eq!(
-            super::clean_for_copy(raw),
-            "Hello world\n\n    let x = 1;"
-        );
+        assert_eq!(super::clean_for_copy(raw), "Hello world\n\n    let x = 1;");
         assert_eq!(super::clean_for_copy("   \n  \n"), "");
     }
 
@@ -2477,12 +2468,24 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
         assert_eq!(app.scroll_from_bottom, 1);
 
-        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Down),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
     }
@@ -2501,11 +2504,23 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
 
-        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Down),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
 
@@ -2533,12 +2548,24 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(&mut app, key(KeyCode::Left), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Left),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(app.input_focused, "Left should restore composer focus");
         assert_eq!(app.input.cursor, 4);
 
         app.blur_input();
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(
             app.input_focused,
             "Up with nothing to scroll should focus, not no-op"
@@ -2557,13 +2584,31 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2, "Up stops at top");
 
         // Further Up cannot scroll — hand focus back to the composer.
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2);
     }
@@ -2578,11 +2623,23 @@ mod tests {
         let interrupt = Arc::new(AtomicBool::new(false));
 
         // Esc closes About; arrows must not stay swallowed afterward.
-        assert!(!handle_key(&mut app, key(KeyCode::Esc), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Esc),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.about_open());
         assert!(!app.input_focused);
 
-        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt, &follow_slot()));
+        assert!(!handle_key(
+            &mut app,
+            key(KeyCode::Up),
+            &tx,
+            &interrupt,
+            &follow_slot()
+        ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
     }
@@ -2750,20 +2807,11 @@ mod tests {
         );
         user.apply(AgentEvent::TerminalOutput {
             id: "term-1".into(),
-            frame: hive_core::TerminalOutputFrame::from_bytes(
-                20,
-                80,
-                10_000,
-                b"\x1b[?2004h",
-                2,
-            ),
+            frame: hive_core::TerminalOutputFrame::from_bytes(20, 80, 10_000, b"\x1b[?2004h", 2),
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(handle_paste(&mut user, "secret", &tx));
-        assert_eq!(
-            terminal_input(&mut rx),
-            b"\x1b[200~secret\x1b[201~"
-        );
+        assert_eq!(terminal_input(&mut rx), b"\x1b[200~secret\x1b[201~");
 
         let mut attaching = terminal_app(
             hive_core::TerminalController::Agent,
@@ -2883,9 +2931,9 @@ mod tests {
                 80,
                 10_000,
                 &(0..100)
-                .map(|line| format!("line {line}\r\n"))
-                .collect::<String>()
-                .into_bytes(),
+                    .map(|line| format!("line {line}\r\n"))
+                    .collect::<String>()
+                    .into_bytes(),
                 2,
             ),
         });
@@ -2953,7 +3001,8 @@ mod tests {
         let mut app = test_app();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for index in 0..300 {
-            tx.send(AgentEvent::Notice(format!("event {index}"))).unwrap();
+            tx.send(AgentEvent::Notice(format!("event {index}")))
+                .unwrap();
         }
         let (input_tx, _input_rx) = tokio::sync::mpsc::unbounded_channel();
 

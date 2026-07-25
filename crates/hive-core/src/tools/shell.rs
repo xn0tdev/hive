@@ -322,9 +322,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(80)).await;
             flag.store(true, Ordering::Relaxed);
         });
-        let result = RunShell
-            .execute(json!({"command": "sleep 30"}), &ctx)
-            .await;
+        let result = RunShell.execute(json!({"command": "sleep 30"}), &ctx).await;
         assert!(result.is_error);
         assert!(result.content.contains("interrupted"), "{}", result.content);
     }

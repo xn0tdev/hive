@@ -1190,10 +1190,7 @@ mod step_tests {
     fn models_right_stays_without_model() {
         let mut s = IntroState::new(opts());
         s.step = Step::Models;
-        ready_cards(
-            &mut s,
-            vec![card("def-model", "Def", false)],
-        );
+        ready_cards(&mut s, vec![card("def-model", "Def", false)]);
         s.model = RoleAssignment::empty();
         assert!(!s.models_ready());
         handle_key(

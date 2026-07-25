@@ -31,7 +31,10 @@ pub fn draw_follow_up(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(
             " follow-up  ",
-            Style::default().fg(theme.faint).bg(bg).add(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.faint)
+                .bg(bg)
+                .add(Modifier::ITALIC),
         ),
         Span::styled(preview, Style::default().fg(theme.dim).bg(bg)),
     ]);
@@ -280,8 +283,7 @@ mod tests {
             current: 6,
         });
 
-        let (buf, _) =
-            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let (buf, _) = render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
         let text = buf.text();
         assert!(text.contains("Comment"), "{text}");
         assert!(text.contains("MARK"), "{text}");
@@ -305,8 +307,7 @@ mod tests {
             current: 6,
         });
 
-        let (buf, _) =
-            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let (buf, _) = render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
         let text = buf.text();
         assert!(text.contains("MAKE"), "{text}");
         assert!(!text.contains("Comment"), "{text}");

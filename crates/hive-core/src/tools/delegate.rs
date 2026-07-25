@@ -293,7 +293,10 @@ Pass the worker `id` from spawn_swarm / spawn_subagent results (e.g. `sub_…`).
         if ctx.depth > 0 {
             return ToolResult::error("integrate_worktree is only for the main MULTITASK agent");
         }
-        let Some(id) = str_arg(&args, "id").map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(id) = str_arg(&args, "id")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolResult::error("missing 'id'");
         };
         // Allow ids with or without hive/ prefix confusion — strip accidental branch prefix.

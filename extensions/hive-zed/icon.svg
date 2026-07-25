@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 21 5" fill="currentColor">
-<!-- HIVE wordmark — ASCII block letters mapped 1:1 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 21 5" fill="#000000">
+<!-- HIVE wordmark — ASCII block letters, centered in square viewBox -->
 <!-- Row 0: █   █ ███ █   █ █████ -->
 <rect x="0"  y="0" width="1" height="1"/>
 <rect x="4"  y="0" width="1" height="1"/>

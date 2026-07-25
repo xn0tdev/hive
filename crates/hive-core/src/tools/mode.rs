@@ -52,9 +52,7 @@ parallel subagents."
 
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
         let Some(mode) = str_arg(&args, "mode").and_then(AgentMode::parse) else {
-            return ToolResult::error(
-                "invalid 'mode' — expected one of: plan, make, multitask",
-            );
+            return ToolResult::error("invalid 'mode' — expected one of: plan, make, multitask");
         };
         let reason = str_arg(&args, "reason").map(str::trim).unwrap_or("");
         if reason.is_empty() {

@@ -164,11 +164,7 @@ fn draw_search(
 ) {
     let empty = pal.query.is_empty();
     let masked = matches!(pal.mode, PaletteMode::ConnectKey { .. });
-    let placeholder = if masked {
-        "Paste API key…"
-    } else {
-        "Search"
-    };
+    let placeholder = if masked { "Paste API key…" } else { "Search" };
     let shown = if empty {
         placeholder.to_string()
     } else if masked {
@@ -285,10 +281,7 @@ fn draw_command_list(
             PaletteRow::Header(cat) => {
                 let line = Line::from(Span::styled(
                     cat.label().to_string(),
-                    Style::default()
-                        .fg(theme.fg)
-                        .bg(panel)
-                        .add(Modifier::BOLD),
+                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
                 ));
                 crate::render::strip_paint::set_line_on_strip(
                     buf, area.x, y, &line, area.width, panel,
@@ -366,10 +359,7 @@ fn draw_model_list(
         }
         ModelsCatalogState::Failed(err) => {
             let msg = crate::render::two_col::ellipsize(err, area.width as usize);
-            let line = Line::from(Span::styled(
-                msg,
-                Style::default().fg(theme.err).bg(panel),
-            ));
+            let line = Line::from(Span::styled(msg, Style::default().fg(theme.err).bg(panel)));
             crate::render::strip_paint::set_line_on_strip(
                 buf, area.x, area.y, &line, area.width, panel,
             );
@@ -405,10 +395,7 @@ fn draw_model_list(
             ModelRow::Header(label) => {
                 let line = Line::from(Span::styled(
                     (*label).to_string(),
-                    Style::default()
-                        .fg(theme.fg)
-                        .bg(panel)
-                        .add(Modifier::BOLD),
+                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
                 ));
                 crate::render::strip_paint::set_line_on_strip(
                     buf, area.x, y, &line, area.width, panel,
@@ -420,8 +407,7 @@ fn draw_model_list(
                 let base = Style::default().bg(bg);
                 let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
                 let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
-                let current =
-                    choice.key == app.model || choice.display == app.model_display;
+                let current = choice.key == app.model || choice.display == app.model_display;
 
                 let mark = if current { "›" } else { " " };
                 let left = format!("{mark} {}", choice.display);
@@ -488,11 +474,8 @@ fn draw_connect_list(
             ConnectRow::Add => ("  Add provider…".into(), String::new()),
             ConnectRow::RemoveActive => ("  Remove active".into(), String::new()),
         };
-        let (left, right, gap) = crate::render::two_col::layout_label_host(
-            &raw_left,
-            &raw_right,
-            area.width as usize,
-        );
+        let (left, right, gap) =
+            crate::render::two_col::layout_label_host(&raw_left, &raw_right, area.width as usize);
         let line = Line::from(vec![
             Span::styled(left, Style::default().fg(name_fg).bg(bg)),
             Span::styled(" ".repeat(gap), Style::default().bg(bg)),
@@ -540,11 +523,8 @@ fn draw_preset_list(
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
         let host = crate::render::two_col::host_hint(preset.base_url);
-        let (left, right, gap) = crate::render::two_col::layout_label_host(
-            preset.label,
-            host,
-            area.width as usize,
-        );
+        let (left, right, gap) =
+            crate::render::two_col::layout_label_host(preset.label, host, area.width as usize);
         let line = Line::from(vec![
             Span::styled(left, Style::default().fg(name_fg).bg(bg)),
             Span::styled(" ".repeat(gap), Style::default().bg(bg)),

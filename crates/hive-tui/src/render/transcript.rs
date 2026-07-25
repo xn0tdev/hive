@@ -378,10 +378,7 @@ fn plan_preview_lines(app: &mut App, width: usize) -> Vec<Line> {
     use crate::render::tools::{layout_plan_body, paint_highlights, MarkTone};
 
     let theme = app.theme.clone();
-    let body = app
-        .plan_card()
-        .map(|c| c.body.clone())
-        .unwrap_or_default();
+    let body = app.plan_card().map(|c| c.body.clone()).unwrap_or_default();
 
     let mut out = Vec::new();
     out.push(Line::from(vec![
@@ -543,7 +540,11 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
     let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
         // Brighter + bold — not a tiny faint "thinking".
-        let label = if th.secs() > 10.0 { "Thinking hard" } else { "Thinking" };
+        let label = if th.secs() > 10.0 {
+            "Thinking hard"
+        } else {
+            "Thinking"
+        };
         spans.extend(shimmer_bright(label, app.spinner));
         spans.push(Span::styled(
             format!("  {:.0}s", th.secs()),
@@ -579,7 +580,11 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 /// `@path` chips keep the accent `@` so attachments read like the composer.
 fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     let theme = &app.theme;
-    let bg = if hovered { theme.strip_hover } else { theme.strip };
+    let bg = if hovered {
+        theme.strip_hover
+    } else {
+        theme.strip
+    };
     let body = Style::default().fg(theme.fg).bg(bg);
     let pad_row = || Line::from(Span::styled(" ".repeat(width), body));
 
@@ -632,10 +637,7 @@ fn style_user_line(text: &str, theme: &crate::theme::Theme, bg: Color) -> Vec<Sp
             .unwrap_or(after.len());
         let label = &after[..end];
         if label.is_empty() {
-            spans.push(Span::styled(
-                "@",
-                Style::default().fg(theme.fg).bg(bg),
-            ));
+            spans.push(Span::styled("@", Style::default().fg(theme.fg).bg(bg)));
             rest = after;
             continue;
         }

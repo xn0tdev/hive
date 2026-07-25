@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{plan_path, PLAN_REL_PATH};
 use crate::event::AgentEvent;
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
+use crate::{plan_path, PLAN_REL_PATH};
 
 use super::str_arg;
 
@@ -42,7 +42,9 @@ over write_file when creating or revising the plan."
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(summary) = str_arg(&args, "summary").map(str::trim).filter(|s| !s.is_empty())
+        let Some(summary) = str_arg(&args, "summary")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         else {
             return ToolResult::error("missing 'summary'");
         };

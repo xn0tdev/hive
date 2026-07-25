@@ -114,10 +114,7 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
                 "Collapse sections".into(),
                 on_off(app.ui.sidebar_collapse_sections),
             ),
-            (
-                "Width".into(),
-                format!("{} cols", app.ui.sidebar_width),
-            ),
+            ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
         ],
     }
 }

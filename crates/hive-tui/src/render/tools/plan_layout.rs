@@ -36,10 +36,7 @@ pub fn layout_plan_body(body: &str, width: usize, theme: &Theme) -> (Vec<Line>, 
             for (rel, seg) in wrap_segments(text, content_w) {
                 let abs_start = line_start + rel;
                 let abs_end = abs_start + seg.len();
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(seg, style),
-                ]));
+                lines.push(Line::from(vec![Span::raw("  "), Span::styled(seg, style)]));
                 spans.push(PlanRowSpan {
                     start: abs_start,
                     end: abs_end,
@@ -281,16 +278,14 @@ mod tests {
             &mut lines,
             &spans,
             body,
-            &[
-                (0, 5, MarkTone::Pending),
-                (6, 11, MarkTone::Noted),
-            ],
+            &[(0, 5, MarkTone::Pending), (6, 11, MarkTone::Noted)],
             &theme,
         );
         let line = &lines[0];
-        let gray = line.spans.iter().any(|s| {
-            s.content.contains("hello") && s.style.bg == Some(theme.mark_pending_bg)
-        });
+        let gray = line
+            .spans
+            .iter()
+            .any(|s| s.content.contains("hello") && s.style.bg == Some(theme.mark_pending_bg));
         let blue = line
             .spans
             .iter()

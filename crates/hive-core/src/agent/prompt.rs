@@ -272,12 +272,8 @@ mod tests {
 
     #[test]
     fn prompt_uses_outcome_first_markdown_without_template_noise() {
-        let make = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            false,
-            AgentMode::Make,
-        );
+        let make =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Make);
 
         assert!(make.contains("Lead with the outcome"));
         assert!(make.contains("Small replies stay plain"));
@@ -288,30 +284,18 @@ mod tests {
 
     #[test]
     fn root_make_prompt_describes_current_command_access_precisely() {
-        let make = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            false,
-            AgentMode::Make,
-        );
-        let plan = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            false,
-            AgentMode::Plan,
-        );
+        let make =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Make);
+        let plan =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Plan);
         let multitask = build_system_prompt(
             Path::new("."),
             no_skills().as_ref(),
             false,
             AgentMode::Multitask,
         );
-        let subagent = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            true,
-            AgentMode::Make,
-        );
+        let subagent =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), true, AgentMode::Make);
 
         assert!(make.contains("## Command access"));
         assert!(make.contains("`run_shell` executes non-interactive commands"));
@@ -328,12 +312,8 @@ mod tests {
 
     #[test]
     fn root_make_prompt_explains_interactive_terminal_and_private_handoff() {
-        let make = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            false,
-            AgentMode::Make,
-        );
+        let make =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Make);
         for name in [
             "terminal_start",
             "terminal_read",
@@ -347,12 +327,8 @@ mod tests {
         assert!(make.contains("never ask for a password in chat"));
         assert!(make.contains("Read and understand the prompt before confirming"));
 
-        let plan = build_system_prompt(
-            Path::new("."),
-            no_skills().as_ref(),
-            false,
-            AgentMode::Plan,
-        );
+        let plan =
+            build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Plan);
         assert!(!plan.contains("terminal_start"));
     }
 }

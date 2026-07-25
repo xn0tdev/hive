@@ -208,7 +208,12 @@ fn ensure_connections(cfg: &mut AppConfig) {
         }
     }
 
-    if let Some(profile) = cfg.connections.profiles.get(&cfg.connections.active).cloned() {
+    if let Some(profile) = cfg
+        .connections
+        .profiles
+        .get(&cfg.connections.active)
+        .cloned()
+    {
         cfg.provider.base_url = profile.base_url;
         cfg.provider.api_key_env = profile.api_key_env;
         if cfg.provider.api_key.is_none() {
@@ -683,10 +688,7 @@ pub fn remove_connection(id: &str) -> Result<()> {
                 .ok_or_else(|| anyhow!("missing next profile"))?;
             (next_id, next_profile)
         };
-        if let Some(connections) = root
-            .get_mut("connections")
-            .and_then(|v| v.as_table_mut())
-        {
+        if let Some(connections) = root.get_mut("connections").and_then(|v| v.as_table_mut()) {
             connections.insert("active".into(), toml::Value::String(next_id));
         }
         mirror_profile_to_provider(root, &next_profile)?;
@@ -718,7 +720,11 @@ fn write_toml_root(value: &toml::Value) -> Result<()> {
     write_config_file(&path, &out)
 }
 
-fn write_model_table(root: &mut toml::map::Map<String, toml::Value>, id: &str, name: &str) -> Result<()> {
+fn write_model_table(
+    root: &mut toml::map::Map<String, toml::Value>,
+    id: &str,
+    name: &str,
+) -> Result<()> {
     let models = root
         .entry("models")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));

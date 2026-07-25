@@ -659,7 +659,10 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
                     code,
                 ));
                 if trail > 0 {
-                    spans.push(Span::styled(content[content.len() - trail..].to_string(), base));
+                    spans.push(Span::styled(
+                        content[content.len() - trail..].to_string(),
+                        base,
+                    ));
                 }
                 i = j + 1;
                 continue;
@@ -902,8 +905,9 @@ mod tests {
         let theme = Theme::gray();
         let spans = inline_with("`  firectl signin  `", &theme, true);
         // Leading whitespace must be a separate base span (no bg).
-        let lead = spans.iter().find(|s| s.content.starts_with(' ')
-            && !s.content.starts_with("  firectl"));
+        let lead = spans
+            .iter()
+            .find(|s| s.content.starts_with(' ') && !s.content.starts_with("  firectl"));
         assert!(
             lead.is_some_and(|s| s.style.bg.is_none()),
             "leading ws must not have code_bg: {spans:?}"
@@ -915,9 +919,9 @@ mod tests {
             "code text must have code_bg: {spans:?}"
         );
         // Trailing whitespace must also be outside the bg.
-        let trail = spans.iter().find(|s| {
-            s.content.chars().all(|c| c == ' ') && s.style.bg.is_none()
-        });
+        let trail = spans
+            .iter()
+            .find(|s| s.content.chars().all(|c| c == ' ') && s.style.bg.is_none());
         assert!(
             trail.is_some(),
             "trailing ws must be a separate no-bg span: {spans:?}"

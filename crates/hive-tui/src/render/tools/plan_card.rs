@@ -105,7 +105,10 @@ mod tests {
         let line = badge_row("UPDATED", theme.strip, &theme, 40);
 
         let text: String = line.spans.iter().map(|s| s.content.as_str()).collect();
-        assert!(text.trim_end().ends_with("UPDATED"), "badge sits in the corner: {text:?}");
+        assert!(
+            text.trim_end().ends_with("UPDATED"),
+            "badge sits in the corner: {text:?}"
+        );
         assert_eq!(text.chars().count(), 40, "row spans the full strip width");
 
         // The badge keeps the plan chip colour rather than the strip wash.

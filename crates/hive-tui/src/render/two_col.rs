@@ -35,7 +35,11 @@ pub(crate) fn layout_label_host(label: &str, host: &str, width: usize) -> (Strin
     let label_w = label.chars().count();
     let host_w = host.chars().count();
     if label_w + MIN_GAP + host_w <= width {
-        return (label.to_string(), host.to_string(), width - label_w - host_w);
+        return (
+            label.to_string(),
+            host.to_string(),
+            width - label_w - host_w,
+        );
     }
 
     // Prefer a readable label; squeeze the host first.
@@ -54,11 +58,8 @@ mod tests {
 
     #[test]
     fn long_host_does_not_collide_with_label() {
-        let (left, right, gap) = layout_label_host(
-            "Google AI",
-            "generativelanguage.googleapis.com",
-            40,
-        );
+        let (left, right, gap) =
+            layout_label_host("Google AI", "generativelanguage.googleapis.com", 40);
         assert_eq!(left.chars().count() + gap + right.chars().count(), 40);
         assert!(gap >= 1);
         assert!(right.ends_with('…'), "{right}");
@@ -67,10 +68,7 @@ mod tests {
 
     #[test]
     fn host_hint_strips_scheme_and_path() {
-        assert_eq!(
-            host_hint("https://api.openai.com/v1"),
-            "api.openai.com"
-        );
+        assert_eq!(host_hint("https://api.openai.com/v1"), "api.openai.com");
         assert_eq!(host_hint("http://127.0.0.1:11434/v1"), "127.0.0.1:11434");
         assert_eq!(host_hint(""), "");
     }

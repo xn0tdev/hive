@@ -300,13 +300,7 @@ mod tests {
         start_terminal(&mut app);
         app.apply(AgentEvent::TerminalOutput {
             id: "term-1".into(),
-            frame: hive_core::TerminalOutputFrame::from_bytes(
-                20,
-                80,
-                10_000,
-                "界".as_bytes(),
-                1,
-            ),
+            frame: hive_core::TerminalOutputFrame::from_bytes(20, 80, 10_000, "界".as_bytes(), 1),
         });
         app.apply(AgentEvent::TerminalState {
             id: "term-1".into(),

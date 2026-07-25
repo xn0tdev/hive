@@ -99,10 +99,7 @@ impl Inner {
                         detail: "worktree failed".into(),
                     });
                     let _ = forward.await;
-                    return SubagentOutcome {
-                        id,
-                        result: Err(e),
-                    };
+                    return SubagentOutcome { id, result: Err(e) };
                 }
             }
         } else {

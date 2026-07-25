@@ -351,7 +351,12 @@ impl PaletteState {
     }
 
     /// Insert a multi-char paste at the cursor (API key / search filter).
-    pub fn insert_str(&mut self, text: &str, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    pub fn insert_str(
+        &mut self,
+        text: &str,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+    ) {
         if text.is_empty() {
             return;
         }
@@ -475,9 +480,7 @@ impl PaletteState {
 }
 
 fn first_selectable_model(rows: &[ModelRow<'_>]) -> usize {
-    rows.iter()
-        .position(|r| r.is_selectable())
-        .unwrap_or(0)
+    rows.iter().position(|r| r.is_selectable()).unwrap_or(0)
 }
 
 fn move_model_selection(rows: &[ModelRow<'_>], current: usize, dir: isize) -> usize {

@@ -109,10 +109,7 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
     }
     if items.len() > MAX_MENU_ROWS {
         let more = if window + MAX_MENU_ROWS < items.len() {
-            format!(
-                "  ↓ {} more",
-                items.len() - (window + MAX_MENU_ROWS)
-            )
+            format!("  ↓ {} more", items.len() - (window + MAX_MENU_ROWS))
         } else if window > 0 {
             format!("  ↑ {} above", window)
         } else {

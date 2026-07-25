@@ -323,7 +323,10 @@ not delete broad trees unless the user explicitly named them."
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(path) = str_arg(&args, "path").map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(path) = str_arg(&args, "path")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolResult::error("missing 'path'");
         };
         let full = resolve(&ctx.cwd, path);
@@ -574,7 +577,10 @@ mod tests {
 
     #[test]
     fn detects_image_extensions() {
-        assert_eq!(image_media_type(Path::new("a/b/pic.png")), Some("image/png"));
+        assert_eq!(
+            image_media_type(Path::new("a/b/pic.png")),
+            Some("image/png")
+        );
         assert_eq!(image_media_type(Path::new("shot.JPG")), Some("image/jpeg"));
         assert_eq!(image_media_type(Path::new("anim.gif")), Some("image/gif"));
         assert_eq!(image_media_type(Path::new("notes.txt")), None);

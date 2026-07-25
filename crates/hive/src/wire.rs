@@ -17,10 +17,7 @@ use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 use crate::config;
 use crate::driver;
 
-pub fn build_agent(
-    cfg: &Arc<AppConfig>,
-    event_tx: hive_core::EventSender,
-) -> Agent {
+pub fn build_agent(cfg: &Arc<AppConfig>, event_tx: hive_core::EventSender) -> Agent {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     let global_skills = config::config_dir().join("skills");

@@ -2,9 +2,7 @@
 
 use comb::{Buffer, Color, Frame, Line, Modifier, Rect, Span, Style};
 
-use super::{
-    FetchState, IntroState, ProviderKeyFocus, SearchChoice, SearchFocus, Step, PRESETS,
-};
+use super::{FetchState, IntroState, ProviderKeyFocus, SearchChoice, SearchFocus, Step, PRESETS};
 use crate::render::wordmark;
 use crate::theme::Theme;
 

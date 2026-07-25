@@ -21,8 +21,7 @@ fn geom(area: Rect, n_items: u16) -> MenuGeom {
     let w = prefer_w.clamp(MIN_W, MAX_W).min(area.width);
     let list_h = n_items.max(1);
     // pad + title + gap + items
-    let h = (PAD_Y * 2 + 2 + list_h)
-        .min(area.height.saturating_sub(2));
+    let h = (PAD_Y * 2 + 2 + list_h).min(area.height.saturating_sub(2));
     let x = area.x + (area.width - w) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let win = Rect::new(x, y, w, h);
@@ -64,7 +63,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         ),
         Span::styled(
             " ".repeat(
-                g.content.width
+                g.content
+                    .width
                     .saturating_sub(title.chars().count() as u16 + esc.len() as u16)
                     as usize,
             ),
@@ -73,13 +73,23 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         Span::styled(esc, Style::default().fg(theme.faint).bg(panel)),
     ]);
     crate::render::strip_paint::set_line_on_strip(
-        buf, g.content.x, g.content.y, &title_line, g.content.width, panel,
+        buf,
+        g.content.x,
+        g.content.y,
+        &title_line,
+        g.content.width,
+        panel,
     );
 
     // Blank gap row between title and items.
     let gap_line = Line::from(Span::styled("", base));
     crate::render::strip_paint::set_line_on_strip(
-        buf, g.content.x, g.content.y + 1, &gap_line, g.content.width, panel,
+        buf,
+        g.content.x,
+        g.content.y + 1,
+        &gap_line,
+        g.content.width,
+        panel,
     );
 
     // Item rows.
@@ -93,7 +103,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
         let style = Style::default().fg(name_fg).bg(bg);
         let line = Line::from(vec![Span::styled(&item.label, style)]);
-        crate::render::strip_paint::set_line_on_strip(buf, g.list.x, row_y, &line, g.list.width, bg);
+        crate::render::strip_paint::set_line_on_strip(
+            buf,
+            g.list.x,
+            row_y,
+            &line,
+            g.list.width,
+            bg,
+        );
     }
 }
 
