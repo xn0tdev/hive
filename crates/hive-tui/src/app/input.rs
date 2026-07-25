@@ -199,24 +199,6 @@ impl InputState {
         self.value.chars().filter(|c| *c == '\n').count() + 1
     }
 
-    /// Visual rows for one hard line of display-width `len` at wrap width `w`.
-    ///
-    /// When `len` is an exact multiple of `w`, count one extra empty row: the
-    /// caret sits there after the last glyph (same as `cursor_visual`). Without
-    /// it, `view_scroll` can push the only row off-screen and the strip looks empty.
-    fn rows_for_width(len: usize, w: usize) -> usize {
-        if w == 0 {
-            return 1;
-        }
-        if len == 0 {
-            1
-        } else if len.is_multiple_of(w) {
-            len / w + 1
-        } else {
-            len.div_ceil(w)
-        }
-    }
-
     /// Total visual rows (hard newlines + soft-wrap), uncapped.
     pub fn visual_row_count(&self, width: usize) -> usize {
         if self.value.is_empty() {
@@ -225,7 +207,7 @@ impl InputState {
         let w = width;
         self.value
             .split('\n')
-            .map(|line| Self::rows_for_width(display_width(line), w))
+            .map(|line| wrap_hard_line(line, w).len())
             .sum()
     }
 
@@ -237,29 +219,41 @@ impl InputState {
     /// (visual row, display column within that row) for the cursor.
     pub fn cursor_visual(&self, width: usize) -> (usize, usize) {
         let w = width;
-        let mut row = 0usize;
-        let mut col = 0usize; // display columns in current visual row
-        for (i, ch) in self.value.chars().enumerate() {
-            if i == self.cursor {
-                return (row, col);
-            }
-            if ch == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                let cw = glyph_width(ch);
-                if w > 0 && col > 0 && col + cw > w {
-                    row += 1;
-                    col = 0;
-                }
-                col += cw;
-                if w > 0 && col >= w {
-                    row += 1;
-                    col = 0;
-                }
-            }
+        if self.value.is_empty() {
+            return (0, 0);
         }
-        (row, col)
+        let mut row = 0usize;
+        let mut char_offset = 0usize;
+        for line in self.value.split('\n') {
+            let line_chars = line.chars().count();
+            let chunks = wrap_hard_line(line, w);
+            if self.cursor <= char_offset + line_chars {
+                let cursor_within = self.cursor - char_offset;
+                let last_i = chunks.len() - 1;
+                for (ci, (chunk_text, chunk_start)) in chunks.iter().enumerate() {
+                    let chunk_chars = chunk_text.chars().count();
+                    let in_chunk = if ci == last_i {
+                        cursor_within <= *chunk_start + chunk_chars
+                    } else {
+                        cursor_within < *chunk_start + chunk_chars
+                    };
+                    if in_chunk {
+                        let into = cursor_within.saturating_sub(*chunk_start);
+                        let col: usize = chunk_text
+                            .chars()
+                            .take(into)
+                            .map(glyph_width)
+                            .sum();
+                        return (row + ci, col);
+                    }
+                }
+                let col = display_width(&chunks[last_i].0);
+                return (row + last_i, col);
+            }
+            row += chunks.len();
+            char_offset += line_chars + 1; // +1 for '\n'
+        }
+        (row, 0)
     }
 
     /// Char index for a visual (row, prefer_display_col).
@@ -273,8 +267,11 @@ impl InputState {
             let n = chunks.len().max(1);
             if target_row < row + n {
                 let within = target_row - row;
-                let chunk = chunks.get(within).map(String::as_str).unwrap_or("");
-                let col = prefer_col.min(display_width(chunk));
+                let chunk_text = chunks
+                    .get(within)
+                    .map(|(t, _)| t.as_str())
+                    .unwrap_or("");
+                let col = prefer_col.min(display_width(chunk_text));
                 return char_i + char_index_at_display_col(line, within, col, w);
             }
             row += n;
@@ -300,7 +297,7 @@ impl InputState {
         }
         for (hi, line) in self.value.split('\n').enumerate() {
             let chunks = wrap_hard_line(line, w);
-            for (ci, chunk) in chunks.into_iter().enumerate() {
+            for (ci, (chunk, _)) in chunks.into_iter().enumerate() {
                 out.push((hi == 0 && ci == 0, chunk));
             }
         }
@@ -339,38 +336,74 @@ fn normalize_paste(text: &str) -> String {
     out
 }
 
-/// Wrap one hard line into display-width chunks of at most `w` columns.
-///
-/// If the line fills the width exactly, append an empty trailing chunk so the
-/// end-caret has a row (matches [`InputState::cursor_visual`] / `rows_for_width`).
-fn wrap_hard_line(line: &str, w: usize) -> Vec<String> {
+/// Word-wrap one hard line into chunks of at most `w` display columns.
+/// Returns `(text, char_offset_in_line)` for each chunk. Words that don't
+/// fit wrap to the next row whole; single words longer than `w` char-wrap.
+/// A trailing empty chunk is appended when the caret would sit past the last
+/// glyph (exact-width fill or trailing spaces).
+fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
     if line.is_empty() {
-        return vec![String::new()];
+        return vec![(String::new(), 0)];
     }
     if w == 0 {
-        return vec![line.to_string()];
+        return vec![(line.to_string(), 0)];
     }
+
+    let chars: Vec<char> = line.chars().collect();
     let mut rows = Vec::new();
-    let mut cur = String::new();
-    let mut cur_w = 0usize;
-    for ch in line.chars() {
-        let cw = glyph_width(ch);
-        if cur_w > 0 && cur_w + cw > w {
-            rows.push(std::mem::take(&mut cur));
-            cur_w = 0;
+    let mut start = 0usize;
+
+    loop {
+        // Skip leading spaces on wrapped rows (not the first row).
+        while !rows.is_empty() && start < chars.len() && chars[start] == ' ' {
+            start += 1;
         }
-        cur.push(ch);
-        cur_w += cw;
-        if cur_w >= w {
-            rows.push(std::mem::take(&mut cur));
-            cur_w = 0;
+
+        if start >= chars.len() {
+            // Trailing empty row for the caret.
+            rows.push((String::new(), start));
+            break;
+        }
+
+        let mut end = start;
+        let mut width = 0usize;
+        let mut last_space = None;
+
+        while end < chars.len() {
+            let cw = glyph_width(chars[end]);
+            if width > 0 && width + cw > w {
+                break;
+            }
+            if chars[end] == ' ' && end > start {
+                last_space = Some(end);
+            }
+            width += cw;
+            end += 1;
+        }
+
+        if end < chars.len() {
+            if let Some(space) = last_space {
+                let text: String = chars[start..space].iter().collect();
+                rows.push((text, start));
+                start = space + 1;
+            } else {
+                let text: String = chars[start..end].iter().collect();
+                rows.push((text, start));
+                start = end;
+            }
+        } else {
+            let text: String = chars[start..].iter().collect();
+            rows.push((text.clone(), start));
+            // Exact-width fill → add empty trailing row for the caret.
+            if display_width(&text) >= w {
+                rows.push((String::new(), chars.len()));
+            }
+            break;
         }
     }
-    if !cur.is_empty() || rows.is_empty() {
-        rows.push(cur);
-    } else {
-        // Exact multiple of `w` — keep an empty row for the end caret.
-        rows.push(String::new());
+
+    if rows.is_empty() {
+        rows.push((String::new(), 0));
     }
     rows
 }
@@ -380,32 +413,20 @@ fn char_index_at_display_col(line: &str, within: usize, col: usize, w: usize) ->
     if w == 0 {
         return col.min(line.chars().count());
     }
-    let mut row = 0usize;
-    let mut row_col = 0usize;
-    let mut idx = 0usize;
-    for ch in line.chars() {
-        let cw = glyph_width(ch);
-        if row_col > 0 && row_col + cw > w {
-            row += 1;
-            row_col = 0;
-        }
-        if row == within && row_col >= col {
-            return idx;
-        }
-        if row > within {
-            return idx;
-        }
-        row_col += cw;
-        idx += 1;
-        if row_col >= w {
-            if row == within {
-                return idx;
+    let chunks = wrap_hard_line(line, w);
+    if let Some((chunk_text, chunk_start)) = chunks.get(within) {
+        let mut cur_w = 0usize;
+        let mut idx = 0usize;
+        for ch in chunk_text.chars() {
+            if cur_w >= col {
+                return chunk_start + idx;
             }
-            row += 1;
-            row_col = 0;
+            cur_w += glyph_width(ch);
+            idx += 1;
         }
+        return chunk_start + idx;
     }
-    idx
+    line.chars().count()
 }
 
 #[cfg(test)]
@@ -451,7 +472,7 @@ mod tests {
         for _ in 0..25 {
             i.insert('x');
         }
-        // 25 chars @ width 10 → 3 visual rows
+        // 25 chars @ width 10 → 3 visual rows (char-wrap, single long word)
         assert_eq!(i.visual_row_count(10), 3);
         assert_eq!(i.visible_line_count(10), 3);
         assert_eq!(i.cursor_visual(10), (2, 5)); // row 2, col 5
@@ -497,12 +518,30 @@ mod tests {
             ..Default::default()
         };
         let rows = i.wrapped_rows(4);
+        // Single long word → char-wrap
         assert_eq!(
             rows,
             vec![
                 (true, "abcd".into()),
                 (false, "efgh".into()),
                 (false, "ij".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn word_wrap_keeps_words_together() {
+        let i = InputState {
+            value: "hello world".into(),
+            ..Default::default()
+        };
+        let rows = i.wrapped_rows(7);
+        // "hello" = 5 cols fits, " world" = 6 cols → 5+6=11 > 7, wrap "world"
+        assert_eq!(
+            rows,
+            vec![
+                (true, "hello".into()),
+                (false, "world".into()),
             ]
         );
     }
@@ -549,20 +588,18 @@ mod tests {
 
     #[test]
     fn exact_wrap_width_keeps_end_caret_row() {
-        // Line fills the strip exactly — first space that lands on the boundary
-        // used to scroll the only row away (looked like the line "cleared").
         let i = InputState {
             value: "abcd".into(),
             cursor: 4,
             text_cols: 4,
         };
+        // "abcd" fills width exactly → trailing empty row for caret
         assert_eq!(i.visual_row_count(4), 2);
         assert_eq!(
             i.wrapped_rows(4),
             vec![(true, "abcd".into()), (false, String::new())]
         );
         assert_eq!(i.cursor_visual(4), (1, 0));
-        // Band height matches caret row → no phantom scroll.
         assert_eq!(i.view_scroll(i.visible_line_count(4), 4), 0);
     }
 
@@ -580,11 +617,13 @@ mod tests {
 
         i.insert(' '); // now exact width 4
         assert_eq!(i.value, "abc ");
+        // "abc " fills the width → trailing empty row for caret
         assert_eq!(i.visual_row_count(4), 2);
         assert_eq!(i.cursor_visual(4), (1, 0));
         assert_eq!(i.view_scroll(2, 4), 0);
 
         i.insert(' '); // past the boundary — still stable
+        // "abc  " → "abc " (row 0) + "" (row 1, trailing space skipped)
         assert_eq!(i.visual_row_count(4), 2);
         assert_eq!(i.view_scroll(2, 4), 0);
     }
