@@ -25,7 +25,16 @@ pub(crate) fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> 
     let args_st = Style::default().fg(theme.dim);
     let meta_st = Style::default().fg(theme.faint);
 
-    let dur_suffix = format!("  · {}", format_tool_secs(card.secs()));
+    // Only show timing for tools that can genuinely take time.
+    let show_timing = !matches!(
+        card.name.as_str(),
+        "read_file" | "list_dir" | "glob" | "grep" | "read_skill"
+    );
+    let dur_suffix = if show_timing {
+        format!("  · {}", format_tool_secs(card.secs()))
+    } else {
+        String::new()
+    };
     let mut out = vec![tool_header_line(
         card,
         running,
