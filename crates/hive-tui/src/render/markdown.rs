@@ -361,10 +361,9 @@ fn inline_plain_measure(text: &str) -> Vec<Span> {
             }
         } else if c == '*'
             && !is_space_or_end(&chars, i + 1)
-            && !is_space_or_start(&chars, i.saturating_sub(1))
         {
             if let Some(j) = find(&chars, i + 1, '*') {
-                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                if j > i + 1 && !chars[j - 1].is_whitespace() {
                     out.extend(chars[i + 1..j].iter());
                     i = j + 1;
                     continue;
@@ -372,10 +371,9 @@ fn inline_plain_measure(text: &str) -> Vec<Span> {
             }
         } else if c == '_'
             && !is_space_or_end(&chars, i + 1)
-            && !is_space_or_start(&chars, i.saturating_sub(1))
         {
             if let Some(j) = find(&chars, i + 1, '_') {
-                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                if j > i + 1 && !chars[j - 1].is_whitespace() {
                     out.extend(chars[i + 1..j].iter());
                     i = j + 1;
                     continue;
@@ -618,8 +616,8 @@ fn flush_code_block(lines: &mut Vec<Line>, body: &[String], label: &str, theme: 
     }
 
     for line in highlighted {
-        let mut spans = vec![Span::styled("  ", pad_st)];
-        let mut w = 2usize;
+        let mut spans: Vec<Span> = Vec::new();
+        let mut w = 0usize;
         for s in line.spans {
             if s.content.is_empty() {
                 continue;
@@ -627,6 +625,7 @@ fn flush_code_block(lines: &mut Vec<Line>, body: &[String], label: &str, theme: 
             w += display_width(&s.content);
             spans.push(s);
         }
+        // Right-pad to block width so the background reads as a soft rectangle.
         let pad = (block_w + 2).saturating_sub(w);
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), pad_st));
@@ -800,11 +799,11 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
             }
         }
 
-        // Italic: *text* or _text_ — but only if `*`/`_` is not surrounded by
-        // spaces (CommonMark flanking rule, simplified).
-        if c == '*' && !is_space_or_end(&chars, i + 1) && !is_space_or_start(&chars, i.saturating_sub(1)) {
+        // Italic: *text* or _text_ — opening delimiter must be followed by
+        // non-space, closing must be preceded by non-space.
+        if c == '*' && !is_space_or_end(&chars, i + 1) {
             if let Some(j) = find(&chars, i + 1, '*') {
-                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                if j > i + 1 && !chars[j - 1].is_whitespace() {
                     flush(&mut buf, &mut spans, base);
                     let content: String = chars[i + 1..j].iter().collect();
                     spans.push(Span::styled(content, italic));
@@ -813,9 +812,9 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
                 }
             }
         }
-        if c == '_' && !is_space_or_end(&chars, i + 1) && !is_space_or_start(&chars, i.saturating_sub(1)) {
+        if c == '_' && !is_space_or_end(&chars, i + 1) {
             if let Some(j) = find(&chars, i + 1, '_') {
-                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                if j > i + 1 && !chars[j - 1].is_whitespace() {
                     flush(&mut buf, &mut spans, base);
                     let content: String = chars[i + 1..j].iter().collect();
                     spans.push(Span::styled(content, italic));
@@ -838,10 +837,6 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
 
 fn is_space_or_end(chars: &[char], idx: usize) -> bool {
     idx >= chars.len() || chars[idx].is_whitespace()
-}
-
-fn is_space_or_start(chars: &[char], idx: usize) -> bool {
-    idx == 0 || chars[idx].is_whitespace()
 }
 
 fn find_double_char(chars: &[char], start: usize, pat: char) -> Option<usize> {
@@ -1152,8 +1147,9 @@ mod tests {
 
     #[test]
     fn star_not_italic_when_surrounded_by_spaces() {
-        let spans = inline_with("a * b * c", &Theme::gray(), true);
+        // `* text *` — opening `*` followed by space → not italic
+        let spans = inline_with("* text *", &Theme::gray(), true);
         let t: String = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(t, "a * b * c", "no italic for spaced stars: {t}");
+        assert!(t.contains("* text *"), "spaced stars not italic: {t}");
     }
 }

@@ -111,7 +111,23 @@ or tool args as a scratchpad for talking to the user.\n\
 - Small replies stay plain; do not force headings or a fixed Markdown template.\n\
 - Use short paragraphs and tight lists. Use Markdown only when it makes real structure easier to scan.\n\
 - Do not repeat the conclusion, narrate routine progress, or add decorative summary sections.\n\
-- When you disagree or see risk, say so plainly with evidence — kindness without sycophancy.\n\n",
+- When you disagree or see risk, say so plainly with evidence — kindness without sycophancy.\n\n\
+## Markdown support\n\
+The TUI renders a subset of Markdown. Use these features freely:\n\
+- Headings: `#` through `######` (require a space after `#`)\n\
+- Bold: `**text**` or `__text__`\n\
+- Italic: `*text*` or `_text_`\n\
+- Bold+italic: `***text***`\n\
+- Strikethrough: `~~text~~`\n\
+- Inline code: `` `code` ``\n\
+- Fenced code blocks: ```` ```lang ```` (syntax highlighting for Rust, JSON, Shell, TOML; other languages render as plain monospace)\n\
+- GFM tables: `| col | col |` with `|---|---|` separator (box-drawing grid, columns auto-fit and wrap)\n\
+- Bullet lists: `- ` or `* ` (nested lists supported via indentation)\n\
+- Numbered lists: `1. `\n\
+- Blockquotes: `> text`\n\
+- Links: `[text](url)` (URL hidden, text underlined)\n\
+- Horizontal rules: `---`\n\
+Unsupported (renders as plain text): reference links, footnotes, definition lists, task lists, math/LaTeX.\n\n",
     );
 
     p.push_str("## Environment\n");

@@ -709,10 +709,8 @@ fn indent_fill_bg(line: &Line) -> Option<Color> {
         .and_then(|s| s.style.bg)
 }
 
-fn is_code_fence_body(line: &Line, plain: &str) -> bool {
-    if !plain.starts_with("  ") {
-        return false;
-    }
+fn is_code_fence_body(line: &Line, _plain: &str) -> bool {
+    // Code fence body: every non-empty span shares the same bg color.
     let mut bg: Option<Color> = None;
     for s in &line.spans {
         if s.content.is_empty() {
