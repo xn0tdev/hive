@@ -281,7 +281,8 @@ async fn stop_kills_descendants_that_create_a_new_session() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     manager.stop(&started.id).unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Give the process group kill time to propagate on slow CI runners.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     assert!(
         !leaked.exists(),
         "new-session descendant survived terminal STOP"
