@@ -97,6 +97,39 @@ impl TerminalCard {
     }
 }
 
+/// Up/down arrow history of submitted prompts (shell-style recall).
+#[derive(Default)]
+pub struct PromptHistory {
+    pub entries: Vec<String>,
+    /// `None` = not browsing; `Some(i)` = showing `entries[i]`.
+    pub index: Option<usize>,
+    /// Text that was in the composer before history browsing started.
+    pub draft: String,
+}
+
+impl PromptHistory {
+    pub fn push(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if self.entries.last().is_some_and(|e| e == text) {
+            return;
+        }
+        self.entries.push(text.to_string());
+        self.index = None;
+        self.draft.clear();
+    }
+
+    pub fn is_browsing(&self) -> bool {
+        self.index.is_some()
+    }
+
+    pub fn reset(&mut self) {
+        self.index = None;
+        self.draft.clear();
+    }
+}
+
 /// A reasoning ("thinking") segment. Collapsed by default in the UI; carries
 /// its own timing so the header can show how long the model thought.
 pub struct Thought {

@@ -491,12 +491,14 @@ impl Agent {
             }
 
             if tool_calls.is_empty() {
-                // Silent empty stop after long thinking looks like the agent "died".
                 if assistant_text.trim().is_empty() {
                     let fr = finish_reason.to_ascii_lowercase();
-                    let msg = if fr == "length" {
-                        "Stopped: hit max tokens (often during long thinking) — no reply or tools. Retry or use a larger context/output limit.".into()
-                    } else if saw_reasoning.load(Ordering::Relaxed) {
+                    if fr == "length" {
+                        // Hit max tokens (often during long thinking) — just end
+                        // the turn silently instead of nagging the user.
+                        break;
+                    }
+                    let msg = if saw_reasoning.load(Ordering::Relaxed) {
                         "Model finished thinking with no reply or tool call — turn ended.".into()
                     } else {
                         format!(

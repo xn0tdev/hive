@@ -536,7 +536,8 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
     let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
         // Brighter + bold — not a tiny faint "thinking".
-        spans.extend(shimmer_bright("Thinking", app.spinner));
+        let label = if th.secs() > 10.0 { "Thinking hard" } else { "Thinking" };
+        spans.extend(shimmer_bright(label, app.spinner));
         spans.push(Span::styled(
             format!("  {:.0}s", th.secs()),
             Style::default().fg(theme.dim),

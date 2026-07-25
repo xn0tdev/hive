@@ -77,6 +77,18 @@ fn run_loop(
             // Idle composer blur (or other tick-side visual change).
             dirty = true;
         }
+
+        // Flush a deferred dispatch after the grace period (ESC recall window).
+        if app.pending_dispatch_ready() {
+            if let Some(pd) = app.take_pending_dispatch() {
+                let _ = input_tx.send(InputCommand::User {
+                    text: pd.agent_text,
+                    images: pd.images,
+                    mode: pd.mode,
+                });
+                dirty = true;
+            }
+        }
         let animating = app.needs_animation();
         let spinner_moved = animating && app.spinner != last_spinner;
 
@@ -196,6 +208,7 @@ fn handle_paste(
     }
 
     app.input.insert_str(text);
+    app.prompt_history.reset();
     app.reset_menu();
     true
 }
@@ -383,6 +396,18 @@ fn handle_key(
         return handle_palette_key(app, key, input_tx);
     }
 
+    // Any key other than ESC flushes a deferred dispatch — the user is doing
+    // something else, so start the agent now.
+    if app.pending_dispatch.is_some() && key.code != KeyCode::Esc {
+        if let Some(pd) = app.take_pending_dispatch() {
+            let _ = input_tx.send(InputCommand::User {
+                text: pd.agent_text,
+                images: pd.images,
+                mode: pd.mode,
+            });
+        }
+    }
+
     // Global chords work whether or not the composer is focused.
     match key.code {
         KeyCode::Char('q') if ctrl => return true,
@@ -438,6 +463,13 @@ fn handle_key(
                     return false;
                 }
                 interrupt.store(true, Ordering::Relaxed);
+                return false;
+            }
+            KeyCode::Esc => {
+                // Recall a just-submitted prompt before the agent starts.
+                if app.recall_pending_dispatch() {
+                    app.focus_input();
+                }
                 return false;
             }
             KeyCode::Char(_) if !ctrl => {
@@ -504,11 +536,13 @@ fn handle_key(
             composer_activity = true;
         }
         KeyCode::Char(ch) if !ctrl => {
+            app.prompt_history.reset();
             app.input.insert(ch);
             app.reset_menu();
             composer_activity = true;
         }
         KeyCode::Backspace => {
+            app.prompt_history.reset();
             app.input.backspace();
             app.reset_menu();
             composer_activity = true;
@@ -539,22 +573,35 @@ fn handle_key(
         }
         // Multiline: arrows move inside the input; at the edges they scroll chat.
         // Empty composer + queued follow-up: ↑ pulls it back for editing.
+        // Up/down also browse prompt history (shell-style recall).
         KeyCode::Up => {
-            if (app.input.is_empty() && app.recall_follow_up()) || app.input.up() {
+            if app.prompt_history.is_browsing() {
+                app.history_up();
+                composer_activity = true;
+            } else if (app.input.is_empty() && app.recall_follow_up())
+                || (app.input.is_empty() && app.history_up())
+                || app.input.up()
+                || app.history_up()
+            {
                 composer_activity = true;
             } else {
                 app.scroll_up(1);
             }
         }
         KeyCode::Down => {
-            if app.input.down() {
+            if app.prompt_history.is_browsing() {
+                app.history_down();
+                composer_activity = true;
+            } else if app.input.down() {
                 composer_activity = true;
             } else {
                 app.scroll_down(1);
             }
         }
         KeyCode::Esc => {
-            if !app.input.is_empty() {
+            if app.recall_pending_dispatch() {
+                composer_activity = true;
+            } else if !app.input.is_empty() {
                 let _ = app.input.take();
                 app.reset_menu();
                 composer_activity = true;
@@ -1075,6 +1122,9 @@ fn submit(
         return false;
     };
 
+    // Record in prompt history (shell-style up/down recall).
+    app.prompt_history.push(&prepared.composer);
+
     // While the agent is busy: queue — don't dump into chat / driver yet.
     if app.running {
         app.queue_follow_up(crate::app::QueuedFollowUp {
@@ -1169,7 +1219,27 @@ fn prepare_user_message(app: &mut App, text: String, trimmed: String) -> Option<
     })
 }
 
+/// Deferred dispatch: push the user block now but hold the driver send for a
+/// brief grace period so ESC can recall the prompt before the agent starts.
 fn dispatch_user(
+    app: &mut App,
+    _input_tx: &UnboundedSender<InputCommand>,
+    prepared: PreparedUser,
+) {
+    let images = prepared.images();
+    app.push_user(prepared.display);
+    app.pending_dispatch = Some(crate::app::PendingDispatch {
+        agent_text: prepared.agent_text,
+        images,
+        mode: prepared.mode,
+        composer: prepared.composer,
+        attaches: prepared.attaches,
+        submitted_at: std::time::Instant::now(),
+    });
+}
+
+/// Immediate dispatch (no grace period) — used for auto-flushed follow-ups.
+fn dispatch_user_now(
     app: &mut App,
     input_tx: &UnboundedSender<InputCommand>,
     prepared: PreparedUser,
@@ -1188,7 +1258,7 @@ fn flush_follow_up(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> b
     let Some(fu) = app.follow_up.take() else {
         return false;
     };
-    dispatch_user(
+    dispatch_user_now(
         app,
         input_tx,
         PreparedUser {
@@ -2285,6 +2355,14 @@ mod tests {
         app.input.value = "look".into();
         assert!(!submit(&mut app, &tx, &follow_slot()));
         let _ = std::fs::remove_file(&path);
+        // submit() defers the dispatch — flush it manually in tests.
+        if let Some(pd) = app.take_pending_dispatch() {
+            let _ = tx.send(InputCommand::User {
+                text: pd.agent_text,
+                images: pd.images,
+                mode: pd.mode,
+            });
+        }
         match rx.try_recv() {
             Ok(InputCommand::User { text, images, .. }) => {
                 assert_eq!(text, "look");

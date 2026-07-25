@@ -68,9 +68,9 @@ use settings::SettingsState;
 use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
-    Block, ChatView, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
-    PlanViewState, SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState, Thought,
-    ToolCard, ToolStatus,
+    Block, ChatView, ModeSwitchCard, PlanCard, PlanAction, PlanCorrection, PlanStatus,
+    PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase,
+    TerminalViewState, Thought, ToolCard, ToolStatus,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -171,6 +171,24 @@ pub struct QueuedFollowUp {
     pub mode: AgentMode,
 }
 
+/// Deferred user message: shown in chat but not yet sent to the driver.
+/// Gives an ESC-recall window before the agent starts processing.
+pub struct PendingDispatch {
+    /// Payload for the agent (may include `[Attached file: …]` notes).
+    pub agent_text: String,
+    pub images: Vec<ImageSource>,
+    pub mode: AgentMode,
+    /// Original composer text (for restoring to the input on recall).
+    pub composer: String,
+    /// Attachments (for restoring on recall).
+    pub attaches: Vec<PendingAttach>,
+    pub submitted_at: std::time::Instant,
+}
+
+/// Grace period before a pending dispatch is flushed to the driver (ms).
+/// Long enough for a reflexive ESC, short enough to not feel slow.
+pub const DISPATCH_GRACE_MS: u128 = 500;
+
 impl PendingAttach {
     /// Composer / transcript chip, e.g. `@src/main.rs`.
     pub fn tag(&self) -> String {
@@ -216,6 +234,10 @@ pub struct App {
     pub(crate) pending_attaches: Vec<PendingAttach>,
     /// Follow-up waiting for the current turn to finish.
     pub(crate) follow_up: Option<QueuedFollowUp>,
+    /// Up/down arrow history of submitted prompts.
+    pub(crate) prompt_history: PromptHistory,
+    /// Deferred dispatch: message shown in chat but not yet sent to the driver.
+    pub(crate) pending_dispatch: Option<PendingDispatch>,
     /// Models offered in the Switch-model picker (live catalog when Ready).
     pub(crate) model_choices: Vec<ModelChoice>,
     /// Skills for the `/` menu (`/skill-name`).
@@ -356,6 +378,8 @@ impl App {
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             follow_up: None,
+            prompt_history: PromptHistory::default(),
+            pending_dispatch: None,
             model_choices: init.model_choices,
             skills: init.skills,
             models_catalog: ModelsCatalogState::Idle,
@@ -1295,6 +1319,9 @@ Keep everything else unless a note says otherwise.\n",
         if self.logo_bonk.is_some() || self.flash_text().is_some() {
             return true;
         }
+        if self.pending_dispatch.is_some() {
+            return true;
+        }
         if self.running {
             return true;
         }
@@ -1563,6 +1590,8 @@ Keep everything else unless a note says otherwise.\n",
         self.scroll_from_bottom = 0;
         self.pending_attaches.clear();
         self.follow_up = None;
+        self.prompt_history.reset();
+        self.pending_dispatch = None;
         self.input.clear();
         self.reset_menu();
         self.close_palette();
@@ -1624,6 +1653,93 @@ Keep everything else unless a note says otherwise.\n",
         } else {
             false
         }
+    }
+
+    // -- Prompt history (shell-style up/down recall) --
+
+    /// Step back through prompt history. Saves the current composer text as a
+    /// draft on first entry. Returns `false` if there is no history.
+    pub fn history_up(&mut self) -> bool {
+        if self.prompt_history.entries.is_empty() {
+            return false;
+        }
+        match self.prompt_history.index {
+            None => {
+                self.prompt_history.draft = self.input.value.clone();
+                let i = self.prompt_history.entries.len() - 1;
+                self.prompt_history.index = Some(i);
+                self.input.value = self.prompt_history.entries[i].clone();
+                self.input.end();
+                true
+            }
+            Some(0) => true,
+            Some(i) => {
+                let i = i - 1;
+                self.prompt_history.index = Some(i);
+                self.input.value = self.prompt_history.entries[i].clone();
+                self.input.end();
+                true
+            }
+        }
+    }
+
+    /// Step forward through prompt history. Past the last entry, restores the
+    /// draft that was saved on entry. Returns `false` when not browsing.
+    pub fn history_down(&mut self) -> bool {
+        let Some(i) = self.prompt_history.index else {
+            return false;
+        };
+        if i + 1 >= self.prompt_history.entries.len() {
+            self.prompt_history.index = None;
+            self.input.value = self.prompt_history.draft.clone();
+            self.input.end();
+            self.prompt_history.draft.clear();
+        } else {
+            let next = i + 1;
+            self.prompt_history.index = Some(next);
+            self.input.value = self.prompt_history.entries[next].clone();
+            self.input.end();
+        }
+        true
+    }
+
+    // -- Pending dispatch (ESC recall before the agent starts) --
+
+    /// True when the grace period has elapsed and the deferred message should
+    /// be flushed to the driver.
+    pub fn pending_dispatch_ready(&self) -> bool {
+        match &self.pending_dispatch {
+            Some(pd) => pd.submitted_at.elapsed().as_millis() >= DISPATCH_GRACE_MS,
+            None => false,
+        }
+    }
+
+    /// Take the pending dispatch out for flushing to the driver.
+    pub fn take_pending_dispatch(&mut self) -> Option<PendingDispatch> {
+        self.pending_dispatch.take()
+    }
+
+    /// Recall a deferred message back into the composer (ESC before the agent
+    /// starts). Removes the last `Block::User` from the transcript, restores
+    /// the composer text and attachments, and flashes a hint.
+    pub fn recall_pending_dispatch(&mut self) -> bool {
+        let Some(pd) = self.pending_dispatch.take() else {
+            return false;
+        };
+        if matches!(
+            self.blocks.last(),
+            Some(Block::User(_))
+        ) {
+            self.blocks.pop();
+        }
+        self.input.value = pd.composer;
+        self.input.end();
+        self.pending_attaches = pd.attaches;
+        self.agent_mode = pd.mode;
+        self.reset_menu();
+        self.scroll_from_bottom = 0;
+        self.flash("Prompt recalled — edit and resend");
+        true
     }
 
     /// One-line preview for the banner above the input.
@@ -3392,5 +3508,89 @@ mod tests {
             a.assistant_selection.as_ref().map(|s| s.anchor.col),
             Some(4)
         );
+    }
+
+    #[test]
+    fn prompt_history_up_down_cycles() {
+        let mut a = app();
+        a.prompt_history.push("first");
+        a.prompt_history.push("second");
+        a.prompt_history.push("third");
+
+        // Up on empty input → most recent entry.
+        assert!(a.history_up());
+        assert_eq!(a.input.value, "third");
+
+        // Up again → previous entry.
+        assert!(a.history_up());
+        assert_eq!(a.input.value, "second");
+
+        // Up again → oldest entry.
+        assert!(a.history_up());
+        assert_eq!(a.input.value, "first");
+
+        // Up at oldest → stays (no-op, returns true to prevent scroll).
+        assert!(a.history_up());
+        assert_eq!(a.input.value, "first");
+
+        // Down → next entry.
+        assert!(a.history_down());
+        assert_eq!(a.input.value, "second");
+
+        // Down → most recent.
+        assert!(a.history_down());
+        assert_eq!(a.input.value, "third");
+
+        // Down past end → exit browsing, restore draft (was empty).
+        assert!(a.history_down());
+        assert!(a.input.value.is_empty());
+        assert!(!a.prompt_history.is_browsing());
+    }
+
+    #[test]
+    fn prompt_history_saves_and_restores_draft() {
+        let mut a = app();
+        a.prompt_history.push("old prompt");
+        a.input.value = "my draft".into();
+
+        // Up enters history (cursor at top of non-empty input).
+        assert!(a.history_up());
+        assert_eq!(a.input.value, "old prompt");
+
+        // Down past end restores the draft.
+        assert!(a.history_down());
+        assert_eq!(a.input.value, "my draft");
+    }
+
+    #[test]
+    fn prompt_history_push_dedups_last() {
+        let mut a = app();
+        a.prompt_history.push("hello");
+        a.prompt_history.push("hello");
+        assert_eq!(a.prompt_history.entries.len(), 1);
+        a.prompt_history.push("world");
+        assert_eq!(a.prompt_history.entries.len(), 2);
+    }
+
+    #[test]
+    fn pending_dispatch_recall_restores_input_and_removes_block() {
+        let mut a = app();
+        a.blocks.clear();
+        a.input.value = "test prompt".into();
+        a.pending_dispatch = Some(PendingDispatch {
+            agent_text: "test prompt".into(),
+            images: Vec::new(),
+            mode: AgentMode::Make,
+            composer: "test prompt".into(),
+            attaches: Vec::new(),
+            submitted_at: std::time::Instant::now(),
+        });
+        a.push_user("test prompt".into());
+        assert_eq!(a.blocks.len(), 1);
+
+        assert!(a.recall_pending_dispatch());
+        assert!(a.pending_dispatch.is_none());
+        assert_eq!(a.input.value, "test prompt");
+        assert!(a.blocks.is_empty(), "user block should be removed");
     }
 }
