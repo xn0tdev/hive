@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "comb-tui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "unicode-width",
@@ -506,7 +506,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hive-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "comb-tui",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "hive-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "hive-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "hive-tui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arboard",
  "base64",

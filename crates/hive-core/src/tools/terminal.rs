@@ -256,9 +256,9 @@ inventory::submit! { ToolRegistration { make: || Arc::new(TerminalStop) as Arc<d
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{no_skills, noop_spawner, AppConfig, TerminalHandle, ToolContext};
     #[cfg(unix)]
     use crate::TerminalManager;
+    use crate::{no_skills, noop_spawner, AppConfig, TerminalHandle, ToolContext};
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;

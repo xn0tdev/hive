@@ -172,18 +172,32 @@ mod tests {
 
     #[test]
     fn plan_mode_allows_plan_write() {
-        let cwd = Path::new("/tmp/proj");
+        let cwd = if cfg!(windows) {
+            Path::new("C:\\proj")
+        } else {
+            Path::new("/tmp/proj")
+        };
         assert!(plan_mode_check("write_plan", None, cwd).is_ok());
         assert!(plan_mode_check("write_file", Some(PLAN_REL_PATH), cwd).is_ok());
-        assert!(plan_mode_check("write_file", Some("/tmp/proj/.hive/Plan.md"), cwd).is_ok());
+        let abs_plan = plan_path(cwd).to_string_lossy().to_string();
+        assert!(plan_mode_check("write_file", Some(&abs_plan), cwd).is_ok());
         assert!(plan_mode_check("write_file", Some("src/main.rs"), cwd).is_err());
         assert!(plan_mode_check("read_file", Some("src/main.rs"), cwd).is_ok());
     }
 
     #[test]
     fn plan_mode_rejects_plan_path_outside_workspace() {
-        let cwd = Path::new("/tmp/proj");
-        assert!(plan_mode_check("write_file", Some("/tmp/other/.hive/Plan.md"), cwd).is_err());
+        let cwd = if cfg!(windows) {
+            Path::new("C:\\proj")
+        } else {
+            Path::new("/tmp/proj")
+        };
+        let other = if cfg!(windows) {
+            "C:\\other\\.hive\\Plan.md"
+        } else {
+            "/tmp/other/.hive/Plan.md"
+        };
+        assert!(plan_mode_check("write_file", Some(other), cwd).is_err());
         assert!(plan_mode_check("write_file", Some("other/.hive/Plan.md"), cwd).is_err());
     }
 

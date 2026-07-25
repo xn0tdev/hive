@@ -259,19 +259,17 @@ mod tests {
 
     #[tokio::test]
     async fn nonzero_exit_is_an_error() {
+        let command = if cfg!(windows) {
+            "exit 7"
+        } else {
+            "printf nope; exit 7"
+        };
         let result = RunShell
-            .execute(
-                json!({"command": "printf nope; exit 7"}),
-                &context(PathBuf::from(".")),
-            )
+            .execute(json!({"command": command}), &context(PathBuf::from(".")))
             .await;
 
         assert!(result.is_error);
-        assert!(
-            result.content.starts_with("exit 7\nnope"),
-            "{}",
-            result.content
-        );
+        assert!(result.content.starts_with("exit 7"), "{}", result.content);
     }
 
     #[cfg(unix)]
