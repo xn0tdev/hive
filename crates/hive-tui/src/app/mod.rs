@@ -127,8 +127,12 @@ impl MdCache {
             return cached.clone();
         }
         let rows = build();
+        // Evict a random-ish entry instead of wiping the whole cache — avoids
+        // periodic re-render storms in long conversations.
         if self.entries.len() >= 64 {
-            self.entries.clear();
+            if let Some(first_key) = self.entries.keys().next().copied() {
+                self.entries.remove(&first_key);
+            }
         }
         self.entries.insert(key, rows.clone());
         rows

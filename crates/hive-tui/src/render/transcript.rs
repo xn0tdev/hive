@@ -171,29 +171,41 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
     let mut assistant_rows: Vec<BuiltAssistantRow> = Vec::new();
     let n = app.blocks.len();
 
+    // Precompute the last index of each "expandable" block kind in one O(n)
+    // reverse pass, so the per-block hint check is O(1) instead of O(n²).
+    let mut last_thought = None;
+    let mut last_subagent = None;
+    let mut last_plan = None;
+    let mut last_terminal = None;
+    for (i, b) in app.blocks.iter().enumerate().rev() {
+        if last_thought.is_none() && matches!(b, UiBlock::Reasoning(_)) {
+            last_thought = Some(i);
+        }
+        if last_subagent.is_none() && matches!(b, UiBlock::Subagent(_)) {
+            last_subagent = Some(i);
+        }
+        if last_plan.is_none() && matches!(b, UiBlock::Plan(_)) {
+            last_plan = Some(i);
+        }
+        if last_terminal.is_none() && matches!(b, UiBlock::Terminal(_)) {
+            last_terminal = Some(i);
+        }
+        if last_thought.is_some()
+            && last_subagent.is_some()
+            && last_plan.is_some()
+            && last_terminal.is_some()
+        {
+            break;
+        }
+    }
+
     for i in 0..n {
         let next_is_tool = matches!(app.blocks.get(i + 1), Some(UiBlock::Tool(_)));
         let next_is_notice = matches!(app.blocks.get(i + 1), Some(UiBlock::Notice(_)));
-        let has_later_thought = app
-            .blocks
-            .iter()
-            .skip(i + 1)
-            .any(|b| matches!(b, UiBlock::Reasoning(_)));
-        let has_later_subagent = app
-            .blocks
-            .iter()
-            .skip(i + 1)
-            .any(|b| matches!(b, UiBlock::Subagent(_)));
-        let has_later_plan = app
-            .blocks
-            .iter()
-            .skip(i + 1)
-            .any(|b| matches!(b, UiBlock::Plan(_)));
-        let has_later_terminal = app
-            .blocks
-            .iter()
-            .skip(i + 1)
-            .any(|b| matches!(b, UiBlock::Terminal(_)));
+        let has_later_thought = last_thought.is_some_and(|l| i < l);
+        let has_later_subagent = last_subagent.is_some_and(|l| i < l);
+        let has_later_plan = last_plan.is_some_and(|l| i < l);
+        let has_later_terminal = last_terminal.is_some_and(|l| i < l);
 
         match &app.blocks[i] {
             // The greeting only lives on the landing screen (the ASCII wordmark);
