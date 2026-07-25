@@ -376,6 +376,9 @@ async fn handle_session_prompt(
 async fn drain_events(mut events: EventReceiver, state: Arc<AcpState>) {
     let mut msg_counter: u64 = 0;
     let mut current_msg_id: Option<String> = None;
+    // Track file snapshots by tool-call id so we can emit diffs on completion.
+    let mut snapshots: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     while let Some(event) = events.recv().await {
         // Track errors for refusal stopReason.
@@ -393,6 +396,33 @@ async fn drain_events(mut events: EventReceiver, state: Arc<AcpState>) {
             continue;
         }
 
+        // Stash file snapshots for diff emission on ToolFinished.
+        if let AgentEvent::FileSnapshot { id, path, content } = &event {
+            snapshots.insert(id.clone(), (path.clone(), content.clone()));
+            // Don't emit a session/update for the snapshot itself.
+            continue;
+        }
+
+        // For ToolFinished of file-writing tools, emit a diff if we have a snapshot.
+        if let AgentEvent::ToolFinished {
+            id, name, ok, ..
+        } = &event
+        {
+            if *ok && is_file_write_tool(name) {
+                if let Some((path, old_content)) = snapshots.remove(id) {
+                    let new_content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                    let sid = state.session_id.lock().await.clone();
+                    if let Some(note) =
+                        tool_diff_update(id, &path, &old_content, &new_content, &sid)
+                    {
+                        write_msg(&state.out, &note).await;
+                    }
+                }
+            } else {
+                snapshots.remove(id);
+            }
+        }
+
         let sid = state.session_id.lock().await.clone();
         if let Some(note) = event_to_update(
             &event,
@@ -404,6 +434,42 @@ async fn drain_events(mut events: EventReceiver, state: Arc<AcpState>) {
             write_msg(&state.out, &note).await;
         }
     }
+}
+
+/// True for tools that modify files and should emit a diff.
+fn is_file_write_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file")
+}
+
+/// Build a `tool_call_update` notification with a diff content block.
+fn tool_diff_update(
+    tool_call_id: &str,
+    path: &str,
+    old_text: &str,
+    new_text: &str,
+    session_id: &str,
+) -> Option<String> {
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_call_id,
+                "status": "completed",
+                "content": [{
+                    "type": "diff",
+                    "diff": {
+                        "path": path,
+                        "oldText": old_text,
+                        "newText": new_text
+                    }
+                }]
+            }
+        }
+    });
+    serde_json::to_string(&notification).ok()
 }
 
 fn event_to_update(
@@ -422,9 +488,18 @@ fn event_to_update(
                 "content": { "type": "text", "text": text }
             })
         }
-        // AssistantMessage is the finalized markdown — the client already has
-        // the full text via deltas. Sending it again duplicates content.
-        AgentEvent::AssistantMessage(_) => return None,
+        // AssistantMessage is the finalized markdown. In the TUI we skip it
+        // (deltas already delivered the text), but in ACP we send it as a
+        // final chunk so Zed renders the complete formatted message (plan,
+        // code blocks, etc.) in the chat.
+        AgentEvent::AssistantMessage(text) => {
+            let mid = ensure_msg_id(msg_counter, current_msg_id);
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "messageId": mid,
+                "content": { "type": "text", "text": text }
+            })
+        }
         AgentEvent::ReasoningDelta(text) => {
             let mid = ensure_msg_id(msg_counter, current_msg_id);
             json!({
@@ -433,13 +508,23 @@ fn event_to_update(
                 "content": { "type": "text", "text": text }
             })
         }
-        AgentEvent::ToolStarted { id, name, .. } => {
+        AgentEvent::ToolStarted {
+            id,
+            name,
+            args_preview,
+            ..
+        } => {
             // New tool call starts a new message context.
             *current_msg_id = None;
+            let title = if args_preview.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}: {args_preview}")
+            };
             json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": id,
-                "title": name,
+                "title": title,
                 "kind": tool_kind(name),
                 "status": "pending"
             })
@@ -456,16 +541,27 @@ fn event_to_update(
             })
         }
         AgentEvent::ToolFinished {
-            id, ok, summary, ..
-        } => json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": id,
-            "status": if *ok { "completed" } else { "failed" },
-            "content": [{
-                "type": "content",
-                "content": { "type": "text", "text": summary }
-            }]
-        }),
+            id,
+            name,
+            ok,
+            summary,
+            ..
+        } => {
+            // File-writing tools already got a diff update in drain_events.
+            // Skip the text summary for those to avoid duplicate content.
+            if is_file_write_tool(name) && *ok {
+                return None;
+            }
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "status": if *ok { "completed" } else { "failed" },
+                "content": [{
+                    "type": "content",
+                    "content": { "type": "text", "text": summary }
+                }]
+            })
+        }
         AgentEvent::Usage(usage) => json!({
             "sessionUpdate": "usage_update",
             "used": usage.total_tokens,
@@ -711,5 +807,38 @@ mod tests {
     fn extract_prompt_text_empty_when_no_prompt() {
         let params = json!({});
         assert_eq!(extract_prompt_text(&params), "");
+    }
+
+    #[test]
+    fn is_file_write_tool_recognizes_edit_tools() {
+        assert!(is_file_write_tool("write_file"));
+        assert!(is_file_write_tool("edit_file"));
+        assert!(!is_file_write_tool("read_file"));
+        assert!(!is_file_write_tool("run_shell"));
+        assert!(!is_file_write_tool("delete_path"));
+    }
+
+    #[test]
+    fn tool_diff_update_produces_diff_content() {
+        let note = tool_diff_update("call_1", "src/main.rs", "old text", "new text", "sess_1");
+        let note = note.unwrap();
+        let v: Value = serde_json::from_str(&note).unwrap();
+        assert_eq!(v["method"], "session/update");
+        assert_eq!(v["params"]["update"]["sessionUpdate"], "tool_call_update");
+        assert_eq!(v["params"]["update"]["toolCallId"], "call_1");
+        assert_eq!(v["params"]["update"]["status"], "completed");
+        assert_eq!(v["params"]["update"]["content"][0]["type"], "diff");
+        assert_eq!(
+            v["params"]["update"]["content"][0]["diff"]["path"],
+            "src/main.rs"
+        );
+        assert_eq!(
+            v["params"]["update"]["content"][0]["diff"]["oldText"],
+            "old text"
+        );
+        assert_eq!(
+            v["params"]["update"]["content"][0]["diff"]["newText"],
+            "new text"
+        );
     }
 }
