@@ -218,6 +218,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: String::new(),
             rows: 20,
             cols: 80,
         });

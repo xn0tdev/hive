@@ -26,6 +26,7 @@ impl TerminalManager {
     pub async fn start(
         &self,
         command: &str,
+        description: &str,
         cwd: &Path,
     ) -> Result<TerminalSnapshot, TerminalError> {
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
@@ -45,12 +46,19 @@ impl TerminalManager {
         }
 
         let id = format!("term-{}", uuid::Uuid::new_v4().simple());
-        let session = match TerminalSession::spawn(id.clone(), command, cwd, self.events.clone()) {
+        let session = match TerminalSession::spawn(
+            id.clone(),
+            command,
+            description,
+            cwd,
+            self.events.clone(),
+        ) {
             Ok(session) => session,
             Err(error) => {
                 let _ = self.events.send(AgentEvent::TerminalStartFailed {
                     id,
                     command: command.to_string(),
+                    description: description.to_string(),
                     message: error.to_string(),
                 });
                 return Err(error);

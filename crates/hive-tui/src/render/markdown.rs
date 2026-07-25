@@ -724,13 +724,19 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
                 let content: String = chars[i + 1..j].iter().collect();
                 let lead = content.len() - content.trim_start().len();
                 let trail = content.len() - content.trim_end().len();
+                let inner_start = lead;
+                let inner_end = content.len().saturating_sub(trail);
                 if lead > 0 {
                     spans.push(Span::styled(content[..lead].to_string(), base));
                 }
-                spans.push(Span::styled(
-                    format!(" {} ", &content[lead..content.len() - trail]),
-                    code,
-                ));
+                if inner_start < inner_end {
+                    spans.push(Span::styled(
+                        format!(" {} ", &content[inner_start..inner_end]),
+                        code,
+                    ));
+                } else {
+                    spans.push(Span::styled("   ", code));
+                }
                 if trail > 0 {
                     spans.push(Span::styled(
                         content[content.len() - trail..].to_string(),
@@ -1151,5 +1157,22 @@ mod tests {
         let spans = inline_with("* text *", &Theme::gray(), true);
         let t: String = spans.iter().map(|s| s.content.as_str()).collect();
         assert!(t.contains("* text *"), "spaced stars not italic: {t}");
+    }
+
+    #[test]
+    fn inline_code_whitespace_only_does_not_panic() {
+        // `` ` ` `` — content is a single space; lead==trail==1, inner is empty.
+        // Must not panic with "byte range starts at 1 but ends at 0".
+        let spans = inline_with("` `", &Theme::gray(), true);
+        let t: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert!(t.contains("   "), "whitespace-only code renders padding: {t:?}");
+    }
+
+    #[test]
+    fn inline_code_multibyte_does_not_panic() {
+        // Backtick content with multibyte UTF-8 — byte-slice math must stay safe.
+        let spans = inline_with("`привет`", &Theme::gray(), true);
+        let t: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert!(t.contains("привет"), "multibyte code preserved: {t}");
     }
 }

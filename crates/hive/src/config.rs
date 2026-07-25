@@ -515,6 +515,22 @@ pub fn patch_ui(ui: &hive_core::config::UiConfig) -> Result<()> {
     write_config_file(&path, &out)
 }
 
+/// Persist `[agent].context_window` so compaction matches the active model.
+pub fn patch_context_window(window: u64) -> Result<()> {
+    let mut value = read_toml_root()?;
+    let root = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("config root must be a table"))?;
+    let agent = root
+        .entry("agent")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let agent_table = agent
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[agent] must be a table"))?;
+    agent_table.insert("context_window".into(), toml::Value::Integer(window as i64));
+    write_toml_root(&value)
+}
+
 /// Persist the active model into `[models].default` (+ active connection profile).
 pub fn patch_model(id: &str, name: &str) -> Result<()> {
     let mut value = read_toml_root()?;

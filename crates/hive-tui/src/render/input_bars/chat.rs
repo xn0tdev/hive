@@ -164,7 +164,6 @@ pub fn draw_mode_chip(f: &mut Frame, area: Rect, app: &App) {
     if area.width < w {
         return;
     }
-    // Flush right — no extra gap after the chip.
     let x = area.x + area.width.saturating_sub(w);
     let line = Line::from(Span::styled(label, chip_fg));
     f.buffer().set_line(x, area.y, &line, w);

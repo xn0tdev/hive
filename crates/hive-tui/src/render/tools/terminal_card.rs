@@ -1,11 +1,18 @@
+//! Terminal card in the main transcript — same soft `strip` band as the
+//! subagent card: title + duration, description under, blank pad rows.
+
 use comb::{Color, Line, Modifier, Span, Style};
 
 use hive_core::TerminalProcessState;
 
 use crate::app::state::TerminalCard;
 use crate::app::App;
+use crate::render::tools::strip::{soft_bg_line, soft_bg_pad};
+use crate::render::tools::tool_card::format_tool_secs;
 
-/// Compact transcript row — same visual language as Thought headers.
+/// Flat terminal card in the main transcript: title + duration, description
+/// and status under. Click navigates into the dedicated terminal view.
+/// Soft `strip` band with blank pad rows top/bottom so text isn't flush.
 pub(crate) fn terminal_card_lines(
     card: &TerminalCard,
     app: &App,
@@ -14,93 +21,87 @@ pub(crate) fn terminal_card_lines(
     hovered: bool,
 ) -> Vec<Line> {
     let theme = &app.theme;
-    let running = matches!(card.process, TerminalProcessState::Running);
-    let hint_fg = if hovered { theme.dim } else { theme.faint };
-
-    let mut spans: Vec<Span> = vec![Span::raw("  ")];
-    if running {
-        spans.extend(shimmer_bright("Terminal", app.spinner));
-        spans.push(Span::styled(
-            format!("  {:.0}s", card.secs()),
-            Style::default().fg(theme.dim),
-        ));
+    let bg: Color = if hovered {
+        theme.strip_hover
     } else {
-        spans.push(Span::styled(
-            format!("Terminal for {:.1}s", card.secs()),
-            Style::default().fg(theme.fg).add(Modifier::BOLD),
-        ));
-        let failed = matches!(
-            &card.process,
-            TerminalProcessState::Exited { code } if *code != 0
-        ) || matches!(&card.process, TerminalProcessState::Failed { .. });
-        if failed {
-            spans.push(Span::styled(
-                format!(" · {}", truncate(&card.status_text(), 28)),
-                Style::default().fg(theme.err),
-            ));
-        }
-    }
+        theme.strip
+    };
+    let running = matches!(card.process, TerminalProcessState::Running);
+    let failed = matches!(
+        &card.process,
+        TerminalProcessState::Exited { code } if *code != 0
+    ) || matches!(&card.process, TerminalProcessState::Failed { .. });
 
-    let detail = {
+    let (icon, icon_fg) = if running {
+        (app.spinner_char().to_string(), theme.accent)
+    } else if failed {
+        ("✗".to_string(), theme.err)
+    } else {
+        ("✓".to_string(), theme.ok)
+    };
+
+    let title = {
         let command = card.command.trim();
-        if !command.is_empty() {
-            command.to_string()
+        if command.is_empty() {
+            "Terminal".to_string()
         } else {
-            card.preview()
+            command.to_string()
         }
     };
-    if !detail.is_empty() {
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let budget = width
-            .saturating_sub(used)
-            .saturating_sub(if show_hint { 16 } else { 4 });
-        if budget > 3 {
-            spans.push(Span::styled(
-                format!(" · {}", truncate(&detail, budget.saturating_sub(3))),
-                Style::default().fg(theme.dim),
-            ));
-        }
-    }
 
+    let mut title_spans = vec![
+        Span::raw("  "),
+        Span::styled(format!("{icon} "), Style::default().fg(icon_fg)),
+        Span::styled(title, Style::default().fg(theme.fg).add(Modifier::BOLD)),
+        Span::styled(
+            format!(" · {}", format_tool_secs(card.secs())),
+            Style::default().fg(theme.dim),
+        ),
+    ];
     if show_hint {
-        spans.push(Span::styled(
+        title_spans.push(Span::styled(
             "  click to open",
-            Style::default().fg(hint_fg),
+            Style::default().fg(if hovered { theme.dim } else { theme.faint }),
         ));
     }
 
-    vec![Line::from(spans)]
-}
+    let title_line = soft_bg_line(Line::from(title_spans), bg, width);
 
-fn shimmer_bright(text: &str, tick: usize) -> Vec<Span> {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len() as i32;
-    let head = (tick as i32 % (n + 6)) - 3;
-    chars
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let dist = (i as i32 - head).abs() as f32;
-            let t = (1.0 - dist / 3.0).max(0.0);
-            let v = (0xb8 as f32 + (0xff - 0xb8) as f32 * t) as u8;
-            Span::styled(
-                c.to_string(),
-                Style::default().fg(Color::Rgb(v, v, v)).add(Modifier::BOLD),
-            )
-        })
-        .collect()
-}
+    // Description line: why the agent started this terminal + process state.
+    let desc = card.description.trim();
+    let status = card.status_text();
+    let status_fg = if failed { theme.err } else { theme.dim };
+    let detail_line = if desc.is_empty() {
+        soft_bg_line(
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(status, Style::default().fg(status_fg)),
+            ]),
+            bg, width,
+        )
+    } else {
+        let prefix = format!("    {desc} · ");
+        let budget = width.saturating_sub(prefix.chars().count() + status.chars().count());
+        let desc_text = if desc.chars().count() > budget && budget > 3 {
+            let mut s: String = desc.chars().take(budget - 3).collect();
+            s.push('…');
+            s
+        } else {
+            desc.to_string()
+        };
+        let full = format!("    {desc_text} · {status}");
+        soft_bg_line(
+            Line::from(vec![Span::styled(full, Style::default().fg(theme.dim))]),
+            bg, width,
+        )
+    };
 
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    if max <= 1 {
-        return "…".into();
-    }
-    let mut out: String = text.chars().take(max - 1).collect();
-    out.push('…');
-    out
+    vec![
+        soft_bg_pad(bg, width),
+        title_line,
+        detail_line,
+        soft_bg_pad(bg, width),
+    ]
 }
 
 #[cfg(test)]
@@ -133,6 +134,7 @@ mod tests {
         TerminalCard {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: "Install a color theme".into(),
             controller,
             process,
             revision: 2,
@@ -151,24 +153,25 @@ mod tests {
     }
 
     #[test]
-    fn terminal_card_renders_like_a_thought_row() {
+    fn terminal_card_shows_description_and_status() {
         let running = text(&card(
             TerminalController::Agent,
             TerminalProcessState::Running,
         ));
-        assert!(running.contains("Terminal"), "{running}");
         assert!(running.contains("theme-installer"), "{running}");
+        assert!(running.contains("Install a color theme"), "{running}");
+        assert!(running.contains("running"), "{running}");
         assert!(running.contains("click to open"), "{running}");
-        assert!(!running.contains("Choose preset"), "{running}");
         assert!(!running.contains("AGENT"), "{running}");
+        assert!(!running.contains("Choose preset"), "{running}");
 
         let exited = text(&card(
             TerminalController::Agent,
             TerminalProcessState::Exited { code: 0 },
         ));
-        assert!(exited.contains("Terminal for"), "{exited}");
         assert!(exited.contains("theme-installer"), "{exited}");
-        assert!(!exited.contains("exited 0"), "{exited}");
+        assert!(exited.contains("Install a color theme"), "{exited}");
+        assert!(exited.contains("exited 0"), "{exited}");
 
         let failed = text(&card(
             TerminalController::Agent,
@@ -176,7 +179,8 @@ mod tests {
                 message: "boom".into(),
             },
         ));
-        assert!(failed.contains("Terminal for"), "{failed}");
-        assert!(failed.contains("boom"), "{failed}");
+        assert!(failed.contains("theme-installer"), "{failed}");
+        assert!(failed.contains("Install a color theme"), "{failed}");
+        assert!(failed.contains("failed: boom"), "{failed}");
     }
 }

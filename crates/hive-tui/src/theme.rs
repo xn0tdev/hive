@@ -49,6 +49,8 @@ pub struct Theme {
     /// Menu selection bar: light band with dark text.
     pub sel_fg: Color,
     pub sel_bg: Color,
+    /// GOAL mode chip background (warm green).
+    pub goal: Color,
 }
 
 impl Theme {
@@ -82,6 +84,7 @@ impl Theme {
             del_bg: rgb(0x40, 0x22, 0x28),
             sel_fg: rgb(0x1a, 0x1a, 0x1a),
             sel_bg: rgb(0xd8, 0xd8, 0xd8),
+            goal: rgb(0x5a, 0x8a, 0x4e),
         }
     }
 

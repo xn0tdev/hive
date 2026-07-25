@@ -149,6 +149,9 @@ fn drain_events(
             dirty |= flush_follow_up(app, input_tx);
         }
     }
+    if let Some(context) = app.take_pending_context_update() {
+        let _ = input_tx.send(InputCommand::UpdateContextWindow { context });
+    }
     dirty
 }
 
@@ -175,7 +178,7 @@ fn handle_paste(app: &mut App, text: &str, input_tx: &UnboundedSender<InputComma
         });
         return true;
     }
-    if app.about_open() || app.settings_open() {
+    if app.about_open() || app.settings_open() || app.goal_overlay_open() {
         return false;
     }
     if app.palette_open() {
@@ -365,6 +368,10 @@ fn handle_key(
         return handle_settings_key(app, key, input_tx);
     }
 
+    if app.goal_overlay_open() {
+        return handle_goal_key(app, key, input_tx);
+    }
+
     // Plan preview: section select / amend / Make / back.
     if app.in_plan_view() {
         return handle_plan_key(app, key, input_tx, interrupt);
@@ -461,10 +468,23 @@ fn handle_key(
                 if app.clear_follow_up() {
                     return false;
                 }
+                // If a goal is active, pause it so the next turn doesn't auto-start.
+                if app.goal_active() && !app.goal_paused() {
+                    let _ = input_tx.send(InputCommand::PauseGoal);
+                }
                 interrupt.store(true, Ordering::Relaxed);
                 return false;
             }
             KeyCode::Esc => {
+                // Active goal: Esc pauses (or stops if already paused).
+                if app.goal_active() && !app.goal_paused() {
+                    let _ = input_tx.send(InputCommand::PauseGoal);
+                    return false;
+                }
+                if app.goal_paused() {
+                    let _ = input_tx.send(InputCommand::StopGoal);
+                    return false;
+                }
                 // Recall a just-submitted prompt before the agent starts.
                 if app.recall_pending_dispatch() {
                     app.focus_input();
@@ -1342,17 +1362,18 @@ fn run_command(
                 app.open_model_picker(input_tx);
             } else {
                 let display = arg.rsplit('/').next().unwrap_or(arg).to_string();
-                let (vision, cost_input, cost_output) = app
+                let (vision, context, cost_input, cost_output) = app
                     .model_choices
                     .iter()
                     .find(|m| m.key == arg)
-                    .map(|m| (m.vision, m.cost_input, m.cost_output))
-                    .unwrap_or((false, 0.0, 0.0));
+                    .map(|m| (m.vision, m.context, m.cost_input, m.cost_output))
+                    .unwrap_or((false, 0, 0.0, 0.0));
                 let _ = input_tx.send(InputCommand::SetModel {
                     id: arg.to_string(),
                     display,
                     connection_id: None,
                     vision,
+                    context,
                     cost_input,
                     cost_output,
                 });
@@ -1364,6 +1385,21 @@ fn run_command(
             app.usage.prompt_tokens, app.usage.completion_tokens, app.usage.total_tokens
         )),
         CmdId::Connect => app.open_connect_picker(),
+        CmdId::Goal => {
+            if app.goal_active() {
+                if let Some(g) = app.goal.as_ref() {
+                    app.flash(&format!("Goal: {} · {}", g.objective, g.timer_label()));
+                }
+            } else if !arg.is_empty() {
+                let objective = arg.trim().to_string();
+                let _ = input_tx.send(InputCommand::SetGoal {
+                    objective,
+                    duration: None,
+                });
+            } else {
+                app.open_goal_overlay();
+            }
+        }
         CmdId::About => app.open_about(),
         CmdId::Settings => app.open_settings(),
     }
@@ -1413,6 +1449,51 @@ fn handle_settings_key(app: &mut App, key: Key, input_tx: &UnboundedSender<Input
         }
         KeyCode::Char('p') if ctrl => {
             app.close_settings();
+            app.open_palette();
+        }
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        _ => {}
+    }
+    false
+}
+
+fn handle_goal_key(
+    app: &mut App,
+    key: Key,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    let ctrl = key.mods.ctrl;
+    match key.code {
+        KeyCode::Esc => {
+            app.close_goal_overlay();
+        }
+        KeyCode::Backspace => {
+            if let Some(st) = app.goal_overlay.as_mut() {
+                st.backspace();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(st) = app.goal_overlay.as_ref() {
+                let objective = st.objective.trim().to_string();
+                if objective.is_empty() {
+                    app.flash("Enter an objective first");
+                    return false;
+                }
+                app.close_goal_overlay();
+                let _ = input_tx.send(InputCommand::SetGoal {
+                    objective,
+                    duration: None,
+                });
+            }
+        }
+        KeyCode::Char(c) if !ctrl => {
+            if let Some(st) = app.goal_overlay.as_mut() {
+                st.type_char(c);
+            }
+        }
+        KeyCode::Char('p') if ctrl => {
+            app.close_goal_overlay();
             app.open_palette();
         }
         KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
@@ -1578,18 +1659,22 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                         c.display.clone(),
                         c.connection_id.clone(),
                         c.vision,
+                        c.context,
                         c.cost_input,
                         c.cost_output,
                     )
                 });
             app.close_palette();
-            if let Some((id, display, connection_id, vision, cost_input, cost_output)) = picked {
+            if let Some((id, display, connection_id, vision, context, cost_input, cost_output)) =
+                picked
+            {
                 let connection_id = (!connection_id.is_empty()).then_some(connection_id);
                 let _ = input_tx.send(InputCommand::SetModel {
                     id,
                     display,
                     connection_id,
                     vision,
+                    context,
                     cost_input,
                     cost_output,
                 });
@@ -1762,6 +1847,7 @@ mod tests {
                     group: "Test".into(),
                     connection_id: String::new(),
                     vision: false,
+                    context: 0,
                     cost_input: 0.0,
                     cost_output: 0.0,
                 },
@@ -1772,6 +1858,7 @@ mod tests {
                     group: "Test".into(),
                     connection_id: String::new(),
                     vision: false,
+                    context: 0,
                     cost_input: 0.0,
                     cost_output: 0.0,
                 },
@@ -1883,6 +1970,7 @@ mod tests {
                 display,
                 connection_id,
                 vision,
+                context: _,
                 cost_input: _,
                 cost_output: _,
             }) => {
@@ -2236,6 +2324,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: String::new(),
             rows: 12,
             cols: 40,
         });
@@ -2701,6 +2790,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "cat".into(),
+            description: String::new(),
             rows: 20,
             cols: 80,
         });

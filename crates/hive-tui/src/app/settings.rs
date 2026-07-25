@@ -30,7 +30,7 @@ impl SettingsState {
     pub fn len(&self) -> usize {
         match self.page {
             SettingsPage::Root => 2,
-            SettingsPage::Chat => 1,
+            SettingsPage::Chat => 2,
             SettingsPage::Sidebar => 3,
         }
     }
@@ -88,12 +88,17 @@ pub fn activate(app: &mut App) -> bool {
             }
             false
         }
-        SettingsPage::Chat => {
-            if sel == 0 {
+        SettingsPage::Chat => match sel {
+            0 => {
                 app.ui.thoughts_always_open = !app.ui.thoughts_always_open;
+                true
             }
-            true
-        }
+            1 => {
+                app.ui.show_work_summary = !app.ui.show_work_summary;
+                true
+            }
+            _ => false,
+        },
         SettingsPage::Sidebar => match sel {
             0 => {
                 app.ui.sidebar_mode = app.ui.sidebar_mode.cycle();

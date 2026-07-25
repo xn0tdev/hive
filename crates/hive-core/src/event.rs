@@ -101,15 +101,27 @@ pub enum AgentEvent {
         mode: AgentMode,
         reason: String,
     },
+    /// The agent was stuck in a tool-call loop and is being redirected.
+    LoopDetected {
+        tool: String,
+    },
+    /// Context compaction started (spinner) or finished (with token counts).
+    Compacted {
+        /// None while compacting (spinner), Some when done.
+        before: Option<u64>,
+        after: u64,
+    },
     TerminalStarted {
         id: String,
         command: String,
+        description: String,
         rows: u16,
         cols: u16,
     },
     TerminalStartFailed {
         id: String,
         command: String,
+        description: String,
         message: String,
     },
     TerminalOutput {
@@ -137,6 +149,8 @@ pub enum AgentEvent {
         id: String,
         /// Pretty label for the TUI.
         display: String,
+        /// Context window in tokens (0 if unknown — keep previous value).
+        context: u64,
         /// USD per 1M input tokens (0 if unknown).
         cost_input: f64,
         /// USD per 1M output tokens (0 if unknown).
@@ -153,6 +167,27 @@ pub enum AgentEvent {
         active: String,
         profiles: Vec<ConnectionInfo>,
     },
+    /// A goal was set — the agent will work autonomously until it expires or is stopped.
+    GoalSet {
+        objective: String,
+        /// Absolute deadline (None = no timer).
+        deadline: Option<std::time::Instant>,
+    },
+    /// A turn finished but the goal is still active — the driver should start the next turn.
+    GoalContinue {
+        objective: String,
+        remaining_secs: u64,
+    },
+    /// The goal timer expired.
+    GoalExpired {
+        objective: String,
+    },
+    /// The goal was stopped by the user.
+    GoalStopped,
+    /// The goal loop was paused.
+    GoalPaused,
+    /// The goal loop was resumed.
+    GoalResumed,
     /// Informational notice (e.g. "Exa disabled: no key").
     Notice(String),
     Error(String),
@@ -174,6 +209,8 @@ pub struct CatalogModel {
     pub connection_id: String,
     /// True when the catalog says this model accepts image inputs.
     pub vision: bool,
+    /// Context window in tokens (0 if unknown).
+    pub context: u64,
     /// USD per 1M input tokens (0 if unknown).
     pub cost_input: f64,
     /// USD per 1M output tokens (0 if unknown).

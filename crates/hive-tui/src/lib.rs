@@ -32,6 +32,8 @@ pub struct ModelChoice {
     pub connection_id: String,
     /// Catalog says this model accepts image inputs.
     pub vision: bool,
+    /// Context window in tokens (0 if unknown).
+    pub context: u64,
     /// USD per 1M input tokens (0 if unknown).
     pub cost_input: f64,
     /// USD per 1M output tokens (0 if unknown).
@@ -128,11 +130,28 @@ pub enum InputCommand {
         connection_id: Option<String>,
         /// Whether the model accepts image inputs (from the live catalog).
         vision: bool,
+        /// Context window in tokens (0 if unknown).
+        context: u64,
         /// USD per 1M input tokens (0 if unknown).
         cost_input: f64,
         /// USD per 1M output tokens (0 if unknown).
         cost_output: f64,
     },
+    /// Update the agent's context window (from catalog, without switching model).
+    UpdateContextWindow {
+        context: u64,
+    },
+    /// Set a goal for the autonomous agent loop.
+    SetGoal {
+        objective: String,
+        duration: Option<std::time::Duration>,
+    },
+    /// Stop the active goal loop.
+    StopGoal,
+    /// Pause the goal loop (finishes current turn, then waits).
+    PauseGoal,
+    /// Resume a paused goal loop.
+    ResumeGoal,
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,
     /// Activate a saved `/connect` profile.

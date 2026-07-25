@@ -2,6 +2,7 @@
 
 mod compact;
 mod context;
+mod loop_detect;
 mod mode;
 mod prompt;
 mod run;
@@ -13,5 +14,5 @@ pub use mode::{
     is_plan_path, multitask_mode_check, multitask_mode_tool_allowed, plan_mode_check,
     plan_mode_tool_allowed, plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
 };
-pub use run::{Agent, AgentBuilder, FollowUpSlot, UserInput};
+pub use run::{Agent, AgentBuilder, FollowUpSlot, GoalState, UserInput};
 pub use session::Session;

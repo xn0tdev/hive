@@ -11,6 +11,7 @@ pub enum CmdId {
     Cost,
     About,
     Settings,
+    Goal,
     Quit,
 }
 
@@ -136,6 +137,18 @@ pub const COMMANDS: &[CommandDef] = &[
         desc: "Chat & sidebar preferences",
         hint: "",
         takes_arg: false,
+        category: Category::Session,
+        shortcut: None,
+        suggested: true,
+    },
+    CommandDef {
+        id: CmdId::Goal,
+        name: "goal",
+        aliases: &[],
+        label: "Set a goal",
+        desc: "Autonomous agent loop",
+        hint: "[objective]",
+        takes_arg: true,
         category: Category::Session,
         shortcut: None,
         suggested: true,

@@ -65,6 +65,20 @@ Do this every release. Do **not** skip the version bump.
 - Path + `version` in workspace deps must match the version you publish.
 - Binary name is **`hive`**, package name is **`hive-agent`** — don’t rename the bin when “fixing” the crates.io name.
 
+## Branch workflow
+
+**Never commit directly to `main`.** All work accumulates in `development` throughout the day.
+
+- `main` is the default branch on GitHub — stable, only updated via merge from `development`.
+- `development` is the working branch — it lives on the local machine and on `origin`.
+- Locally you work **only** in `development`; `main` exists on `origin` and is updated by merging.
+- Commit freely to `development` as you go; small commits are fine there.
+- `development` on `origin` doubles as a public beta — anyone can check it out to see work in progress before it lands in `main`.
+- At the end of the day (or when the work is verified), merge `development` → `main` as one reviewed batch — no trickle of small commits into `main`.
+- If the day's work isn't verified yet, keep going in `development` the next day.
+- Merge via `gh` CLI (always available, authenticated) or plain `git` — whichever is simpler. Never force-push or reset `main`.
+- Don't accidentally switch `main` to a different commit; merge into it, don't rebase it onto `development`.
+
 ## Local dev
 
 ```bash
@@ -79,6 +93,7 @@ Config: `~/.config/hive/config.toml` (or `FIREWORKS_API_KEY`).
 
 ## Don’t
 
+- Don’t commit directly to `main` — use `development`.
 - Don’t try to publish crates.io name `hive` or `comb`.
 - Don’t invent parallel version numbers per crate unless you intentionally break the workspace version.
 - Don’t commit secrets / API keys / `~/.config/hive`.

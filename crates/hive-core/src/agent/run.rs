@@ -18,6 +18,7 @@ use super::compact::{
     compacted_messages, estimate_tokens, format_transcript, should_compact, summarize_request,
     MIN_MESSAGES_TO_COMPACT,
 };
+use super::loop_detect::{redirect_message, LoopDetector};
 use super::mode::{
     multitask_mode_check, multitask_mode_tool_allowed, plan_mode_check, plan_mode_tool_allowed,
     plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
@@ -160,6 +161,8 @@ impl AgentBuilder {
             cwd,
             mode,
             last_prompt_tokens: 0,
+            loop_detector: LoopDetector::default(),
+            goal: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -183,6 +186,40 @@ pub struct Agent {
     mode: AgentMode,
     /// Prompt tokens from the most recent chat request (for auto-compact).
     last_prompt_tokens: u64,
+    /// Detects repeated tool calls so the agent can break out of loops.
+    loop_detector: LoopDetector,
+    /// Active goal for the autonomous loop (None = no goal).
+    goal: Arc<Mutex<Option<GoalState>>>,
+}
+
+/// Persistent goal state for the autonomous agent loop.
+#[derive(Debug, Clone)]
+pub struct GoalState {
+    pub objective: String,
+    pub deadline: Option<std::time::Instant>,
+    pub paused: bool,
+}
+
+impl GoalState {
+    /// Remaining seconds until the deadline (0 if no deadline or expired).
+    pub fn remaining_secs(&self) -> u64 {
+        self.deadline
+            .map(|d| {
+                let now = std::time::Instant::now();
+                if d > now {
+                    d.duration_since(now).as_secs()
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    /// True when the deadline has passed.
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+    }
 }
 
 impl Agent {
@@ -192,6 +229,61 @@ impl Agent {
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+    }
+
+    pub fn set_context_window(&mut self, window: u64) {
+        let cfg = Arc::make_mut(&mut self.config);
+        cfg.agent.context_window = window;
+    }
+
+    // ── Goal / autonomous loop ──────────────────────────────────────────
+
+    /// Set a goal for the autonomous loop. `deadline = None` means no timer —
+    /// the agent keeps working until the user stops it.
+    pub fn set_goal(&self, objective: String, deadline: Option<std::time::Instant>) {
+        if let Ok(mut g) = self.goal.lock() {
+            *g = Some(GoalState {
+                objective,
+                deadline,
+                paused: false,
+            });
+        }
+    }
+
+    pub fn stop_goal(&self) {
+        if let Ok(mut g) = self.goal.lock() {
+            *g = None;
+        }
+    }
+
+    pub fn pause_goal(&self) {
+        if let Ok(mut g) = self.goal.lock() {
+            if let Some(gs) = g.as_mut() {
+                gs.paused = true;
+            }
+        }
+    }
+
+    pub fn resume_goal(&self) {
+        if let Ok(mut g) = self.goal.lock() {
+            if let Some(gs) = g.as_mut() {
+                gs.paused = false;
+            }
+        }
+    }
+
+    /// True when a goal is active, not paused, and not expired.
+    pub fn goal_active(&self) -> bool {
+        self.goal
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|gs| !gs.paused && !gs.expired()))
+            .unwrap_or(false)
+    }
+
+    /// Snapshot of the current goal (if any).
+    pub fn goal_snapshot(&self) -> Option<GoalState> {
+        self.goal.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn set_vision_capable(&mut self, capable: bool) {
@@ -311,6 +403,7 @@ impl Agent {
         }
         self.session.reset();
         self.last_prompt_tokens = 0;
+        self.loop_detector = LoopDetector::default();
     }
 
     fn context_window(&self) -> u64 {
@@ -355,7 +448,13 @@ impl Agent {
             return Ok(());
         }
 
-        self.emit(AgentEvent::Notice("Compacting context…".into()));
+        let before = estimate_tokens(&self.session.messages);
+
+        // Spinner: compaction in progress.
+        self.emit(AgentEvent::Compacted {
+            before: None,
+            after: 0,
+        });
 
         let transcript = format_transcript(&self.session.messages);
         if transcript.trim().is_empty() {
@@ -392,9 +491,13 @@ impl Agent {
         let system = self.session.system().to_string();
         self.session
             .replace_messages(compacted_messages(&system, &summary));
-        self.last_prompt_tokens = estimate_tokens(&self.session.messages);
+        let after = estimate_tokens(&self.session.messages);
+        self.last_prompt_tokens = after;
 
-        self.emit(AgentEvent::Notice("Context compacted".into()));
+        self.emit(AgentEvent::Compacted {
+            before: Some(before),
+            after,
+        });
         Ok(())
     }
 
@@ -508,6 +611,22 @@ impl Agent {
                     self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                     break;
                 }
+
+                // Loop detection: same tool + same args repeated too many times.
+                if self.loop_detector.record(&tc.name, &tc.arguments) {
+                    self.emit(AgentEvent::LoopDetected {
+                        tool: tc.name.clone(),
+                    });
+
+                    // Inject the redirect as a user message so the model sees it.
+                    let msg = redirect_message(&tc.name, &tc.arguments);
+                    self.session.push(Message::user(msg));
+                    self.loop_detector.reset_streak();
+                    // Skip executing the repeated tool call — let the model
+                    // reconsider with the redirect in context.
+                    continue;
+                }
+
                 self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
                     .await;
             }
@@ -531,7 +650,30 @@ impl Agent {
                     tokio::task::spawn_blocking(move || terminal.stop_if_agent_controlled()).await;
             }
         }
-        self.emit(AgentEvent::TurnFinished);
+
+        // Goal loop: instead of TurnFinished, emit a goal event so the driver
+        // can start the next turn automatically.
+        if self.depth == 0 {
+            if let Some(gs) = self.goal_snapshot() {
+                if gs.expired() {
+                    self.emit(AgentEvent::GoalExpired {
+                        objective: gs.objective.clone(),
+                    });
+                    self.stop_goal();
+                } else if !gs.paused && !interrupt.load(Ordering::Relaxed) {
+                    self.emit(AgentEvent::GoalContinue {
+                        objective: gs.objective.clone(),
+                        remaining_secs: gs.remaining_secs(),
+                    });
+                } else {
+                    self.emit(AgentEvent::TurnFinished);
+                }
+            } else {
+                self.emit(AgentEvent::TurnFinished);
+            }
+        } else {
+            self.emit(AgentEvent::TurnFinished);
+        }
         final_text
     }
 
@@ -816,7 +958,7 @@ mod tests {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
         let manager = TerminalManager::new(events.clone());
         let started = manager
-            .start("cat", std::path::Path::new("."))
+            .start("cat", "test", std::path::Path::new("."))
             .await
             .unwrap();
         let mut agent = builder().build_with_terminal(
@@ -841,7 +983,7 @@ mod tests {
         ));
 
         let restarted = manager
-            .start("cat", std::path::Path::new("."))
+            .start("cat", "test", std::path::Path::new("."))
             .await
             .unwrap();
         manager.attach(&restarted.id).unwrap();

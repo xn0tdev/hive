@@ -241,6 +241,9 @@ pub struct UiConfig {
     /// Right panel width in columns (clamped in the TUI to min/max).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
+    /// Show a "Worked for Nm" summary line at the end of each turn.
+    #[serde(default = "default_true")]
+    pub show_work_summary: bool,
 }
 
 fn default_true() -> bool {
@@ -260,6 +263,7 @@ impl Default for UiConfig {
             sidebar_mode: SidebarMode::Auto,
             sidebar_collapse_sections: true,
             sidebar_width: default_sidebar_width(),
+            show_work_summary: true,
         }
     }
 }

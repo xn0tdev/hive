@@ -71,6 +71,7 @@ pub async fn run(
                 display,
                 connection_id,
                 vision,
+                context,
                 cost_input,
                 cost_output,
             } => {
@@ -85,16 +86,174 @@ pub async fn run(
                 let (id, display) = resolve_model(&cfg, &id, &display);
                 agent.set_model(id.clone());
                 agent.set_vision_capable(vision);
+                if context > 0 {
+                    let cfg_mut = Arc::make_mut(&mut cfg);
+                    cfg_mut.agent.context_window = context;
+                    agent.set_context_window(context);
+                    if let Err(e) = crate::config::patch_context_window(context) {
+                        let _ = events.send(AgentEvent::Notice(format!("could not save context window: {e}")));
+                    }
+                }
                 if let Err(e) = crate::config::patch_model(&id, &display) {
                     let _ = events.send(AgentEvent::Notice(format!("could not save model: {e}")));
                 }
                 let _ = events.send(AgentEvent::ModelChanged {
                     id: id.clone(),
                     display: display.clone(),
+                    context,
                     cost_input,
                     cost_output,
                 });
                 let _ = events.send(AgentEvent::Notice(format!("Model set to {display}")));
+            }
+            InputCommand::UpdateContextWindow { context } => {
+                if context > 0 {
+                    let cfg_mut = Arc::make_mut(&mut cfg);
+                    cfg_mut.agent.context_window = context;
+                    agent.set_context_window(context);
+                    if let Err(e) = crate::config::patch_context_window(context) {
+                        let _ = events.send(AgentEvent::Notice(format!("could not save context window: {e}")));
+                    }
+                }
+            }
+            InputCommand::SetGoal { objective, duration } => {
+                let deadline = duration.map(|d| std::time::Instant::now() + d);
+                agent.set_goal(objective.clone(), deadline);
+                let _ = events.send(AgentEvent::GoalSet {
+                    objective: objective.clone(),
+                    deadline,
+                });
+                // Start the first turn with the objective as the user prompt.
+                interrupt.store(false, Ordering::Relaxed);
+                if let Ok(mut g) = follow_up.lock() {
+                    *g = None;
+                }
+                let turn = agent.run_turn(
+                    UserInput::from(objective),
+                    interrupt.clone(),
+                    follow_up.clone(),
+                );
+                if drive_turn(
+                    turn,
+                    &mut input_rx,
+                    &terminal,
+                    &events,
+                    &mut pending,
+                    interrupt.as_ref(),
+                )
+                .await
+                .is_none()
+                {
+                    break 'commands;
+                }
+                // Goal continuation loop.
+                loop {
+                    if !agent.goal_active() {
+                        break;
+                    }
+                    let snap = match agent.goal_snapshot() {
+                        Some(g) => g,
+                        None => break,
+                    };
+                    let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
+                    interrupt.store(false, Ordering::Relaxed);
+                    if let Ok(mut g) = follow_up.lock() {
+                        *g = None;
+                    }
+                    let turn = agent.run_turn(
+                        UserInput::from(prompt),
+                        interrupt.clone(),
+                        follow_up.clone(),
+                    );
+                    if drive_turn(
+                        turn,
+                        &mut input_rx,
+                        &terminal,
+                        &events,
+                        &mut pending,
+                        interrupt.as_ref(),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        break 'commands;
+                    }
+                }
+            }
+            InputCommand::StopGoal => {
+                agent.stop_goal();
+                let _ = events.send(AgentEvent::GoalStopped);
+            }
+            InputCommand::PauseGoal => {
+                agent.pause_goal();
+                let _ = events.send(AgentEvent::GoalPaused);
+            }
+            InputCommand::ResumeGoal => {
+                agent.resume_goal();
+                let _ = events.send(AgentEvent::GoalResumed);
+                if !agent.goal_active() {
+                    continue;
+                }
+                let snap = match agent.goal_snapshot() {
+                    Some(g) => g,
+                    None => continue,
+                };
+                let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
+                interrupt.store(false, Ordering::Relaxed);
+                if let Ok(mut g) = follow_up.lock() {
+                    *g = None;
+                }
+                let turn = agent.run_turn(
+                    UserInput::from(prompt),
+                    interrupt.clone(),
+                    follow_up.clone(),
+                );
+                if drive_turn(
+                    turn,
+                    &mut input_rx,
+                    &terminal,
+                    &events,
+                    &mut pending,
+                    interrupt.as_ref(),
+                )
+                .await
+                .is_none()
+                {
+                    break 'commands;
+                }
+                // Goal continuation loop.
+                loop {
+                    if !agent.goal_active() {
+                        break;
+                    }
+                    let snap = match agent.goal_snapshot() {
+                        Some(g) => g,
+                        None => break,
+                    };
+                    let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
+                    interrupt.store(false, Ordering::Relaxed);
+                    if let Ok(mut g) = follow_up.lock() {
+                        *g = None;
+                    }
+                    let turn = agent.run_turn(
+                        UserInput::from(prompt),
+                        interrupt.clone(),
+                        follow_up.clone(),
+                    );
+                    if drive_turn(
+                        turn,
+                        &mut input_rx,
+                        &terminal,
+                        &events,
+                        &mut pending,
+                        interrupt.as_ref(),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        break 'commands;
+                    }
+                }
             }
             InputCommand::FetchModels => {
                 fetch_and_emit_models(&cfg, &events).await;
@@ -295,6 +454,7 @@ async fn apply_connection(
     let _ = events.send(AgentEvent::ModelChanged {
         id: model_id,
         display: model_display.clone(),
+        context: 0,
         cost_input: 0.0,
         cost_output: 0.0,
     });
@@ -417,6 +577,22 @@ fn active_provider_label(cfg: &AppConfig, base_url: &str) -> String {
         .unwrap_or_else(|| provider_label_for_base(base_url).to_string())
 }
 
+/// Build the continuation prompt for the goal loop.
+fn build_goal_continuation(objective: &str, remaining_secs: u64) -> String {
+    let time_line = if remaining_secs > 0 {
+        if remaining_secs >= 3600 {
+            format!(" ({}h {}m left)", remaining_secs / 3600, (remaining_secs % 3600) / 60)
+        } else if remaining_secs >= 60 {
+            format!(" ({}m left)", remaining_secs / 60)
+        } else {
+            format!(" ({}s left)", remaining_secs)
+        }
+    } else {
+        " (no time limit — keep working until stopped)".to_string()
+    };
+    format!("Continue: {objective}{time_line}")
+}
+
 fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<CatalogModel> {
     cards
         .iter()
@@ -427,6 +603,7 @@ fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<Ca
             group: group.to_string(),
             connection_id: connection_id.to_string(),
             vision: c.vision,
+            context: c.context,
             cost_input: c.cost_input,
             cost_output: c.cost_output,
         })
@@ -444,7 +621,7 @@ mod tests {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
         let terminal = hive_core::TerminalManager::new(events.clone());
         let started = terminal
-            .start("cat", std::path::Path::new("."))
+            .start("cat", "test", std::path::Path::new("."))
             .await
             .unwrap();
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();

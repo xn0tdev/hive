@@ -148,6 +148,7 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         group: "Configured".into(),
         connection_id: cfg.connections.active.clone(),
         vision: false,
+        context: 0,
         cost_input: 0.0,
         cost_output: 0.0,
     }];

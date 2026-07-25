@@ -11,8 +11,9 @@ use crate::app::state::{
 };
 use crate::app::{App, MdRows};
 use crate::render::tools::{
-    format_tool_secs, mode_switch_card_lines, plan_card_lines, subagent_card_lines,
-    terminal_card_lines, tool_lines,
+    compacted_card_lines, format_tool_secs, goal_card_lines, loop_detected_card_lines,
+    mode_switch_card_lines, plan_card_lines, subagent_card_lines, terminal_card_lines, tool_lines,
+    work_summary_card_lines,
 };
 use crate::render::{markdown, wrap};
 
@@ -200,8 +201,21 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
     }
 
     for i in 0..n {
-        let next_is_tool = matches!(app.blocks.get(i + 1), Some(UiBlock::Tool(_)));
-        let next_is_notice = matches!(app.blocks.get(i + 1), Some(UiBlock::Notice(_)));
+        // Spacing between blocks: blank line, except consecutive tools/notices
+        // which stay tight.
+        if i > 0 {
+            let prev = &app.blocks[i - 1];
+            let curr = &app.blocks[i];
+            let tight = matches!(
+                (prev, curr),
+                (UiBlock::Tool(_), UiBlock::Tool(_))
+                    | (UiBlock::Notice(_), UiBlock::Notice(_))
+            );
+            if !tight {
+                out.push(Line::from(""));
+            }
+        }
+
         let has_later_thought = last_thought.is_some_and(|l| i < l);
         let has_later_subagent = last_subagent.is_some_and(|l| i < l);
         let has_later_plan = last_plan.is_some_and(|l| i < l);
@@ -219,7 +233,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 for line_idx in start..out.len() {
                     heads.push((line_idx, i));
                 }
-                out.push(Line::from(""));
             }
             UiBlock::Assistant { text, streaming } => {
                 let content_w = width.saturating_sub(2);
@@ -266,7 +279,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     push_caret(&mut wrapped, theme.accent);
                 }
                 out.extend(wrapped);
-                out.push(Line::from(""));
             }
             UiBlock::Reasoning(th) => {
                 // Hint only on older thoughts; the latest one stays clean.
@@ -294,10 +306,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                         .collect();
                     for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
                         l.spans.insert(0, Span::raw("    "));
+                        // Click anywhere on the thought body also toggles it.
+                        heads.push((out.len(), i));
                         out.push(l);
                     }
                 }
-                out.push(Line::from(""));
             }
             UiBlock::Subagent(card) => {
                 let show_hint = !has_later_subagent;
@@ -309,7 +322,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 for line_idx in start..out.len() {
                     heads.push((line_idx, i));
                 }
-                out.push(Line::from(""));
             }
             UiBlock::Plan(card) => {
                 let show_hint = !has_later_plan;
@@ -320,7 +332,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 for line_idx in start..out.len() {
                     heads.push((line_idx, i));
                 }
-                out.push(Line::from(""));
             }
             UiBlock::Terminal(card) => {
                 let show_hint = !has_later_terminal;
@@ -330,7 +341,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 for line_idx in start..out.len() {
                     heads.push((line_idx, i));
                 }
-                out.push(Line::from(""));
             }
             UiBlock::Tool(card) => {
                 // tool_lines only needs a few fields; clone the small card.
@@ -345,15 +355,38 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     snapshot: None,
                 };
                 out.extend(tool_lines(&card, app, width));
-                // Keep consecutive tools tight; add air after the last one.
-                if !next_is_tool {
-                    out.push(Line::from(""));
-                }
             }
             UiBlock::ModeSwitch(card) => {
                 let card = card.clone();
                 out.extend(mode_switch_card_lines(&card, app, width));
-                out.push(Line::from(""));
+            }
+            UiBlock::LoopDetected(_) => {
+                out.extend(loop_detected_card_lines(app, width));
+            }
+            UiBlock::Compacted(card) => {
+                let card = card.clone();
+                out.extend(compacted_card_lines(&card, app, width));
+            }
+            UiBlock::WorkSummary(card) => {
+                let card = card.clone();
+                out.extend(work_summary_card_lines(&card, app, width));
+            }
+            UiBlock::Goal(card) => {
+                let card = card.clone();
+                out.extend(goal_card_lines(&card, app, width));
+            }
+            UiBlock::GoalCircle(n) => {
+                let line_color = comb::Color::Rgb(0x40, 0x40, 0x40);
+                let text = format!(" Circle {} ", n);
+                let text_w = text.chars().count();
+                let fill = width.saturating_sub(text_w);
+                let left = fill / 2;
+                let right = fill.saturating_sub(left);
+                out.push(Line::from(vec![
+                    Span::styled("─".repeat(left), Style::default().fg(line_color)),
+                    Span::styled(text, Style::default().fg(app.theme.dim)),
+                    Span::styled("─".repeat(right), Style::default().fg(line_color)),
+                ]));
             }
             UiBlock::Notice(s) => {
                 let s = s.clone();
@@ -364,9 +397,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     ])],
                     width,
                 ));
-                if !next_is_notice {
-                    out.push(Line::from(""));
-                }
             }
             UiBlock::Error(s) => {
                 let s = s.clone();
@@ -377,7 +407,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     ])],
                     width,
                 ));
-                out.push(Line::from(""));
             }
         }
     }

@@ -20,6 +20,7 @@ pub mod wrap;
 mod about;
 mod context_menu;
 mod footer;
+mod goal;
 mod input_bars;
 mod menu;
 mod palette;
@@ -118,6 +119,7 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
+    draw_goal(f, area, app);
 }
 
 /// The normal, bottom-anchored conversation layout.
@@ -179,7 +181,8 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let input_y = footer_y.saturating_sub(input_h);
     let follow_y = input_y.saturating_sub(follow_h);
-    let transcript_h = follow_y.saturating_sub(area.y);
+    // One blank row between the transcript and the input/follow-up band.
+    let transcript_h = follow_y.saturating_sub(area.y).saturating_sub(1);
     let transcript = Rect::new(ix, area.y, inner_w, transcript_h);
     let band = |y: u16, h: u16| Rect::new(ix, y, inner_w, h);
 
@@ -248,12 +251,19 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
+    draw_goal(f, area, app);
     draw_context_menu(f, area, app);
 }
 
 fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
     if app.settings_open() {
         settings::draw(f.buffer(), area, app);
+    }
+}
+
+fn draw_goal(f: &mut Frame, area: Rect, app: &App) {
+    if app.goal_overlay_open() {
+        goal::draw(f.buffer(), area, app);
     }
 }
 

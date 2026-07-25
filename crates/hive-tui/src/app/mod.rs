@@ -1,6 +1,7 @@
 //! The TUI application state and how it reacts to `AgentEvent`s.
 
 pub mod files;
+pub mod goal;
 pub mod input;
 pub mod palette;
 pub mod settings;
@@ -66,9 +67,10 @@ use settings::SettingsState;
 use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
-    Block, ChatView, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot, ModeSwitchCard,
-    PlanAction, PlanCard, PlanCorrection, PlanStatus, PlanViewState, PromptHistory, SubagentCard,
-    TerminalCard, TerminalViewPhase, TerminalViewState, Thought, ToolCard, ToolStatus,
+    Block, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot,
+    GoalCard, LoopDetectedCard, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
+    PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState,
+    Thought, ToolCard, ToolStatus, WorkSummaryCard,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -256,6 +258,10 @@ pub struct App {
     pub(crate) about_open: bool,
     /// Configure chat / sidebar overlay.
     pub(crate) settings: Option<SettingsState>,
+    /// `/goal` overlay (editable objective + time limit).
+    pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
+    /// Active goal state for the autonomous loop (footer + transcript card).
+    pub(crate) goal: Option<goal::GoalStatus>,
     /// Persisted UI prefs (`[ui]` in config.toml).
     pub(crate) ui: UiConfig,
     /// Selected row in the slash / `@file` menu.
@@ -319,6 +325,8 @@ pub struct App {
     pub(crate) terminal_view: TerminalViewState,
     /// Body resize waiting to be sent to the PTY manager.
     pub(crate) pending_terminal_resize: Option<(String, u16, u16)>,
+    /// Context window update waiting to be sent to the agent driver.
+    pub(crate) pending_context_update: Option<u64>,
     /// Finished-assistant markdown cache (invalidated on width change).
     pub(crate) md_cache: MdCache,
     /// Cached git project / diff summary for the right sidebar.
@@ -345,6 +353,8 @@ pub struct App {
     pub(crate) palette_list_visible: u16,
     /// Centered context menu for the clicked transcript block.
     pub(crate) context_menu: Option<ContextMenu>,
+    /// When the current turn started (for the "Worked for Nm" summary).
+    pub(crate) turn_started_at: Option<std::time::Instant>,
 }
 
 /// How long the ctrl+c confirmation window lives.
@@ -392,6 +402,8 @@ impl App {
             palette: None,
             about_open: false,
             settings: None,
+            goal_overlay: None,
+            goal: None,
             ui: init.ui.clone(),
             menu_index: 0,
             file_index: None,
@@ -422,6 +434,7 @@ impl App {
             plan_view: PlanViewState::default(),
             terminal_view: TerminalViewState::default(),
             pending_terminal_resize: None,
+            pending_context_update: None,
             md_cache: MdCache::default(),
             project: ProjectSnapshot::default(),
             sidebar_open: !matches!(init.ui.sidebar_mode, SidebarMode::Hidden),
@@ -435,6 +448,7 @@ impl App {
             context_files: Vec::new(),
             palette_list_visible: 0,
             context_menu: None,
+            turn_started_at: None,
         };
         app.blocks.push(Block::Welcome);
         app.project.refresh_if_stale(&app.cwd);
@@ -484,6 +498,31 @@ impl App {
 
     pub fn settings_open(&self) -> bool {
         self.settings.is_some()
+    }
+
+    // ── Goal overlay ────────────────────────────────────────────────────
+
+    pub fn open_goal_overlay(&mut self) {
+        self.close_palette();
+        self.close_settings();
+        self.close_about();
+        self.goal_overlay = Some(goal::GoalOverlayState::new());
+    }
+
+    pub fn close_goal_overlay(&mut self) {
+        self.goal_overlay = None;
+    }
+
+    pub fn goal_overlay_open(&self) -> bool {
+        self.goal_overlay.is_some()
+    }
+
+    pub fn goal_active(&self) -> bool {
+        self.goal.is_some()
+    }
+
+    pub fn goal_paused(&self) -> bool {
+        self.goal.as_ref().is_some_and(|g| g.paused)
     }
 
     /// Apply in-memory UI prefs and ask the driver to persist them.
@@ -636,6 +675,7 @@ impl App {
         self.make_hit = None;
         self.terminal_stop_hit = None;
         self.pending_terminal_resize = None;
+        self.pending_context_update = None;
         self.blur_input();
         let _ = self.input.take();
     }
@@ -676,6 +716,10 @@ impl App {
 
     pub fn take_pending_terminal_resize(&mut self) -> Option<(String, u16, u16)> {
         self.pending_terminal_resize.take()
+    }
+
+    pub fn take_pending_context_update(&mut self) -> Option<u64> {
+        self.pending_context_update.take()
     }
 
     /// Return to the main agent transcript.
@@ -1327,21 +1371,24 @@ Keep everything else unless a note says otherwise.\n",
         if self.running {
             return true;
         }
-        let viewed_terminal = self.terminal_view_id();
+        // Active goal: animate so the footer timer ticks.
+        if self.goal.as_ref().is_some_and(|g| !g.paused) {
+            return true;
+        }
         self.blocks.iter().any(|b| match b {
             Block::Tool(c) => c.status == ToolStatus::Running,
             Block::Subagent(c) => c.status == SubagentStatus::Running,
             Block::Plan(c) => c.status == PlanStatus::Writing,
-            // Backgrounded long-lived PTYs (dev servers, watchers) must not
-            // pin the UI at ANIM_TICK forever — only animate when on-screen.
+            // Running terminals animate their spinner card (like subagents).
             Block::Terminal(c) => {
                 matches!(c.process, hive_core::TerminalProcessState::Running)
-                    && viewed_terminal == Some(c.id.as_str())
             }
             Block::Reasoning(th) => th.elapsed_ms.is_none(),
             Block::Assistant {
                 streaming: true, ..
             } => true,
+            // Compaction in progress: spinner animates.
+            Block::Compacted(c) => c.before.is_none(),
             _ => false,
         })
     }
@@ -1599,6 +1646,8 @@ Keep everything else unless a note says otherwise.\n",
         self.close_palette();
         self.close_about();
         self.close_context_menu();
+        self.close_goal_overlay();
+        self.goal = None;
         self.running = false;
         self.click_hits.clear();
         self.assistant_row_hits.clear();
@@ -1617,6 +1666,7 @@ Keep everything else unless a note says otherwise.\n",
         self.plan_view = PlanViewState::default();
         self.terminal_view = TerminalViewState::default();
         self.pending_terminal_resize = None;
+        self.pending_context_update = None;
         self.md_cache = MdCache::default();
     }
 
@@ -1986,6 +2036,7 @@ Keep everything else unless a note says otherwise.\n",
         match ev {
             AgentEvent::TurnStarted => {
                 self.running = true;
+                self.turn_started_at = Some(std::time::Instant::now());
                 true
             }
             AgentEvent::AssistantStarted => {
@@ -2099,9 +2150,33 @@ Keep everything else unless a note says otherwise.\n",
                 self.flash(format!("Switched to {} mode", mode.title()));
                 true
             }
+            AgentEvent::LoopDetected { tool: _ } => {
+                self.blocks.push(Block::LoopDetected(LoopDetectedCard));
+                self.scroll_from_bottom = 0;
+                self.flash("Loop detected · restarting task");
+                true
+            }
+            AgentEvent::Compacted { before, after } => {
+                // Replace the in-progress compaction card if present, else add.
+                if let Some(Block::Compacted(c)) = self.blocks.iter_mut().rev().find(|b| matches!(b, Block::Compacted(_))) {
+                    c.before = before;
+                    c.after = after;
+                } else {
+                    self.blocks.push(Block::Compacted(CompactedCard {
+                        before,
+                        after,
+                    }));
+                }
+                self.scroll_from_bottom = 0;
+                if let Some(b) = before {
+                    self.flash(format!("Context compacted · {} → {}", short_tokens(b), short_tokens(after)));
+                }
+                true
+            }
             AgentEvent::TerminalStarted {
                 id,
                 command,
+                description,
                 rows,
                 cols,
             } => {
@@ -2115,6 +2190,7 @@ Keep everything else unless a note says otherwise.\n",
                     self.blocks.push(Block::Terminal(Box::new(TerminalCard {
                         id,
                         command,
+                        description,
                         controller: TerminalController::Agent,
                         process: TerminalProcessState::Running,
                         revision: 0,
@@ -2128,6 +2204,7 @@ Keep everything else unless a note says otherwise.\n",
             AgentEvent::TerminalStartFailed {
                 id,
                 command,
+                description,
                 message,
             } => {
                 self.close_thought();
@@ -2140,6 +2217,7 @@ Keep everything else unless a note says otherwise.\n",
                     self.blocks.push(Block::Terminal(Box::new(TerminalCard {
                         id,
                         command,
+                        description,
                         controller: TerminalController::Agent,
                         process: TerminalProcessState::Failed {
                             message: message.clone(),
@@ -2221,11 +2299,15 @@ Keep everything else unless a note says otherwise.\n",
             AgentEvent::ModelChanged {
                 id,
                 display,
+                context,
                 cost_input,
                 cost_output,
             } => {
                 self.model = id;
                 self.model_display = display;
+                if context > 0 {
+                    self.context_window = context;
+                }
                 self.cost_input = cost_input;
                 self.cost_output = cost_output;
                 true
@@ -2240,11 +2322,27 @@ Keep everything else unless a note says otherwise.\n",
                         group: m.group,
                         connection_id: m.connection_id,
                         vision: m.vision,
+                        context: m.context,
                         cost_input: m.cost_input,
                         cost_output: m.cost_output,
                     })
                     .collect();
                 self.models_catalog = ModelsCatalogState::Ready;
+                // Apply context window / cost for the active model from the
+                // freshly loaded catalog (so the footer shows the right value
+                // without requiring a manual /model re-pick).
+                if let Some(m) = self
+                    .model_choices
+                    .iter()
+                    .find(|m| m.key == self.model)
+                {
+                    if m.context > 0 {
+                        self.context_window = m.context;
+                        self.pending_context_update = Some(m.context);
+                    }
+                    self.cost_input = m.cost_input;
+                    self.cost_output = m.cost_output;
+                }
                 if let Some(pal) = self.palette.as_mut() {
                     if pal.mode == palette::PaletteMode::Models {
                         pal.clamp_selection(&self.model_choices, &self.connections);
@@ -2271,6 +2369,76 @@ Keep everything else unless a note says otherwise.\n",
                 }
                 true
             }
+            AgentEvent::GoalSet { objective, deadline } => {
+                self.goal = Some(goal::GoalStatus {
+                    objective: objective.clone(),
+                    deadline,
+                    paused: false,
+                    circle: 0,
+                });
+                self.blocks.push(Block::User(objective.clone()));
+                self.blocks.push(Block::Goal(GoalCard {
+                    objective,
+                    deadline,
+                }));
+                self.running = true;
+                self.turn_started_at = Some(std::time::Instant::now());
+                self.scroll_from_bottom = 0;
+                true
+            }
+            AgentEvent::GoalContinue { objective, remaining_secs } => {
+                if let Some(g) = self.goal.as_mut() {
+                    g.objective = objective;
+                    if let Some(d) = g.deadline {
+                        let now = std::time::Instant::now();
+                        g.deadline = Some(now + std::time::Duration::from_secs(remaining_secs));
+                        let _ = d;
+                    }
+                    g.circle += 1;
+                }
+                // Treat like TurnFinished for UI state (stop spinner).
+                self.running = false;
+                self.close_thought();
+                self.finalize_streaming();
+                // "Circle N" summary instead of "Worked for Nm" during a goal loop.
+                if let Some(g) = self.goal.as_ref() {
+                    self.blocks.push(Block::GoalCircle(g.circle));
+                    self.scroll_from_bottom = 0;
+                }
+                self.project.invalidate();
+                self.refresh_project();
+                true
+            }
+            AgentEvent::GoalExpired { objective } => {
+                self.goal = None;
+                self.running = false;
+                self.close_thought();
+                self.finalize_streaming();
+                self.blocks.push(Block::Notice(format!("Goal time expired: {objective}")));
+                self.scroll_from_bottom = 0;
+                self.project.invalidate();
+                self.refresh_project();
+                true
+            }
+            AgentEvent::GoalStopped => {
+                self.goal = None;
+                self.flash("Goal stopped");
+                true
+            }
+            AgentEvent::GoalPaused => {
+                if let Some(g) = self.goal.as_mut() {
+                    g.paused = true;
+                }
+                self.flash("Goal paused");
+                true
+            }
+            AgentEvent::GoalResumed => {
+                if let Some(g) = self.goal.as_mut() {
+                    g.paused = false;
+                }
+                self.flash("Goal resumed");
+                true
+            }
             AgentEvent::Notice(s) => {
                 // Status feedback (model/provider switch, interrupt, …) lives in
                 // the bottom toast — same place as Ctrl+C — not the transcript.
@@ -2285,6 +2453,16 @@ Keep everything else unless a note says otherwise.\n",
                 self.running = false;
                 self.close_thought();
                 self.finalize_streaming();
+                // "Worked for Nm" summary line at the end of the turn.
+                if self.ui.show_work_summary {
+                    if let Some(started) = self.turn_started_at.take() {
+                        let secs = started.elapsed().as_secs();
+                        self.blocks.push(Block::WorkSummary(WorkSummaryCard {
+                            secs,
+                        }));
+                        self.scroll_from_bottom = 0;
+                    }
+                }
                 // Force a fresh git snapshot after the agent may have edited files.
                 self.project.invalidate();
                 self.refresh_project();
@@ -2804,6 +2982,14 @@ fn is_subagent_tool(name: &str) -> bool {
     matches!(name, "verify_project" | "spawn_subagent" | "spawn_swarm")
 }
 
+fn short_tokens(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.0}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn is_image_path(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
@@ -3005,11 +3191,12 @@ mod tests {
     }
 
     #[test]
-    fn background_running_terminal_does_not_force_animation() {
+    fn running_terminal_animates_spinner() {
         let mut a = app();
         a.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "sleep 999".into(),
+            description: "Wait for server".into(),
             rows: 20,
             cols: 80,
         });
@@ -3019,8 +3206,6 @@ mod tests {
             process: TerminalProcessState::Running,
             revision: 1,
         });
-        assert!(!a.needs_animation());
-        a.open_terminal_view("term-1".into());
         assert!(a.needs_animation());
     }
 
@@ -3085,11 +3270,55 @@ mod tests {
     }
 
     #[test]
+    fn loop_detected_adds_card_and_flash() {
+        let mut a = app();
+        assert!(a.apply(AgentEvent::LoopDetected {
+            tool: "read_file".into(),
+        }));
+        assert!(matches!(a.blocks.last(), Some(Block::LoopDetected(_))));
+
+        let buf = comb::render(comb::Size::new(120, 40), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Loop detected"), "{text}");
+        assert!(text.contains("restarting task"), "{text}");
+    }
+
+    #[test]
+    fn compacted_card_shows_token_reduction() {
+        let mut a = app();
+        // In-progress: spinner.
+        a.apply(AgentEvent::Compacted {
+            before: None,
+            after: 0,
+        });
+        assert!(a.needs_animation());
+        let buf = comb::render(comb::Size::new(120, 40), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Compacting context"), "{text}");
+
+        // Done: token reduction.
+        a.apply(AgentEvent::Compacted {
+            before: Some(200_000),
+            after: 15_000,
+        });
+        // Flash from the event keeps animation alive briefly; clear it.
+        a.flash_msg = None;
+        a.ctrl_c_armed = None;
+        assert!(!a.needs_animation());
+        let buf = comb::render(comb::Size::new(120, 40), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("Compacted context"), "{text}");
+        assert!(text.contains("200k"), "{text}");
+        assert!(text.contains("15k"), "{text}");
+    }
+
+    #[test]
     fn terminal_events_update_one_persistent_card() {
         let mut app = app();
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
+            description: "Install a color theme".into(),
             rows: 30,
             cols: 120,
         });
@@ -3119,7 +3348,7 @@ mod tests {
             })
             .collect();
         assert_eq!(cards.len(), 1);
-        assert!(cards[0].preview().contains("Choose preset"));
+        assert_eq!(cards[0].description, "Install a color theme");
     }
 
     #[test]
@@ -3128,6 +3357,7 @@ mod tests {
         app.apply(AgentEvent::TerminalStartFailed {
             id: "term-failed".into(),
             command: "installer".into(),
+            description: "Install something".into(),
             message: "cannot spawn".into(),
         });
 

@@ -194,6 +194,7 @@ impl TerminalSession {
     pub(crate) fn spawn(
         id: String,
         command_text: &str,
+        description: &str,
         cwd: &Path,
         events: EventSender,
     ) -> Result<Arc<Self>, TerminalError> {
@@ -288,6 +289,7 @@ impl TerminalSession {
         let _ = session.events.send(AgentEvent::TerminalStarted {
             id: session.id.clone(),
             command: session.command.clone(),
+            description: description.to_string(),
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
         });

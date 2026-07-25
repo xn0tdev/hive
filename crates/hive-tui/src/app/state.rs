@@ -64,6 +64,8 @@ impl ToolCard {
 pub struct TerminalCard {
     pub id: String,
     pub command: String,
+    /// Why the agent started this terminal (from the tool call).
+    pub description: String,
     pub controller: TerminalController,
     pub process: TerminalProcessState,
     pub revision: u64,
@@ -73,19 +75,6 @@ pub struct TerminalCard {
 }
 
 impl TerminalCard {
-    pub fn preview(&self) -> String {
-        let contents = self.screen.contents();
-        let mut lines = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .rev()
-            .take(2)
-            .collect::<Vec<_>>();
-        lines.reverse();
-        lines.join(" · ")
-    }
-
     pub fn secs(&self) -> f64 {
         match self.elapsed_ms {
             Some(ms) => ms as f64 / 1000.0,
@@ -93,17 +82,13 @@ impl TerminalCard {
         }
     }
 
+    /// Short process state label for the status line.
     pub fn status_text(&self) -> String {
-        let controller = match self.controller {
-            TerminalController::Agent => "AGENT",
-            TerminalController::User => "USER",
-        };
-        let process = match &self.process {
+        match &self.process {
             TerminalProcessState::Running => "running".to_string(),
             TerminalProcessState::Exited { code } => format!("exited {code}"),
             TerminalProcessState::Failed { message } => format!("failed: {message}"),
-        };
-        format!("{controller} · {process}")
+        }
     }
 }
 
@@ -404,6 +389,24 @@ pub struct ModeSwitchCard {
     pub reason: String,
 }
 
+/// Inline card announcing a detected tool-call loop.
+#[derive(Clone)]
+pub struct LoopDetectedCard;
+
+/// Inline card showing context compaction in progress or completed.
+#[derive(Clone)]
+pub struct CompactedCard {
+    /// None while compacting (spinner), Some(before) when done.
+    pub before: Option<u64>,
+    pub after: u64,
+}
+
+/// Inline card: "Worked for Nm" summary at the end of a turn.
+#[derive(Clone)]
+pub struct WorkSummaryCard {
+    pub secs: u64,
+}
+
 /// One renderable chunk of the transcript.
 pub enum Block {
     /// The greeting shown on a fresh chat.
@@ -423,6 +426,23 @@ pub enum Block {
     Plan(PlanCard),
     /// The agent switched its working mode with a reason.
     ModeSwitch(ModeSwitchCard),
+    /// The agent was stuck in a tool-call loop; recovery was attempted.
+    LoopDetected(LoopDetectedCard),
+    /// Context compaction in progress or completed.
+    Compacted(CompactedCard),
+    /// "Worked for Nm" summary at the end of a turn.
+    WorkSummary(WorkSummaryCard),
+    /// Goal set — autonomous agent loop card.
+    Goal(GoalCard),
+    /// "Circle N" separator between goal turns.
+    GoalCircle(u64),
     Notice(String),
     Error(String),
+}
+
+/// Goal card shown in the transcript when `/goal` is started.
+#[derive(Debug, Clone)]
+pub struct GoalCard {
+    pub objective: String,
+    pub deadline: Option<std::time::Instant>,
 }

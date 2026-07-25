@@ -104,10 +104,16 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
             ("Chat".into(), String::new()),
             ("Sidebar".into(), String::new()),
         ],
-        SettingsPage::Chat => vec![(
-            "Always show thoughts".into(),
-            on_off(app.ui.thoughts_always_open),
-        )],
+        SettingsPage::Chat => vec![
+            (
+                "Always show thoughts".into(),
+                on_off(app.ui.thoughts_always_open),
+            ),
+            (
+                "Work summary".into(),
+                on_off(app.ui.show_work_summary),
+            ),
+        ],
         SettingsPage::Sidebar => vec![
             ("Panel".into(), app.ui.sidebar_mode.label().into()),
             (
@@ -135,7 +141,7 @@ struct Geom {
 fn geom(area: Rect, st: &SettingsState) -> Geom {
     let rows = match st.page {
         SettingsPage::Root => 2,
-        SettingsPage::Chat => 1,
+        SettingsPage::Chat => 2,
         SettingsPage::Sidebar => 3,
     };
     let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);

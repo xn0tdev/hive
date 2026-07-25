@@ -27,6 +27,13 @@ fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult
         .ok_or_else(|| ToolResult::error(format!("missing '{key}'")))
 }
 
+fn optional_string(args: &Value, key: &str) -> Option<String> {
+    str_arg(args, key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn serialized(value: &impl serde::Serialize) -> ToolResult {
     match serde_json::to_string_pretty(value) {
         Ok(value) => ToolResult::ok(value),
@@ -52,6 +59,10 @@ when a CLI requires prompts or terminal behavior that `run_shell` cannot provide
                 "command": {
                     "type": "string",
                     "description": "Shell command to run in the interactive terminal."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short note on why this terminal is being started (shown in the UI)."
                 }
             },
             "required": ["command"]
@@ -63,11 +74,12 @@ when a CLI requires prompts or terminal behavior that `run_shell` cannot provide
             Ok(command) => command,
             Err(result) => return result,
         };
+        let description = optional_string(&args, "description").unwrap_or_default();
         let manager = match manager(ctx) {
             Ok(manager) => manager,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        match manager.start(command, &ctx.cwd).await {
+        match manager.start(command, &description, &ctx.cwd).await {
             Ok(snapshot) => serialized(&snapshot),
             Err(error) => ToolResult::error(error.to_string()),
         }
