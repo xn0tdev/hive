@@ -73,11 +73,12 @@ impl MdStyles {
 #[derive(Clone)]
 struct IndentCtx {
     prefix: Vec<Span>,
+    marker: Option<Vec<Span>>,
 }
 
 impl IndentCtx {
-    fn new(prefix: Vec<Span>) -> Self {
-        Self { prefix }
+    fn new(prefix: Vec<Span>, marker: Option<Vec<Span>>) -> Self {
+        Self { prefix, marker }
     }
 }
 
@@ -314,6 +315,7 @@ impl<'t> Writer<'t> {
         }
         self.indent_stack.push(IndentCtx::new(
             vec![Span::styled("▎ ", self.styles.blockquote)],
+            None,
         ));
     }
 
@@ -340,9 +342,9 @@ impl<'t> Writer<'t> {
 
     fn start_item(&mut self) {
         self.flush_line();
+        self.pending_marker = true;
         let depth = self.list_indices.len();
-        let _is_ordered = self.list_indices.last().is_some_and(Option::is_some);
-        let indent_w = depth.saturating_sub(1) * 2;
+        let indent_w = (depth - 1) * 2;
 
         let marker = if let Some(last) = self.list_indices.last_mut() {
             match last {
@@ -361,13 +363,11 @@ impl<'t> Writer<'t> {
         };
 
         let marker_w = spans_width(&marker);
-        let prefix = vec![Span::raw(" ".repeat(marker_w))];
+        // Continuation lines indent to align text after the marker.
+        let cont = indent_w + marker_w;
+        let prefix = vec![Span::raw(" ".repeat(cont))];
         self.indent_stack
-            .push(IndentCtx::new(prefix));
-        // Push marker directly into current so it's on the same line as text.
-        for s in marker {
-            self.current.push(s);
-        }
+            .push(IndentCtx::new(prefix, Some(marker)));
         self.needs_newline = false;
     }
 
@@ -477,29 +477,13 @@ impl<'t> Writer<'t> {
             self.push_span_to_cell(Span::styled(c.to_string(), self.styles.code));
             return;
         }
-        // Inline code chip: pad with spaces, apply code_bg.
+        // Inline code chip: apply code_bg.
         let content = c.to_string();
-        let lead = content.len() - content.trim_start().len();
-        let trail = content.len() - content.trim_end().len();
-        let inner_start = lead;
-        let inner_end = content.len().saturating_sub(trail);
-        let base = Style::default().fg(self.theme.fg);
-        if lead > 0 {
-            self.current.push(Span::styled(content[..lead].to_string(), base));
-        }
-        if inner_start < inner_end {
-            self.current.push(Span::styled(
-                format!(" {} ", &content[inner_start..inner_end]),
-                self.styles.code,
-            ));
+        if content.trim().is_empty() {
+            self.current.push(Span::styled("  ", self.styles.code));
         } else {
-            self.current.push(Span::styled("   ", self.styles.code));
-        }
-        if trail > 0 {
-            self.current.push(Span::styled(
-                content[content.len() - trail..].to_string(),
-                base,
-            ));
+            self.current
+                .push(Span::styled(content, self.styles.code));
         }
     }
 
@@ -671,7 +655,7 @@ impl<'t> Writer<'t> {
             }
         }
 
-        let total_chrome = (cols + 1) + cols * (2 * TABLE_PAD);
+        let total_chrome = (cols - 1) * TABLE_GAP + (cols - 1) * TABLE_PAD;
         let budget = self
             .wrap_width
             .saturating_sub(total_chrome)
@@ -684,7 +668,8 @@ impl<'t> Writer<'t> {
                 if i > 0 {
                     s.push_str(&" ".repeat(TABLE_GAP));
                 }
-                s.push_str(&ch.to_string().repeat(w + 2 * TABLE_PAD));
+                // First column: no leading pad; rest: pad after.
+                s.push_str(&ch.to_string().repeat(w + TABLE_PAD));
             }
             Line::from(Span::styled(s, chrome))
         };
@@ -724,7 +709,10 @@ impl<'t> Writer<'t> {
         for li in 0..row_h {
             let mut spans = Vec::new();
             for (ci, w) in widths.iter().enumerate() {
-                spans.push(Span::raw(" ".repeat(TABLE_PAD)));
+                if ci > 0 {
+                    spans.push(Span::raw(" ".repeat(TABLE_GAP)));
+                }
+                // No leading pad on first column; pad after content.
                 let line = wrapped[ci].get(li).cloned().unwrap_or_default();
                 let lw: usize = line.spans.iter().map(|s| s.content.width()).sum();
                 let rem = w.saturating_sub(lw);
@@ -739,12 +727,11 @@ impl<'t> Writer<'t> {
                 for s in line.spans {
                     spans.push(s);
                 }
-                if rp > 0 {
+                if rp > 0 && ci + 1 < widths.len() {
                     spans.push(Span::raw(" ".repeat(rp)));
                 }
-                spans.push(Span::raw(" ".repeat(TABLE_PAD)));
                 if ci + 1 < widths.len() {
-                    spans.push(Span::raw(" ".repeat(TABLE_GAP)));
+                    spans.push(Span::raw(" ".repeat(TABLE_PAD)));
                 }
             }
             out.push(Line::from(spans));
@@ -762,11 +749,24 @@ impl<'t> Writer<'t> {
     }
 
     fn push_line(&mut self, line: Line) {
-        // Apply indent prefix from indent stack.
         let mut full = Line::new();
-        for ctx in &self.indent_stack {
-            for s in &ctx.prefix {
-                full.push(s.clone());
+        let last = self.indent_stack.len().saturating_sub(1);
+        for (i, ctx) in self.indent_stack.iter().enumerate() {
+            // On the first line of a list item, the marker already includes
+            // the indent — skip the prefix for the innermost ctx.
+            if i == last && self.pending_marker {
+                // marker will be added below; skip prefix
+            } else {
+                for s in &ctx.prefix {
+                    full.push(s.clone());
+                }
+            }
+            if i == last && self.pending_marker {
+                if let Some(m) = &ctx.marker {
+                    for s in m {
+                        full.push(s.clone());
+                    }
+                }
             }
         }
         for s in line.spans {
@@ -789,6 +789,7 @@ impl<'t> Writer<'t> {
         if !self.current.is_empty() {
             let spans = std::mem::take(&mut self.current);
             self.push_line(Line::from(spans));
+            self.pending_marker = false;
         }
     }
 
