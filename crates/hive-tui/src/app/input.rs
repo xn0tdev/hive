@@ -336,11 +336,11 @@ fn normalize_paste(text: &str) -> String {
     out
 }
 
-/// Word-wrap one hard line into chunks of at most `w` display columns.
-/// Returns `(text, char_offset_in_line)` for each chunk. Words that don't
-/// fit wrap to the next row whole; single words longer than `w` char-wrap.
-/// A trailing empty chunk is appended when the caret would sit past the last
-/// glyph (exact-width fill or trailing spaces).
+/// Char-wrap one hard line into chunks of at most `w` display columns.
+/// Returns `(text, char_offset_in_line)` for each chunk. A space that would
+/// land on a new wrapped row is kept on the current row (no empty-looking
+/// next line). A trailing empty chunk is appended when the caret would sit
+/// past the last glyph (exact-width fill).
 fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
     if line.is_empty() {
         return vec![(String::new(), 0)];
@@ -354,47 +354,29 @@ fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
     let mut start = 0usize;
 
     loop {
-        // Skip leading spaces on wrapped rows (not the first row).
-        while !rows.is_empty() && start < chars.len() && chars[start] == ' ' {
-            start += 1;
-        }
-
         if start >= chars.len() {
-            // Trailing empty row for the caret.
-            rows.push((String::new(), start));
             break;
         }
 
         let mut end = start;
         let mut width = 0usize;
-        let mut last_space = None;
 
         while end < chars.len() {
             let cw = glyph_width(chars[end]);
             if width > 0 && width + cw > w {
                 break;
             }
-            if chars[end] == ' ' && end > start {
-                last_space = Some(end);
-            }
             width += cw;
             end += 1;
         }
 
         if end < chars.len() {
-            if let Some(space) = last_space {
-                let text: String = chars[start..space].iter().collect();
-                rows.push((text, start));
-                start = space + 1;
-            } else {
-                let text: String = chars[start..end].iter().collect();
-                rows.push((text, start));
-                start = end;
-            }
+            let text: String = chars[start..end].iter().collect();
+            rows.push((text, start));
+            start = end;
         } else {
             let text: String = chars[start..].iter().collect();
             rows.push((text.clone(), start));
-            // Exact-width fill → add empty trailing row for the caret.
             if display_width(&text) >= w {
                 rows.push((String::new(), chars.len()));
             }
@@ -530,20 +512,16 @@ mod tests {
     }
 
     #[test]
-    fn word_wrap_keeps_words_together() {
+    fn trailing_space_does_not_create_empty_row() {
         let i = InputState {
-            value: "hello world".into(),
+            value: "abc ".into(), // 4 chars, width 4
             ..Default::default()
         };
-        let rows = i.wrapped_rows(7);
-        // "hello" = 5 cols fits, " world" = 6 cols → 5+6=11 > 7, wrap "world"
-        assert_eq!(
-            rows,
-            vec![
-                (true, "hello".into()),
-                (false, "world".into()),
-            ]
-        );
+        let rows = i.wrapped_rows(4);
+        // "abc " fills the width → one row, trailing empty for caret
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "abc ");
+        assert_eq!(rows[1].1, "");
     }
 
     #[test]
