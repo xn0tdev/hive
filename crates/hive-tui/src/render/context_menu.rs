@@ -20,7 +20,8 @@ fn geom(area: Rect, n_items: u16) -> MenuGeom {
     let prefer_w = area.width / 2;
     let w = prefer_w.clamp(MIN_W, MAX_W).min(area.width);
     let list_h = n_items.max(1);
-    let h = (PAD_Y * 2 + 1 + list_h) // pad + title + items
+    // pad + title + gap + items
+    let h = (PAD_Y * 2 + 2 + list_h)
         .min(area.height.saturating_sub(2));
     let x = area.x + (area.width - w) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -31,7 +32,8 @@ fn geom(area: Rect, n_items: u16) -> MenuGeom {
         width: win.width.saturating_sub(PAD_X * 2),
         height: win.height.saturating_sub(PAD_Y * 2),
     };
-    let list = Rect::new(content.x, content.y + 1, content.width, list_h);
+    // title row, then a blank gap, then items
+    let list = Rect::new(content.x, content.y + 2, content.width, list_h);
     MenuGeom { win, content, list }
 }
 
@@ -72,6 +74,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     ]);
     crate::render::strip_paint::set_line_on_strip(
         buf, g.content.x, g.content.y, &title_line, g.content.width, panel,
+    );
+
+    // Blank gap row between title and items.
+    let gap_line = Line::from(Span::styled("", base));
+    crate::render::strip_paint::set_line_on_strip(
+        buf, g.content.x, g.content.y + 1, &gap_line, g.content.width, panel,
     );
 
     // Item rows.
