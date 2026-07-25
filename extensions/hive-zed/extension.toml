@@ -14,22 +14,22 @@ icon = "icon.svg"
 archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.1/hive-aarch64-apple-darwin.tar.gz"
 cmd = "./hive"
 args = ["--acp"]
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sha256 = "c959e9bb32e78cc072d343b655ea24b1dd44b1461e6d5a765bab250e1067d509"
 
 [agent_servers.hive.targets.darwin-x86_64]
 archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.1/hive-x86_64-apple-darwin.tar.gz"
 cmd = "./hive"
 args = ["--acp"]
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sha256 = "82c892454684e0929476380c4615b0e6e7c37c60f31415f6d054c610e355ebd5"
 
 [agent_servers.hive.targets.linux-x86_64]
 archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.1/hive-x86_64-unknown-linux-gnu.tar.gz"
 cmd = "./hive"
 args = ["--acp"]
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sha256 = "c4d4a27638b21293d1691b918b8555591f1c4732ab4449c20fbb01308564b096"
 
 [agent_servers.hive.targets.windows-x86_64]
 archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.1/hive-x86_64-pc-windows-msvc.zip"
 cmd = "hive.exe"
 args = ["--acp"]
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sha256 = "acaf390d7346971e3da31879a02d4111b48219f62b3fe21995b1eb57890c84b2"
