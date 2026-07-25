@@ -572,7 +572,7 @@ fn handle_key(
         }
         // Multiline: arrows move inside the input; at the edges they scroll chat.
         // Empty composer + queued follow-up: ↑ pulls it back for editing.
-        // Up/down also browse prompt history (shell-style recall).
+        // Up/down browse prompt history only when the input is empty.
         KeyCode::Up => {
             if app.prompt_history.is_browsing() {
                 app.history_up();
@@ -580,7 +580,6 @@ fn handle_key(
             } else if (app.input.is_empty() && app.recall_follow_up())
                 || (app.input.is_empty() && app.history_up())
                 || app.input.up()
-                || app.history_up()
             {
                 composer_activity = true;
             } else {
