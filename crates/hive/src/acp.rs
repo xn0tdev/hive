@@ -2,8 +2,9 @@
 //!
 //! JSON-RPC 2.0, newline-delimited, stdin → stdout.
 //! Implements: `initialize`, `session/new`, `session/prompt`, `session/cancel`,
-//! `$/cancel_request`.
-//! Emits `session/update` notifications for agent text, tool calls, and usage.
+//! `session/set_mode`, `$/cancel_request`.
+//! Emits `session/update` notifications for agent text, thoughts, tool calls,
+//! plan updates, mode changes, and usage.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,10 +13,10 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use hive_core::event::{AgentEvent, EventReceiver};
-use hive_core::{Agent, AgentMode, FollowUpSlot, UserInput};
+use hive_core::{Agent, AgentMode, FollowUpSlot, UserInput, DEFAULT_CONTEXT_WINDOW};
 
 use crate::wire;
 
@@ -23,6 +24,8 @@ use crate::wire;
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Timeout for a single stdout write (prevents pipe-backpressure deadlock).
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for the drain task to flush after a turn before giving up.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub async fn run(cfg: Arc<hive_core::config::AppConfig>) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -34,12 +37,17 @@ pub async fn run(cfg: Arc<hive_core::config::AppConfig>) -> Result<()> {
 
     let agent = wire::build_agent(&cfg, event_tx.clone());
 
+    let context_window = effective_context_window(cfg.agent.context_window);
+
     let state = Arc::new(AcpState {
         agent: Mutex::new(agent),
         session_id: Mutex::new(String::new()),
         interrupt: interrupt.clone(),
         follow_up: follow_up.clone(),
         out: stdout.clone(),
+        context_window,
+        errored: Arc::new(AtomicBool::new(false)),
+        drain_signal: Arc::new(Mutex::new(None)),
     });
 
     let state_for_drain = state.clone();
@@ -80,6 +88,9 @@ pub async fn run(cfg: Arc<hive_core::config::AppConfig>) -> Result<()> {
             "session/prompt" => {
                 handle_session_prompt(id, params, &state, &mut reader).await;
             }
+            "session/set_mode" => {
+                handle_set_mode(id, params, &state).await;
+            }
             "session/cancel" | "$/cancel_request" => {
                 state.interrupt.store(true, Ordering::Relaxed);
             }
@@ -104,6 +115,19 @@ struct AcpState {
     interrupt: Arc<AtomicBool>,
     follow_up: FollowUpSlot,
     out: Arc<Mutex<tokio::io::Stdout>>,
+    context_window: u64,
+    /// Set when an `AgentEvent::Error` is seen during a turn → `refusal` stopReason.
+    errored: Arc<AtomicBool>,
+    /// One-shot signal fired by the drain task after `TurnFinished` is processed.
+    drain_signal: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+fn effective_context_window(configured: u64) -> u64 {
+    if configured == 0 {
+        DEFAULT_CONTEXT_WINDOW
+    } else {
+        configured
+    }
 }
 
 fn extract_prompt_text(params: &Value) -> String {
@@ -136,6 +160,18 @@ async fn write_msg(out: &Arc<Mutex<tokio::io::Stdout>>, msg: &str) {
     let _ = tokio::time::timeout(WRITE_TIMEOUT, write_fut).await;
 }
 
+/// The `modes` object advertised in `initialize` and `session/new` responses.
+fn modes_state() -> Value {
+    json!({
+        "currentModeId": "make",
+        "availableModes": [
+            {"id": "make", "name": "Make", "description": "Full coding agent"},
+            {"id": "plan", "name": "Plan", "description": "Research and plan only — no project edits or shell"},
+            {"id": "multitask", "name": "Multitask", "description": "Orchestrate parallel subagents"}
+        ]
+    })
+}
+
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": 1,
@@ -152,7 +188,8 @@ fn initialize_result() -> Value {
             "title": "Hive",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "authMethods": []
+        "authMethods": [],
+        "modes": modes_state()
     })
 }
 
@@ -162,6 +199,17 @@ async fn handle_session_new(id: Option<Value>, params: Value, state: &Arc<AcpSta
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    // mcpServers and additionalDirectories are part of the spec but Hive uses
+    // its own tool set — parse and ignore.
+    if let Some(servers) = params.get("mcpServers").and_then(|v| v.as_array()) {
+        if !servers.is_empty() {
+            tracing::debug!(
+                "session/new: ignoring {} mcpServers (not yet supported)",
+                servers.len()
+            );
+        }
+    }
 
     let session_id = format!("sess_{}", uuid::Uuid::new_v4().simple());
 
@@ -173,12 +221,42 @@ async fn handle_session_new(id: Option<Value>, params: Value, state: &Arc<AcpSta
     }
     drop(agent);
 
-    write_msg(&state.out, &reply(id, json!({ "sessionId": session_id }))).await;
+    write_msg(
+        &state.out,
+        &reply(
+            id,
+            json!({ "sessionId": session_id, "modes": modes_state() }),
+        ),
+    )
+    .await;
+}
+
+/// Handle `session/set_mode` — switch the agent's working mode.
+async fn handle_set_mode(id: Option<Value>, params: Value, state: &Arc<AcpState>) {
+    let mode_id = params.get("modeId").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mode = match AgentMode::parse(mode_id) {
+        Some(m) => m,
+        None => {
+            write_msg(
+                &state.out,
+                &error_reply(id, -32602, &format!("unknown modeId: {mode_id}")),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut agent = state.agent.lock().await;
+    agent.set_mode(mode);
+    drop(agent);
+
+    write_msg(&state.out, &reply(id, json!({}))).await;
 }
 
 /// Handle session/prompt. This is the critical path — we must:
 /// 1. Run the agent turn concurrently with stdin reads (so cancel works).
-/// 2. After the turn ends, drain all remaining events before sending the response.
+/// 2. After the turn ends, wait for the drain task to flush all events.
 /// 3. Return "cancelled" stopReason if interrupted, "refusal" on error.
 async fn handle_session_prompt(
     id: Option<Value>,
@@ -199,8 +277,17 @@ async fn handle_session_prompt(
         .to_string();
     *state.session_id.lock().await = session_id;
     state.interrupt.store(false, Ordering::Relaxed);
+    state.errored.store(false, Ordering::Relaxed);
     if let Ok(mut g) = state.follow_up.lock() {
         *g = None;
+    }
+
+    // Set up a fresh drain barrier — the drain task fires this after
+    // processing TurnFinished.
+    let (drain_tx, drain_rx) = oneshot::channel::<()>();
+    {
+        let mut g = state.drain_signal.lock().await;
+        *g = Some(drain_tx);
     }
 
     let interrupt = state.interrupt.clone();
@@ -223,14 +310,6 @@ async fn handle_session_prompt(
             follow_up,
         );
 
-        // We need to concurrently read stdin for cancel notifications while the
-        // turn runs. But we can't easily pass the BufReader around. Instead,
-        // we rely on the interrupt flag being set by the main loop — BUT the
-        // main loop IS this function. So we need select! here.
-        //
-        // Strategy: use select! between the turn and reading one line from stdin.
-        // If we get a cancel notification, set interrupt and continue waiting
-        // for the turn to finish.
         tokio::pin!(turn_fut);
 
         let final_text;
@@ -274,21 +353,22 @@ async fn handle_session_prompt(
         final_text
     };
 
-    // Drain remaining events before sending the response (fixes race #2).
-    // Give the drain task a moment to flush.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the drain task to flush all remaining events (TurnFinished).
+    // Fall back to a timeout so a missed signal never hangs the response.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain_rx).await;
 
-    // Determine stop reason.
-    let stop_reason = if cancelled.load(Ordering::Relaxed)
-        || state.interrupt.load(Ordering::Relaxed)
-    {
+    // Determine stop reason: refusal > cancelled > end_turn.
+    let stop_reason = if state.errored.load(Ordering::Relaxed) {
+        "refusal"
+    } else if cancelled.load(Ordering::Relaxed) || state.interrupt.load(Ordering::Relaxed) {
         "cancelled"
     } else {
         "end_turn"
     };
 
-    // Reset interrupt for next turn.
+    // Reset flags for next turn.
     state.interrupt.store(false, Ordering::Relaxed);
+    state.errored.store(false, Ordering::Relaxed);
 
     write_msg(&state.out, &reply(id, json!({ "stopReason": stop_reason }))).await;
 }
@@ -298,8 +378,29 @@ async fn drain_events(mut events: EventReceiver, state: Arc<AcpState>) {
     let mut current_msg_id: Option<String> = None;
 
     while let Some(event) = events.recv().await {
+        // Track errors for refusal stopReason.
+        if matches!(event, AgentEvent::Error(_)) {
+            state.errored.store(true, Ordering::Relaxed);
+        }
+
+        // Fire the drain barrier when the turn is fully done.
+        if matches!(event, AgentEvent::TurnFinished) {
+            let signal = state.drain_signal.lock().await.take();
+            if let Some(tx) = signal {
+                let _ = tx.send(());
+            }
+            // TurnFinished itself doesn't produce a session/update.
+            continue;
+        }
+
         let sid = state.session_id.lock().await.clone();
-        if let Some(note) = event_to_update(&event, &sid, &mut msg_counter, &mut current_msg_id) {
+        if let Some(note) = event_to_update(
+            &event,
+            &sid,
+            &mut msg_counter,
+            &mut current_msg_id,
+            state.context_window,
+        ) {
             write_msg(&state.out, &note).await;
         }
     }
@@ -310,6 +411,7 @@ fn event_to_update(
     session_id: &str,
     msg_counter: &mut u64,
     current_msg_id: &mut Option<String>,
+    context_window: u64,
 ) -> Option<String> {
     let update = match event {
         AgentEvent::AssistantTextDelta(text) => {
@@ -321,13 +423,12 @@ fn event_to_update(
             })
         }
         // AssistantMessage is the finalized markdown — the client already has
-        // the full text via deltas. Sending it again duplicates content (#13).
-        // Skip it.
+        // the full text via deltas. Sending it again duplicates content.
         AgentEvent::AssistantMessage(_) => return None,
         AgentEvent::ReasoningDelta(text) => {
             let mid = ensure_msg_id(msg_counter, current_msg_id);
             json!({
-                "sessionUpdate": "thought_chunk",
+                "sessionUpdate": "agent_thought_chunk",
                 "messageId": mid,
                 "content": { "type": "text", "text": text }
             })
@@ -354,7 +455,9 @@ fn event_to_update(
                 }]
             })
         }
-        AgentEvent::ToolFinished { id, ok, summary, .. } => json!({
+        AgentEvent::ToolFinished {
+            id, ok, summary, ..
+        } => json!({
             "sessionUpdate": "tool_call_update",
             "toolCallId": id,
             "status": if *ok { "completed" } else { "failed" },
@@ -366,12 +469,12 @@ fn event_to_update(
         AgentEvent::Usage(usage) => json!({
             "sessionUpdate": "usage_update",
             "used": usage.total_tokens,
-            "size": 200000
+            "size": context_window
         }),
         AgentEvent::ContextTokens(tokens) => json!({
             "sessionUpdate": "usage_update",
             "used": tokens,
-            "size": 200000
+            "size": context_window
         }),
         AgentEvent::Notice(text) => {
             let mid = ensure_msg_id(msg_counter, current_msg_id);
@@ -391,8 +494,15 @@ fn event_to_update(
         }
         AgentEvent::ModeSwitched { mode, .. } => json!({
             "sessionUpdate": "current_mode_update",
-            "modeId": mode_id(mode)
+            "currentModeId": mode_id(mode)
         }),
+        AgentEvent::PlanUpdated { body, .. } => {
+            let entries = plan_entries(body);
+            json!({
+                "sessionUpdate": "plan",
+                "entries": entries
+            })
+        }
         // Terminal events, subagent events, model/catalog events — not mapped.
         _ => return None,
     };
@@ -406,7 +516,34 @@ fn event_to_update(
         }
     });
 
-    Some(serde_json::to_string(&notification).ok()?)
+    serde_json::to_string(&notification).ok()
+}
+
+/// Parse `## ` headings from plan markdown into ACP plan entries.
+/// First entry is `in_progress`, rest are `pending`. Priority is `high` for
+/// the first, `medium` for the rest.
+fn plan_entries(body: &str) -> Vec<Value> {
+    let headings: Vec<&str> = body
+        .lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            t.strip_prefix("## ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .collect();
+
+    headings
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            json!({
+                "content": h,
+                "priority": if i == 0 { "high" } else { "medium" },
+                "status": if i == 0 { "in_progress" } else { "pending" }
+            })
+        })
+        .collect()
 }
 
 fn ensure_msg_id(counter: &mut u64, current: &mut Option<String>) -> String {
@@ -427,13 +564,16 @@ fn mode_id(mode: &AgentMode) -> &'static str {
 
 fn tool_kind(name: &str) -> &'static str {
     match name {
-        "read_file" | "list_dir" | "glob" | "grep" | "web_search" | "web_get_contents"
-        | "read_skill" => "read",
+        "read_file" | "list_dir" | "read_skill" => "read",
+        "glob" | "grep" => "search",
+        "web_search" | "web_get_contents" => "fetch",
         "write_file" | "edit_file" => "edit",
         "delete_path" => "delete",
-        "run_shell" | "terminal_start" | "terminal_write" | "terminal_read"
-        | "terminal_stop" => "execute",
-        "write_plan" | "switch_mode" => "think",
+        "run_shell" | "terminal_start" | "terminal_write" | "terminal_read" | "terminal_stop" => {
+            "execute"
+        }
+        "write_plan" => "think",
+        "switch_mode" => "switch_mode",
         _ => "other",
     }
 }
@@ -445,8 +585,7 @@ fn reply(id: Option<Value>, result: Value) -> String {
         "result": result
     }))
     .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialize failed"}}"#
-            .into()
+        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialize failed"}}"#.into()
     })
 }
 
@@ -457,7 +596,120 @@ fn error_reply(id: Option<Value>, code: i32, message: &str) -> String {
         "error": { "code": code, "message": message }
     }))
     .unwrap_or_else(|_| {
-        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialize failed"}}"#
-            .into()
+        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialize failed"}}"#.into()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_kind_mapping() {
+        assert_eq!(tool_kind("read_file"), "read");
+        assert_eq!(tool_kind("list_dir"), "read");
+        assert_eq!(tool_kind("read_skill"), "read");
+        assert_eq!(tool_kind("glob"), "search");
+        assert_eq!(tool_kind("grep"), "search");
+        assert_eq!(tool_kind("web_search"), "fetch");
+        assert_eq!(tool_kind("web_get_contents"), "fetch");
+        assert_eq!(tool_kind("write_file"), "edit");
+        assert_eq!(tool_kind("edit_file"), "edit");
+        assert_eq!(tool_kind("delete_path"), "delete");
+        assert_eq!(tool_kind("run_shell"), "execute");
+        assert_eq!(tool_kind("terminal_start"), "execute");
+        assert_eq!(tool_kind("write_plan"), "think");
+        assert_eq!(tool_kind("switch_mode"), "switch_mode");
+        assert_eq!(tool_kind("spawn_subagent"), "other");
+        assert_eq!(tool_kind("unknown_tool"), "other");
+    }
+
+    #[test]
+    fn mode_id_mapping() {
+        assert_eq!(mode_id(&AgentMode::Make), "make");
+        assert_eq!(mode_id(&AgentMode::Plan), "plan");
+        assert_eq!(mode_id(&AgentMode::Multitask), "multitask");
+    }
+
+    #[test]
+    fn plan_entries_parses_headings() {
+        let body = "# Plan\n\n## First step\n\nDo things\n\n## Second step\n\nMore things\n";
+        let entries = plan_entries(body);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["content"], "First step");
+        assert_eq!(entries[0]["status"], "in_progress");
+        assert_eq!(entries[0]["priority"], "high");
+        assert_eq!(entries[1]["content"], "Second step");
+        assert_eq!(entries[1]["status"], "pending");
+        assert_eq!(entries[1]["priority"], "medium");
+    }
+
+    #[test]
+    fn plan_entries_empty_when_no_headings() {
+        let body = "Just some text\nwithout headings\n";
+        let entries = plan_entries(body);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn plan_entries_skips_empty_headings() {
+        let body = "## \n\n## Real\n";
+        let entries = plan_entries(body);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["content"], "Real");
+    }
+
+    #[test]
+    fn effective_context_window_falls_back() {
+        assert_eq!(effective_context_window(0), DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(effective_context_window(128_000), 128_000);
+    }
+
+    #[test]
+    fn modes_state_has_three_modes() {
+        let modes = modes_state();
+        assert_eq!(modes["currentModeId"], "make");
+        let available = modes["availableModes"].as_array().unwrap();
+        assert_eq!(available.len(), 3);
+        assert_eq!(available[0]["id"], "make");
+        assert_eq!(available[1]["id"], "plan");
+        assert_eq!(available[2]["id"], "multitask");
+    }
+
+    #[test]
+    fn initialize_result_includes_modes() {
+        let result = initialize_result();
+        assert_eq!(result["protocolVersion"], 1);
+        assert_eq!(result["agentCapabilities"]["loadSession"], false);
+        assert!(result["modes"].is_object());
+        assert_eq!(result["modes"]["currentModeId"], "make");
+    }
+
+    #[test]
+    fn extract_prompt_text_joins_blocks() {
+        let params = json!({
+            "prompt": [
+                {"type": "text", "text": "hello"},
+                {"type": "image", "data": "abc"},
+                {"type": "text", "text": "world"}
+            ]
+        });
+        assert_eq!(extract_prompt_text(&params), "hello\nworld");
+    }
+
+    #[test]
+    fn extract_prompt_text_empty_when_no_text() {
+        let params = json!({
+            "prompt": [
+                {"type": "image", "data": "abc"}
+            ]
+        });
+        assert_eq!(extract_prompt_text(&params), "");
+    }
+
+    #[test]
+    fn extract_prompt_text_empty_when_no_prompt() {
+        let params = json!({});
+        assert_eq!(extract_prompt_text(&params), "");
+    }
 }
