@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <!-- Hive: hexagonal honeycomb cell -->
+  <path d="M8 1 L13 4 L13 10 L8 13 L3 10 L3 4 Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+  <!-- Inner comb lines -->
+  <path d="M5.5 5.5 L10.5 5.5" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+  <path d="M5 8 L11 8" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+  <path d="M5.5 10.5 L10.5 10.5" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+</svg>

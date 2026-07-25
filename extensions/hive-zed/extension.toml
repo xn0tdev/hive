@@ -1,0 +1,35 @@
+id = "hive"
+name = "Hive"
+description = "Hive — native Rust YOLO coding agent"
+version = "0.2.0"
+schema_version = 1
+authors = ["gotlib"]
+repository = "https://github.com/xn0tdev/hive"
+
+[agent_servers.hive]
+name = "Hive"
+icon = "icon.svg"
+
+[agent_servers.hive.targets.darwin-aarch64]
+archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.0/hive-aarch64-apple-darwin.tar.gz"
+cmd = "./hive"
+args = ["--acp"]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[agent_servers.hive.targets.darwin-x86_64]
+archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.0/hive-x86_64-apple-darwin.tar.gz"
+cmd = "./hive"
+args = ["--acp"]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[agent_servers.hive.targets.linux-x86_64]
+archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.0/hive-x86_64-unknown-linux-gnu.tar.gz"
+cmd = "./hive"
+args = ["--acp"]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[agent_servers.hive.targets.windows-x86_64]
+archive = "https://github.com/xn0tdev/hive/releases/download/v0.2.0/hive-x86_64-pc-windows-msvc.zip"
+cmd = "hive.exe"
+args = ["--acp"]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
