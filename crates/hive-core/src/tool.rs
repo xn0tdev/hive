@@ -72,6 +72,16 @@ impl ToolContext {
             chunk: chunk.into(),
         });
     }
+
+    /// Emit the original file content before a modification so the TUI can
+    /// offer a revert action.
+    pub fn emit_snapshot(&self, path: impl Into<String>, content: impl Into<String>) {
+        let _ = self.events.send(AgentEvent::FileSnapshot {
+            id: self.call_id.clone(),
+            path: path.into(),
+            content: content.into(),
+        });
+    }
 }
 
 /// The contract every tool implements. Adding a capability = one new type.

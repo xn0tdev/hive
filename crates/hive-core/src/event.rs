@@ -57,6 +57,13 @@ pub enum AgentEvent {
         ok: bool,
         summary: String,
     },
+    /// Original file content before a file-writing tool modified it.
+    /// The TUI stores this so the user can revert the change.
+    FileSnapshot {
+        id: String,
+        path: String,
+        content: String,
+    },
     /// Cumulative session usage (prompt/completion totals for this chat).
     Usage(Usage),
     /// Tokens in the latest prompt — approx. how full the context window is.

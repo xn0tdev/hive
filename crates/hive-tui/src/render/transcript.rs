@@ -201,7 +201,12 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             UiBlock::Welcome => {}
             UiBlock::User(text) => {
                 let text = text.clone();
-                out.extend(user_lines(&text, app, width));
+                let hovered = app.hover_block == Some(i);
+                let start = out.len();
+                out.extend(user_lines(&text, app, width, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
                 out.push(Line::from(""));
             }
             UiBlock::Assistant { text, streaming } => {
@@ -325,6 +330,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     status: card.status,
                     started: card.started,
                     elapsed_ms: card.elapsed_ms,
+                    snapshot: None,
                 };
                 out.extend(tool_lines(&card, app, width));
                 // Keep consecutive tools tight; add air after the last one.
@@ -459,7 +465,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
     out.push(Line::from(""));
 
     if !card.prompt.trim().is_empty() {
-        out.extend(user_lines(&card.prompt, app, width));
+        out.extend(user_lines(&card.prompt, app, width, false));
         out.push(Line::from(""));
     }
 
@@ -509,6 +515,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                     status,
                     started: std::time::Instant::now(),
                     elapsed_ms: Some(0),
+                    snapshot: None,
                 };
                 out.extend(tool_lines(&tool, app, width));
                 out.push(Line::from(""));
@@ -570,9 +577,9 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 /// User message: a full-width gray strip like the input bar — one tinted
 /// padding row above and below, text rows in the middle, lightly inset.
 /// `@path` chips keep the accent `@` so attachments read like the composer.
-fn user_lines(text: &str, app: &App, width: usize) -> Vec<Line> {
+fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     let theme = &app.theme;
-    let bg = theme.strip;
+    let bg = if hovered { theme.strip_hover } else { theme.strip };
     let body = Style::default().fg(theme.fg).bg(bg);
     let pad_row = || Line::from(Span::styled(" ".repeat(width), body));
 

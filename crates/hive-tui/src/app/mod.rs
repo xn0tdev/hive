@@ -68,9 +68,9 @@ use settings::SettingsState;
 use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
-    Block, ChatView, ModeSwitchCard, PlanCard, PlanAction, PlanCorrection, PlanStatus,
-    PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase,
-    TerminalViewState, Thought, ToolCard, ToolStatus,
+    Block, ChatView, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot, ModeSwitchCard,
+    PlanAction, PlanCard, PlanCorrection, PlanStatus, PlanViewState, PromptHistory,
+    SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState, Thought, ToolCard, ToolStatus,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -341,6 +341,8 @@ pub struct App {
     pub(crate) context_files: Vec<hive_core::ContextFile>,
     /// Visible list rows in the palette (last draw) — keeps keyboard selection in view.
     pub(crate) palette_list_visible: u16,
+    /// Centered context menu for the clicked transcript block.
+    pub(crate) context_menu: Option<ContextMenu>,
 }
 
 /// How long the ctrl+c confirmation window lives.
@@ -430,6 +432,7 @@ impl App {
             sidebar_item_hits: Vec::new(),
             context_files: Vec::new(),
             palette_list_visible: 0,
+            context_menu: None,
         };
         app.blocks.push(Block::Welcome);
         app.project.refresh_if_stale(&app.cwd);
@@ -1596,6 +1599,7 @@ Keep everything else unless a note says otherwise.\n",
         self.reset_menu();
         self.close_palette();
         self.close_about();
+        self.close_context_menu();
         self.running = false;
         self.click_hits.clear();
         self.assistant_row_hits.clear();
@@ -1887,6 +1891,101 @@ Keep everything else unless a note says otherwise.\n",
         self.palette.is_some()
     }
 
+    // -- Context menu (click on user prompt / tool card) --
+
+    pub fn context_menu_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    pub fn context_menu_up(&mut self) {
+        if let Some(m) = &mut self.context_menu {
+            if m.selected > 0 {
+                m.selected -= 1;
+            } else {
+                m.selected = m.items.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn context_menu_down(&mut self) {
+        if let Some(m) = &mut self.context_menu {
+            let last = m.items.len().saturating_sub(1);
+            if m.selected < last {
+                m.selected += 1;
+            } else {
+                m.selected = 0;
+            }
+        }
+    }
+
+    /// Open a context menu for the given block with the provided items.
+    fn open_context_menu(&mut self, block_idx: usize, items: Vec<ContextMenuItem>) {
+        self.context_menu = Some(ContextMenu {
+            block_idx,
+            items,
+            selected: 0,
+        });
+    }
+
+    /// Build and open a context menu for a user prompt block.
+    pub fn open_prompt_menu(&mut self, block_idx: usize) {
+        match self.blocks.get(block_idx) {
+            Some(Block::User(_)) => {}
+            _ => return,
+        };
+        let mut items = vec![ContextMenuItem {
+            label: "Copy".into(),
+            action: ContextAction::CopyPrompt,
+        }];
+        // Recall only makes sense if the agent isn't running.
+        if !self.running {
+            items.push(ContextMenuItem {
+                label: "Recall to input".into(),
+                action: ContextAction::RecallPrompt,
+            });
+        }
+        self.open_context_menu(block_idx, items);
+    }
+
+    /// Build and open a context menu for a tool card block.
+    pub fn open_tool_menu(&mut self, block_idx: usize) {
+        let (output, snapshot) = match self.blocks.get(block_idx) {
+            Some(Block::Tool(card)) => (card.output.clone(), card.snapshot.clone()),
+            _ => return,
+        };
+        let mut items = Vec::new();
+        if let Some(snap) = &snapshot {
+            items.push(ContextMenuItem {
+                label: format!("Revert {}", snap.path),
+                action: ContextAction::RevertFile {
+                    path: snap.path.clone(),
+                    content: snap.content.clone(),
+                },
+            });
+        }
+        if !output.trim().is_empty() {
+            items.push(ContextMenuItem {
+                label: "Copy output".into(),
+                action: ContextAction::CopyOutput,
+            });
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.open_context_menu(block_idx, items);
+    }
+
+    /// Take the selected action from the context menu, closing it.
+    pub fn take_context_action(&mut self) -> Option<ContextAction> {
+        let m = self.context_menu.as_ref()?;
+        let item = m.items.get(m.selected)?;
+        Some(item.action.clone())
+    }
+
     pub fn open_about(&mut self) {
         self.close_palette();
         self.close_settings();
@@ -1955,6 +2054,7 @@ Keep everything else unless a note says otherwise.\n",
                         status: ToolStatus::Running,
                         started: std::time::Instant::now(),
                         elapsed_ms: None,
+                        snapshot: None,
                     }));
                 }
                 true
@@ -1966,6 +2066,10 @@ Keep everything else unless a note says otherwise.\n",
             AgentEvent::ToolFinished { id, ok, .. } => {
                 self.finish_tool(&id, ok);
                 true
+            }
+            AgentEvent::FileSnapshot { id, path, content } => {
+                self.attach_snapshot(&id, FileSnapshot { path, content });
+                false
             }
             AgentEvent::Usage(u) => {
                 self.usage = u;
@@ -2276,6 +2380,12 @@ Keep everything else unless a note says otherwise.\n",
                 let id = card.id.clone();
                 self.open_terminal_view(id);
             }
+            Some(Block::User(_)) => {
+                self.open_prompt_menu(block_idx);
+            }
+            Some(Block::Tool(_)) => {
+                self.open_tool_menu(block_idx);
+            }
             _ => {}
         }
     }
@@ -2440,6 +2550,17 @@ Keep everything else unless a note says otherwise.\n",
                     if card.elapsed_ms.is_none() {
                         card.elapsed_ms = Some(card.started.elapsed().as_millis());
                     }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn attach_snapshot(&mut self, id: &str, snapshot: FileSnapshot) {
+        for block in self.blocks.iter_mut().rev() {
+            if let Block::Tool(card) = block {
+                if card.id == id {
+                    card.snapshot = Some(snapshot);
                     return;
                 }
             }

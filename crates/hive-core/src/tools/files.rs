@@ -166,6 +166,7 @@ impl Tool for WriteFile {
 
         match tokio::fs::write(&full, content).await {
             Ok(_) => {
+                ctx.emit_snapshot(full.to_string_lossy(), &old);
                 ctx.emit_output(compact_diff(&old, content));
                 ToolResult::ok(format!(
                     "wrote {} bytes to {}",
@@ -240,6 +241,7 @@ impl Tool for EditFile {
 
         match tokio::fs::write(&full, &updated).await {
             Ok(_) => {
+                ctx.emit_snapshot(full.to_string_lossy(), &content);
                 ctx.emit_output(compact_diff(old, new));
                 let n = if replace_all { count } else { 1 };
                 ToolResult::ok(format!(
@@ -335,6 +337,11 @@ not delete broad trees unless the user explicitly named them."
             }
         };
         let kind = if meta.is_dir() { "directory" } else { "file" };
+        if !meta.is_dir() {
+            if let Ok(content) = tokio::fs::read_to_string(&full).await {
+                ctx.emit_snapshot(full.to_string_lossy(), &content);
+            }
+        }
         let res = if meta.is_dir() {
             tokio::fs::remove_dir_all(&full).await
         } else {

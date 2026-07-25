@@ -15,7 +15,7 @@ use hive_core::message::ImageSource;
 use hive_core::{AgentMode, FollowUpSlot, UserInput};
 
 use crate::app::palette::PaletteMode;
-use crate::app::state::TerminalViewPhase;
+use crate::app::state::{Block, ContextAction, TerminalViewPhase};
 use crate::app::App;
 use crate::commands::{self, CmdId};
 use crate::render;
@@ -268,6 +268,12 @@ fn read_clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+fn write_clipboard_text(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text);
+    }
+}
+
 fn handle_terminal_key(
     app: &mut App,
     key: Key,
@@ -335,6 +341,11 @@ fn handle_key(
 ) -> bool {
     if app.in_terminal_view() {
         return handle_terminal_key(app, key, input_tx);
+    }
+
+    // Context menu captures all keys while open.
+    if app.context_menu_open() {
+        return handle_context_menu_key(app, key);
     }
 
     let ctrl = key.mods.ctrl;
@@ -630,7 +641,7 @@ fn handle_key(
 /// they don't leak through to the chat underneath.
 /// Returns `true` when the UI should redraw.
 fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
-    if app.about_open() || app.palette_open() || app.settings_open() {
+    if app.about_open() || app.palette_open() || app.settings_open() || app.context_menu_open() {
         return false;
     }
     match m.kind {
@@ -867,6 +878,8 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                         Some(crate::app::state::Block::Plan(_))
                             | Some(crate::app::state::Block::Subagent(_))
                             | Some(crate::app::state::Block::Terminal(_))
+                            | Some(crate::app::state::Block::User(_))
+                            | Some(crate::app::state::Block::Tool(_))
                     )
                     .then_some(i)
                 });
@@ -1453,6 +1466,62 @@ fn handle_about_key(app: &mut App, key: Key) -> bool {
         _ => {}
     }
     false
+}
+
+fn handle_context_menu_key(app: &mut App, key: Key) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
+            app.close_context_menu();
+        }
+        KeyCode::Up => app.context_menu_up(),
+        KeyCode::Down => app.context_menu_down(),
+        KeyCode::Enter => {
+            if let Some(action) = app.take_context_action() {
+                app.close_context_menu();
+                activate_context_action(app, action);
+            } else {
+                app.close_context_menu();
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn activate_context_action(app: &mut App, action: ContextAction) {
+    match action {
+        ContextAction::CopyPrompt => {
+            if let Some(Block::User(text)) = app.blocks.last() {
+                write_clipboard_text(text);
+                app.flash("Copied");
+            }
+        }
+        ContextAction::RecallPrompt => {
+            if let Some(Block::User(text)) = app.blocks.last() {
+                let text = text.clone();
+                app.blocks.pop();
+                app.input.value = text;
+                app.input.end();
+                app.scroll_from_bottom = 0;
+                app.flash("Prompt recalled — edit and resend");
+            }
+        }
+        ContextAction::RevertFile { path, content } => {
+            let full = std::path::Path::new(&app.cwd).join(&path);
+            match std::fs::write(&full, &content) {
+                Ok(()) => app.flash(format!("Reverted {}", path)),
+                Err(e) => app.flash(format!("Revert failed: {e}")),
+            }
+            app.project.invalidate();
+            app.refresh_project();
+        }
+        ContextAction::CopyOutput => {
+            if let Some(Block::Tool(card)) = app.blocks.last() {
+                write_clipboard_text(&card.output);
+                app.flash("Copied output");
+            }
+        }
+    }
 }
 
 fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {

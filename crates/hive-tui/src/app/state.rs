@@ -40,6 +40,16 @@ pub struct ToolCard {
     pub started: std::time::Instant,
     /// Set when the tool finishes; `None` while still running.
     pub elapsed_ms: Option<u128>,
+    /// Original file content before a write_file/edit_file/delete_path
+    /// modified it — used for the "Revert" context-menu action.
+    pub snapshot: Option<FileSnapshot>,
+}
+
+/// Saved file content for revert.
+#[derive(Clone)]
+pub struct FileSnapshot {
+    pub path: String,
+    pub content: String,
 }
 
 impl ToolCard {
@@ -128,6 +138,33 @@ impl PromptHistory {
         self.index = None;
         self.draft.clear();
     }
+}
+
+/// A small centered context menu shown when clicking a transcript block
+/// (user prompt or tool card). Offers actions like Copy, Recall, Revert.
+pub struct ContextMenu {
+    /// Index into `app.blocks` of the block this menu was opened for.
+    #[allow(dead_code)]
+    pub block_idx: usize,
+    pub items: Vec<ContextMenuItem>,
+    pub selected: usize,
+}
+
+pub struct ContextMenuItem {
+    pub label: String,
+    pub action: ContextAction,
+}
+
+#[derive(Clone)]
+pub enum ContextAction {
+    /// Copy the prompt text to the clipboard.
+    CopyPrompt,
+    /// Pull the prompt back into the composer for editing.
+    RecallPrompt,
+    /// Revert a file-writing tool by restoring the original content.
+    RevertFile { path: String, content: String },
+    /// Copy the tool output / diff to the clipboard.
+    CopyOutput,
 }
 
 /// A reasoning ("thinking") segment. Collapsed by default in the UI; carries

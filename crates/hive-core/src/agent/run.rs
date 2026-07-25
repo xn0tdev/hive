@@ -480,7 +480,6 @@ impl Agent {
             self.emit(AgentEvent::Usage(self.session.usage));
             self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
 
-            let finish_reason = outcome.finish_reason.clone();
             let assistant_text = outcome.message.text();
             let tool_calls = outcome.message.tool_calls.clone();
             self.session.push(outcome.message);
@@ -492,25 +491,6 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 if assistant_text.trim().is_empty() {
-                    let fr = finish_reason.to_ascii_lowercase();
-                    if fr == "length" {
-                        // Hit max tokens (often during long thinking) — just end
-                        // the turn silently instead of nagging the user.
-                        break;
-                    }
-                    let msg = if saw_reasoning.load(Ordering::Relaxed) {
-                        "Model finished thinking with no reply or tool call — turn ended.".into()
-                    } else {
-                        format!(
-                            "Model returned an empty reply{}.",
-                            if fr.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" (finish_reason={finish_reason})")
-                            }
-                        )
-                    };
-                    self.emit(AgentEvent::Error(msg));
                     break;
                 }
                 // Final reply — but a double-Enter follow-up means continue.

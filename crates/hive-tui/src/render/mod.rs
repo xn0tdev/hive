@@ -18,6 +18,7 @@ pub mod wordmark;
 pub mod wrap;
 
 mod about;
+mod context_menu;
 mod footer;
 mod input_bars;
 mod menu;
@@ -243,6 +244,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
+    draw_context_menu(f, area, app);
 }
 
 fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
@@ -268,6 +270,12 @@ fn draw_about(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     about::draw(f.buffer(), area, app);
+}
+
+fn draw_context_menu(f: &mut Frame, area: Rect, app: &mut App) {
+    if app.context_menu_open() {
+        context_menu::draw(f.buffer(), area, app);
+    }
 }
 
 fn input_height(app: &mut App, band_width: u16) -> u16 {
