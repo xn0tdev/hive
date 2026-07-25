@@ -1,8 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none">
-  <!-- Hive: hexagonal honeycomb cell -->
-  <path d="M8 1 L13 4 L13 10 L8 13 L3 10 L3 4 Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
-  <!-- Inner comb lines -->
-  <path d="M5.5 5.5 L10.5 5.5" stroke="currentColor" stroke-width="1" opacity="0.6"/>
-  <path d="M5 8 L11 8" stroke="currentColor" stroke-width="1" opacity="0.6"/>
-  <path d="M5.5 10.5 L10.5 10.5" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 21 5" fill="currentColor">
+<!-- HIVE wordmark — ASCII block letters mapped 1:1 -->
+<!-- Row 0: █   █ ███ █   █ █████ -->
+<rect x="0"  y="0" width="1" height="1"/>
+<rect x="4"  y="0" width="1" height="1"/>
+<rect x="6"  y="0" width="3" height="1"/>
+<rect x="10" y="0" width="1" height="1"/>
+<rect x="14" y="0" width="1" height="1"/>
+<rect x="16" y="0" width="5" height="1"/>
+<!-- Row 1: █   █  █  █   █ █     -->
+<rect x="0"  y="1" width="1" height="1"/>
+<rect x="4"  y="1" width="1" height="1"/>
+<rect x="7"  y="1" width="1" height="1"/>
+<rect x="10" y="1" width="1" height="1"/>
+<rect x="14" y="1" width="1" height="1"/>
+<rect x="16" y="1" width="1" height="1"/>
+<!-- Row 2: █████  █  █   █ ████  -->
+<rect x="0"  y="2" width="5" height="1"/>
+<rect x="7"  y="2" width="1" height="1"/>
+<rect x="10" y="2" width="1" height="1"/>
+<rect x="14" y="2" width="1" height="1"/>
+<rect x="16" y="2" width="4" height="1"/>
+<!-- Row 3: █   █  █   █ █  █     -->
+<rect x="0"  y="3" width="1" height="1"/>
+<rect x="4"  y="3" width="1" height="1"/>
+<rect x="7"  y="3" width="1" height="1"/>
+<rect x="11" y="3" width="1" height="1"/>
+<rect x="13" y="3" width="1" height="1"/>
+<rect x="16" y="3" width="1" height="1"/>
+<!-- Row 4: █   █ ███   █   █████ -->
+<rect x="0"  y="4" width="1" height="1"/>
+<rect x="4"  y="4" width="1" height="1"/>
+<rect x="6"  y="4" width="3" height="1"/>
+<rect x="12" y="4" width="1" height="1"/>
+<rect x="16" y="4" width="5" height="1"/>
 </svg>
