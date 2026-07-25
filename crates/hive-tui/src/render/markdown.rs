@@ -1,5 +1,6 @@
 //! Lightweight markdown → comb lines. Supports fenced code, headings, bullets,
-//! GFM tables, horizontal rules, and inline `code` / **bold** / *italic*.
+//! numbered lists (with nesting), GFM tables, blockquotes, horizontal rules,
+//! links, strikethrough, and inline `code` / **bold** / *italic*.
 
 use comb::{highlight, Line, Modifier, Span, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -68,23 +69,45 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
 
         if is_hr(trimmed) {
             lines.push(Line::from(Span::styled(
-                "─".repeat(24),
+                "─".repeat(width.min(48)),
                 Style::default().fg(theme.faint),
             )));
             i += 1;
             continue;
         }
 
-        if let Some(level) = heading_level(trimmed) {
-            let content = trimmed[level..].trim_start();
-            lines.push(Line::from(Span::styled(
-                content.to_string(),
-                Style::default().fg(theme.heading).add(Modifier::BOLD),
-            )));
+        // Blockquote: `> text` → `▎ text` with dimmed style.
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            let mut spans = vec![Span::styled("▎ ", Style::default().fg(theme.dim))];
+            spans.extend(inline(rest, theme));
+            lines.push(Line::from(spans));
+            i += 1;
+            continue;
+        }
+        // Bare `>` with no content → blank quoted line.
+        if trimmed == ">" {
+            lines.push(Line::from(Span::styled("▎", Style::default().fg(theme.dim))));
             i += 1;
             continue;
         }
 
+        if let Some(level) = heading_level(trimmed) {
+            let content = trimmed[level..].trim_start();
+            let hstyle = Style::default().fg(theme.heading).add(Modifier::BOLD);
+            let mut spans = inline(content, theme);
+            for s in &mut spans {
+                s.style = s.style.fg(theme.heading).add(Modifier::BOLD);
+            }
+            if spans.is_empty() {
+                spans.push(Span::styled(String::new(), hstyle));
+            }
+            lines.push(Line::from(spans));
+            i += 1;
+            continue;
+        }
+
+        // Lists: detect indent depth from leading whitespace (nested lists).
+        let indent = raw.len() - trimmed.len();
         let (bullet, rest): (Option<String>, &str) = if let Some(r) = trimmed
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
@@ -97,6 +120,9 @@ pub fn render(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
         };
 
         let mut spans = Vec::new();
+        if indent > 0 && bullet.is_some() {
+            spans.push(Span::styled(" ".repeat(indent), Style::default()));
+        }
         if let Some(b) = bullet {
             spans.push(Span::styled(b, Style::default().fg(theme.accent)));
         }
@@ -284,8 +310,6 @@ fn cell_display_width(cell: &str) -> usize {
 
 /// Measure-only inline parse — same geometry as `inline`, default styles.
 fn inline_plain_measure(text: &str) -> Vec<Span> {
-    // Reuse inline with a throwaway theme of blacks; only content widths matter.
-    // Cheaper: duplicate the geometry without Theme.
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut out = String::new();
@@ -301,17 +325,61 @@ fn inline_plain_measure(text: &str) -> Vec<Span> {
                 i = j + 1;
                 continue;
             }
+        } else if c == '[' {
+            if let Some(close) = find(&chars, i + 1, ']') {
+                if close + 1 < n && chars[close + 1] == '(' {
+                    if let Some(pclose) = find(&chars, close + 2, ')') {
+                        out.extend(chars[i + 1..close].iter());
+                        i = pclose + 1;
+                        continue;
+                    }
+                }
+            }
+        } else if c == '*' && i + 2 < n && chars[i + 1] == '*' && chars[i + 2] == '*' {
+            if let Some(j) = find_triple(&chars, i + 3) {
+                out.extend(chars[i + 3..j].iter());
+                i = j + 3;
+                continue;
+            }
         } else if c == '*' && i + 1 < n && chars[i + 1] == '*' {
             if let Some(j) = find_double(&chars, i + 2) {
                 out.extend(chars[i + 2..j].iter());
                 i = j + 2;
                 continue;
             }
-        } else if c == '*' {
-            if let Some(j) = find(&chars, i + 1, '*') {
-                out.extend(chars[i + 1..j].iter());
-                i = j + 1;
+        } else if c == '_' && i + 1 < n && chars[i + 1] == '_' {
+            if let Some(j) = find_double_char(&chars, i + 2, '_') {
+                out.extend(chars[i + 2..j].iter());
+                i = j + 2;
                 continue;
+            }
+        } else if c == '~' && i + 1 < n && chars[i + 1] == '~' {
+            if let Some(j) = find_double_char(&chars, i + 2, '~') {
+                out.extend(chars[i + 2..j].iter());
+                i = j + 2;
+                continue;
+            }
+        } else if c == '*'
+            && !is_space_or_end(&chars, i + 1)
+            && !is_space_or_start(&chars, i.saturating_sub(1))
+        {
+            if let Some(j) = find(&chars, i + 1, '*') {
+                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                    out.extend(chars[i + 1..j].iter());
+                    i = j + 1;
+                    continue;
+                }
+            }
+        } else if c == '_'
+            && !is_space_or_end(&chars, i + 1)
+            && !is_space_or_start(&chars, i.saturating_sub(1))
+        {
+            if let Some(j) = find(&chars, i + 1, '_') {
+                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                    out.extend(chars[i + 1..j].iter());
+                    i = j + 1;
+                    continue;
+                }
             }
         }
         out.push(c);
@@ -636,6 +704,9 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
     };
     let bold = base.add(Modifier::BOLD);
     let italic = base.add(Modifier::ITALIC);
+    let bold_italic = base.add(Modifier::BOLD | Modifier::ITALIC);
+    let strike = base.add(Modifier::DIM);
+    let link = base.add(Modifier::UNDERLINE);
 
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
@@ -645,6 +716,9 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
 
     while i < n {
         let c = chars[i];
+
+        // Inline code: `code` (single backtick only — multi-backtick is rare
+        // in agent output).
         if c == '`' {
             if let Some(j) = find(&chars, i + 1, '`') {
                 flush(&mut buf, &mut spans, base);
@@ -667,7 +741,47 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
                 i = j + 1;
                 continue;
             }
-        } else if c == '*' && i + 1 < n && chars[i + 1] == '*' {
+        }
+
+        // Links: [text](url) → render `text` underlined, drop the URL.
+        if c == '[' {
+            if let Some(close) = find(&chars, i + 1, ']') {
+                if close + 1 < n && chars[close + 1] == '(' {
+                    if let Some(pclose) = find(&chars, close + 2, ')') {
+                        flush(&mut buf, &mut spans, base);
+                        let text: String = chars[i + 1..close].iter().collect();
+                        spans.push(Span::styled(text, link));
+                        i = pclose + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Strikethrough: ~~text~~
+        if c == '~' && i + 1 < n && chars[i + 1] == '~' {
+            if let Some(j) = find_double_char(&chars, i + 2, '~') {
+                flush(&mut buf, &mut spans, base);
+                let content: String = chars[i + 2..j].iter().collect();
+                spans.push(Span::styled(content, strike));
+                i = j + 2;
+                continue;
+            }
+        }
+
+        // Bold+italic: ***text***
+        if c == '*' && i + 2 < n && chars[i + 1] == '*' && chars[i + 2] == '*' {
+            if let Some(j) = find_triple(&chars, i + 3) {
+                flush(&mut buf, &mut spans, base);
+                let content: String = chars[i + 3..j].iter().collect();
+                spans.push(Span::styled(content, bold_italic));
+                i = j + 3;
+                continue;
+            }
+        }
+
+        // Bold: **text** or __text__
+        if c == '*' && i + 1 < n && chars[i + 1] == '*' {
             if let Some(j) = find_double(&chars, i + 2) {
                 flush(&mut buf, &mut spans, base);
                 let content: String = chars[i + 2..j].iter().collect();
@@ -675,15 +789,42 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
                 i = j + 2;
                 continue;
             }
-        } else if c == '*' {
-            if let Some(j) = find(&chars, i + 1, '*') {
+        }
+        if c == '_' && i + 1 < n && chars[i + 1] == '_' {
+            if let Some(j) = find_double_char(&chars, i + 2, '_') {
                 flush(&mut buf, &mut spans, base);
-                let content: String = chars[i + 1..j].iter().collect();
-                spans.push(Span::styled(content, italic));
-                i = j + 1;
+                let content: String = chars[i + 2..j].iter().collect();
+                spans.push(Span::styled(content, bold));
+                i = j + 2;
                 continue;
             }
         }
+
+        // Italic: *text* or _text_ — but only if `*`/`_` is not surrounded by
+        // spaces (CommonMark flanking rule, simplified).
+        if c == '*' && !is_space_or_end(&chars, i + 1) && !is_space_or_start(&chars, i.saturating_sub(1)) {
+            if let Some(j) = find(&chars, i + 1, '*') {
+                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                    flush(&mut buf, &mut spans, base);
+                    let content: String = chars[i + 1..j].iter().collect();
+                    spans.push(Span::styled(content, italic));
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        if c == '_' && !is_space_or_end(&chars, i + 1) && !is_space_or_start(&chars, i.saturating_sub(1)) {
+            if let Some(j) = find(&chars, i + 1, '_') {
+                if j > i + 1 && !is_space_or_end(&chars, j + 1) {
+                    flush(&mut buf, &mut spans, base);
+                    let content: String = chars[i + 1..j].iter().collect();
+                    spans.push(Span::styled(content, italic));
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+
         buf.push(c);
         i += 1;
     }
@@ -693,6 +834,36 @@ fn inline_with(text: &str, theme: &Theme, code_bg: bool) -> Vec<Span> {
         spans.push(Span::styled(String::new(), base));
     }
     spans
+}
+
+fn is_space_or_end(chars: &[char], idx: usize) -> bool {
+    idx >= chars.len() || chars[idx].is_whitespace()
+}
+
+fn is_space_or_start(chars: &[char], idx: usize) -> bool {
+    idx == 0 || chars[idx].is_whitespace()
+}
+
+fn find_double_char(chars: &[char], start: usize, pat: char) -> Option<usize> {
+    let mut j = start;
+    while j + 1 < chars.len() {
+        if chars[j] == pat && chars[j + 1] == pat {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn find_triple(chars: &[char], start: usize) -> Option<usize> {
+    let mut j = start;
+    while j + 2 < chars.len() {
+        if chars[j] == '*' && chars[j + 1] == '*' && chars[j + 2] == '*' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
 }
 
 fn flush(buf: &mut String, spans: &mut Vec<Span>, style: Style) {
@@ -926,5 +1097,63 @@ mod tests {
             trail.is_some(),
             "trailing ws must be a separate no-bg span: {spans:?}"
         );
+    }
+
+    #[test]
+    fn heading_parses_inline_markdown() {
+        let out = render("# Heading with `code`", &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("code"), "heading content: {t}");
+        assert!(!t.contains('`'), "backticks must be stripped: {t}");
+    }
+
+    #[test]
+    fn blockquote_shows_bar_not_gt() {
+        let out = render("> quoted text", &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("▎"), "blockquote bar: {t}");
+        assert!(t.contains("quoted text"));
+        assert!(!t.contains("> quoted"), "raw > must not appear: {t}");
+    }
+
+    #[test]
+    fn nested_list_indents() {
+        let md = "- top\n  - nested";
+        let out = render(md, &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("• top"));
+        assert!(t.contains("  • nested"), "nested must be indented: {t}");
+    }
+
+    #[test]
+    fn link_shows_text_not_url() {
+        let out = render("[click here](https://example.com)", &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("click here"));
+        assert!(!t.contains("https://"), "url must be stripped: {t}");
+        assert!(!t.contains('['), "brackets must be stripped: {t}");
+    }
+
+    #[test]
+    fn strikethrough_strips_tildes() {
+        let out = render("~~deleted~~", &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("deleted"));
+        assert!(!t.contains('~'), "tildes must be stripped: {t}");
+    }
+
+    #[test]
+    fn underscore_bold_works() {
+        let out = render("__bold text__", &Theme::gray(), 80);
+        let t = text(&out);
+        assert!(t.contains("bold text"));
+        assert!(!t.contains("__"), "underscore markers must be stripped: {t}");
+    }
+
+    #[test]
+    fn star_not_italic_when_surrounded_by_spaces() {
+        let spans = inline_with("a * b * c", &Theme::gray(), true);
+        let t: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(t, "a * b * c", "no italic for spaced stars: {t}");
     }
 }
