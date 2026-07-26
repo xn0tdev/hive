@@ -61,15 +61,8 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
         .max()
         .unwrap_or(0)
         .min(28);
-    let tag_w = visible
-        .iter()
-        .map(|c| c.hint().chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(5);
-
-    // `/name` · tag · description — give description the remaining width.
-    let left = 2 + name_w + 2 + tag_w + 2;
+    // `/name` · description — nothing between them, description takes the rest.
+    let left = 2 + name_w + 2;
     let desc_avail = w.saturating_sub(left + 1);
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len() + 1);
@@ -77,20 +70,19 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
         let idx = window + i;
         let is_sel = idx == selected;
         let bg = if is_sel { theme.sel_bg } else { panel_bg };
-        let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
-        let tag_fg = if is_sel {
+        // Skills keep the accent on their name — the only thing left telling
+        // them apart from built-in commands.
+        let name_fg = if is_sel {
             theme.sel_fg
         } else if matches!(item, SlashItem::Skill(_)) {
             theme.accent
         } else {
-            theme.faint
+            theme.fg
         };
         let desc_fg = if is_sel { theme.sel_fg } else { theme.faint };
 
         let name = ellipsize(&format!("/{}", item.name()), name_w);
         let name_pad = name_w.saturating_sub(name.chars().count());
-        let tag = item.hint();
-        let tag_pad = tag_w.saturating_sub(tag.chars().count());
         let desc = ellipsize(item.desc(), desc_avail);
         let tail = w.saturating_sub(left + desc.chars().count());
 
@@ -101,8 +93,6 @@ fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
                 Style::default().fg(name_fg).bg(bg).add(Modifier::BOLD),
             ),
             Span::styled(" ".repeat(name_pad + 2), Style::default().bg(bg)),
-            Span::styled(tag.to_string(), Style::default().fg(tag_fg).bg(bg)),
-            Span::styled(" ".repeat(tag_pad + 2), Style::default().bg(bg)),
             Span::styled(desc, Style::default().fg(desc_fg).bg(bg)),
             Span::styled(" ".repeat(tail), Style::default().bg(bg)),
         ]));
@@ -214,6 +204,58 @@ impl AddIf for Style {
             self.add(m)
         } else {
             self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+    use crate::TuiInit;
+    use comb::{render, Size};
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+    }
+
+    /// Type `/resume` far enough to pin the menu to commands that take args.
+    fn menu_text(prefix: &str) -> String {
+        let mut a = app();
+        a.input.value = prefix.to_string();
+        a.input.cursor = prefix.chars().count();
+        assert!(!a.slash_items().is_empty(), "menu should be open");
+        render(Size::new(90, 24), |f| crate::render::draw(f, &mut a))
+            .text()
+            .to_string()
+    }
+
+    #[test]
+    fn slash_menu_shows_only_name_and_description() {
+        let text = menu_text("/res");
+        assert!(text.contains("/resume"), "{text}");
+        assert!(text.contains("Browse and resume saved chats"), "{text}");
+        assert!(!text.contains("[id]"), "argument hint must be gone: {text}");
+    }
+
+    #[test]
+    fn no_argument_hints_anywhere_in_the_menu() {
+        let text = menu_text("/");
+        for hint in ["[id]", "[objective]", "[path]"] {
+            assert!(!text.contains(hint), "{hint} still rendered: {text}");
         }
     }
 }

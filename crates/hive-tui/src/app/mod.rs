@@ -44,13 +44,6 @@ impl SlashItem {
         }
     }
 
-    pub fn hint(&self) -> &str {
-        match self {
-            SlashItem::Command(c) => c.hint,
-            SlashItem::Skill(_) => "skill",
-        }
-    }
-
     pub fn takes_arg(&self) -> bool {
         match self {
             SlashItem::Command(c) => c.takes_arg,

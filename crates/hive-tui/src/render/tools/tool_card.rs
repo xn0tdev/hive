@@ -1,6 +1,6 @@
-//! Regular tool rows — no strip background.
+//! Regular tool rows — no strip background until the pointer is on them.
 
-use comb::{Line, Modifier, Span, Style};
+use comb::{Color, Line, Modifier, Span, Style};
 
 use crate::app::state::{ToolCard, ToolStatus};
 use crate::app::App;
@@ -15,7 +15,48 @@ use crate::render::wrap;
 ///   … 23 output lines hidden
 ///     preview…
 /// ```
-pub(crate) fn tool_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
+pub(crate) fn tool_lines(card: &ToolCard, app: &App, width: usize, hovered: bool) -> Vec<Line> {
+    let lines = tool_body_lines(card, app, width);
+    if hovered {
+        hover_band(lines, app.theme.strip_hover, width)
+    } else {
+        lines
+    }
+}
+
+/// Lay the hover band under a card's rows so it reads as one clickable block.
+/// Spans that already carry a background (diff bands, code) keep theirs — the
+/// band only fills what's behind the plain text and past the end of the row.
+fn hover_band(lines: Vec<Line>, bg: Color, width: usize) -> Vec<Line> {
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut used = 0usize;
+            let mut spans: Vec<Span> = line
+                .spans
+                .into_iter()
+                .map(|s| {
+                    used += s.width();
+                    if s.style.bg.is_some() {
+                        s
+                    } else {
+                        let style = s.style.bg(bg);
+                        Span::styled(s.content, style)
+                    }
+                })
+                .collect();
+            if width > used {
+                spans.push(Span::styled(
+                    " ".repeat(width - used),
+                    Style::default().bg(bg),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn tool_body_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let running = card.status == ToolStatus::Running;
     let err = card.status == ToolStatus::Err;

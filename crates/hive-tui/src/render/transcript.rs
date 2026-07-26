@@ -353,7 +353,14 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     elapsed_ms: card.elapsed_ms,
                     snapshot: None,
                 };
-                out.extend(tool_lines(&card, app, width));
+                let hovered = app.hover_block == Some(i);
+                // Every row is hover/click, like the other cards — that's what
+                // reaches the Copy / Revert menu.
+                let start = out.len();
+                out.extend(tool_lines(&card, app, width, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
             }
             UiBlock::ModeSwitch(card) => {
                 let card = card.clone();
@@ -554,7 +561,8 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                     elapsed_ms: Some(0),
                     snapshot: None,
                 };
-                out.extend(tool_lines(&tool, app, width));
+                // Read-only subagent thread: nothing here is clickable.
+                out.extend(tool_lines(&tool, app, width, false));
                 out.push(Line::from(""));
             }
             SubagentLine::Notice(t) => {
@@ -1414,5 +1422,86 @@ mod tests {
         assert!(preview.contains("drag"), "{preview}");
         assert!(preview.contains("MARK"), "{preview}");
         assert!(preview.contains("Ship it"), "{preview}");
+    }
+
+    /// A finished tool card with a file snapshot, ready to hit-test.
+    fn app_with_tool() -> App {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.blocks.clear();
+        a.apply(AgentEvent::ToolStarted {
+            id: "call_1".into(),
+            name: "write_file".into(),
+            args_preview: "src/main.rs".into(),
+        });
+        a.apply(AgentEvent::FileSnapshot {
+            id: "call_1".into(),
+            path: "src/main.rs".into(),
+            content: "before".into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "call_1".into(),
+            name: "write_file".into(),
+            ok: true,
+            summary: "+ after".into(),
+        });
+        a
+    }
+
+    fn tool_block_idx(a: &App) -> usize {
+        a.blocks
+            .iter()
+            .position(|b| matches!(b, crate::app::state::Block::Tool(_)))
+            .expect("tool block")
+    }
+
+    #[test]
+    fn tool_rows_are_clickable_and_reach_the_menu() {
+        use comb::{render, Size};
+
+        let mut a = app_with_tool();
+        let _ = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+
+        let idx = tool_block_idx(&a);
+        let rows: Vec<u16> = a
+            .click_hits
+            .iter()
+            .filter(|(_, b)| *b == idx)
+            .map(|(row, _)| *row)
+            .collect();
+        assert!(!rows.is_empty(), "tool card rows must be hit-testable");
+
+        // Clicking one opens the tool menu — Copy / Revert live nowhere else.
+        let hit = a.expandable_at_row(rows[0]).expect("row maps to the card");
+        assert_eq!(hit, idx);
+        a.activate_expandable_at(hit);
+        assert!(a.context_menu_open(), "tool context menu");
+    }
+
+    #[test]
+    fn hovering_a_tool_card_tints_its_rows() {
+        use comb::{render, Size};
+
+        let mut a = app_with_tool();
+        let idx = tool_block_idx(&a);
+
+        let band = a.theme.strip_hover;
+        let banded = |buf: &comb::Buffer, row: u16| {
+            (0..90).any(|x| buf.get(x, row).and_then(|c| c.style.bg) == Some(band))
+        };
+
+        let plain = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+        let row = a
+            .click_hits
+            .iter()
+            .find(|(_, b)| *b == idx)
+            .map(|(row, _)| *row)
+            .expect("tool row");
+        assert!(!banded(&plain, row), "idle card stays unpainted");
+
+        assert!(a.set_hover_block(Some(idx)));
+        let hovered = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+        assert!(banded(&hovered, row), "hover must be visible on the card");
     }
 }
