@@ -204,7 +204,9 @@ fn wrap_word(line: &Line, width: usize, out: &mut Vec<Line>) {
                     col = 0;
                     // Skip the space — it's a separator, not content.
                 } else if col < width {
-                    current.spans.push(Span::styled(" ".to_string(), span.style));
+                    current
+                        .spans
+                        .push(Span::styled(" ".to_string(), span.style));
                     col += 1;
                 }
             } else {

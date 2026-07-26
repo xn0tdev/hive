@@ -77,7 +77,8 @@ pub(crate) fn terminal_card_lines(
                 Span::raw("    "),
                 Span::styled(status, Style::default().fg(status_fg)),
             ]),
-            bg, width,
+            bg,
+            width,
         )
     } else {
         let prefix = format!("    {desc} · ");
@@ -92,7 +93,8 @@ pub(crate) fn terminal_card_lines(
         let full = format!("    {desc_text} · {status}");
         soft_bg_line(
             Line::from(vec![Span::styled(full, Style::default().fg(theme.dim))]),
-            bg, width,
+            bg,
+            width,
         )
     };
 

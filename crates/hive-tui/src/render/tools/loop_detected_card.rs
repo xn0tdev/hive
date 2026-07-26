@@ -4,10 +4,7 @@ use comb::{Line, Span, Style};
 
 use crate::app::App;
 
-pub(crate) fn loop_detected_card_lines(
-    app: &App,
-    width: usize,
-) -> Vec<Line> {
+pub(crate) fn loop_detected_card_lines(app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let line_color = comb::Color::Rgb(0x40, 0x40, 0x40);
     let text = " Loop detected ";

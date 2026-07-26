@@ -239,11 +239,7 @@ impl InputState {
                     };
                     if in_chunk {
                         let into = cursor_within.saturating_sub(*chunk_start);
-                        let col: usize = chunk_text
-                            .chars()
-                            .take(into)
-                            .map(glyph_width)
-                            .sum();
+                        let col: usize = chunk_text.chars().take(into).map(glyph_width).sum();
                         return (row + ci, col);
                     }
                 }
@@ -267,10 +263,7 @@ impl InputState {
             let n = chunks.len().max(1);
             if target_row < row + n {
                 let within = target_row - row;
-                let chunk_text = chunks
-                    .get(within)
-                    .map(|(t, _)| t.as_str())
-                    .unwrap_or("");
+                let chunk_text = chunks.get(within).map(|(t, _)| t.as_str()).unwrap_or("");
                 let col = prefer_col.min(display_width(chunk_text));
                 return char_i + char_index_at_display_col(line, within, col, w);
             }
@@ -377,7 +370,9 @@ fn wrap_hard_line(line: &str, w: usize) -> Vec<(String, usize)> {
         }
 
         if end < chars.len() {
-            let text: String = chars[start.min(chars.len())..end.min(chars.len())].iter().collect();
+            let text: String = chars[start.min(chars.len())..end.min(chars.len())]
+                .iter()
+                .collect();
             rows.push((text, start));
             start = end;
         } else {
@@ -607,7 +602,7 @@ mod tests {
         assert_eq!(i.view_scroll(2, 4), 0);
 
         i.insert(' '); // past the boundary — still stable
-        // "abc  " → "abc " (row 0) + "" (row 1, trailing space skipped)
+                       // "abc  " → "abc " (row 0) + "" (row 1, trailing space skipped)
         assert_eq!(i.visual_row_count(4), 2);
         assert_eq!(i.view_scroll(2, 4), 0);
     }

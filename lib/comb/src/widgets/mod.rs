@@ -42,7 +42,13 @@ pub trait Widget {
 
 /// A widget that responds to mouse input within its area.
 pub trait Interactive: Widget {
-    fn handle_mouse(&mut self, area: Rect, kind: crate::term::event::MouseKind, col: u16, row: u16) -> bool;
+    fn handle_mouse(
+        &mut self,
+        area: Rect,
+        kind: crate::term::event::MouseKind,
+        col: u16,
+        row: u16,
+    ) -> bool;
 }
 
 /// A small bundle of styles shared by the widgets so call sites stay tidy.

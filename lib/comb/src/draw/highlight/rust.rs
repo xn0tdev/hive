@@ -1,8 +1,10 @@
 //! A lightweight Rust syntax highlighter (keywords, strings, comments, numbers).
 
 use crate::core::text::{Line, Span};
+use crate::draw::highlight::helpers::{
+    ensure_nonempty, is_ident_start, push_slice, read_char, read_ident, read_number, read_string,
+};
 use crate::draw::highlight::HighlightTheme;
-use crate::draw::highlight::helpers::{ensure_nonempty, is_ident_start, push_slice, read_char, read_ident, read_number, read_string};
 
 const KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "crate", "else", "enum", "extern",

@@ -31,15 +31,25 @@ pub(crate) fn compacted_card_lines(card: &CompactedCard, app: &App, width: usize
         // Done: show token reduction.
         Some(before) => {
             let title = "Compacted context".to_string();
-            let detail = format!("{} → {} tokens", short_tokens(before), short_tokens(card.after));
-            (title, vec![Span::styled(detail, Style::default().fg(theme.dim))])
+            let detail = format!(
+                "{} → {} tokens",
+                short_tokens(before),
+                short_tokens(card.after)
+            );
+            (
+                title,
+                vec![Span::styled(detail, Style::default().fg(theme.dim))],
+            )
         }
     };
 
     let title_line = soft_bg_line(
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(title_text, Style::default().fg(theme.fg).add(Modifier::BOLD)),
+            Span::styled(
+                title_text,
+                Style::default().fg(theme.fg).add(Modifier::BOLD),
+            ),
         ]),
         bg,
         width,

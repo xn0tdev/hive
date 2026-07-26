@@ -108,7 +108,10 @@ fn wrap_segments(text: &str, width: usize) -> Vec<(usize, String)> {
         } else {
             text.len()
         };
-        out.push((line_start, text[line_start..end_byte.max(line_start)].to_string()));
+        out.push((
+            line_start,
+            text[line_start..end_byte.max(line_start)].to_string(),
+        ));
 
         // Skip the breaking space when we wrapped on a word boundary.
         i = break_at;
@@ -195,7 +198,10 @@ pub fn paint_highlights(
         let mut cursor = span.start;
         for (a, b, tone) in merged {
             if cursor < a {
-                spans_out.push(Span::styled(body[cursor..a.min(body.len())].to_string(), base));
+                spans_out.push(Span::styled(
+                    body[cursor..a.min(body.len())].to_string(),
+                    base,
+                ));
             }
             let hi = match tone {
                 MarkTone::Pending => pending,
@@ -205,7 +211,10 @@ pub fn paint_highlights(
             cursor = b;
         }
         if cursor < span.end {
-            spans_out.push(Span::styled(body[cursor..span.end.min(body.len())].to_string(), base));
+            spans_out.push(Span::styled(
+                body[cursor..span.end.min(body.len())].to_string(),
+                base,
+            ));
         }
         lines[row] = Line::from(spans_out);
     }

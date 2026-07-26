@@ -413,7 +413,13 @@ impl PaletteState {
         self.ensure_selection_visible(choices, connections, sessions, visible);
     }
 
-    pub fn insert(&mut self, ch: char, choices: &[ModelChoice], connections: &[ConnectionInfo], sessions: &[SessionMeta]) {
+    pub fn insert(
+        &mut self,
+        ch: char,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         self.focus_search();
         let idx = self.byte_at(self.cursor);
         self.query.insert(idx, ch);
@@ -561,10 +567,7 @@ impl PaletteState {
         self.preset_indices().get(self.selected).copied()
     }
 
-    pub fn selected_session<'a>(
-        &self,
-        sessions: &'a [SessionMeta],
-    ) -> Option<&'a SessionMeta> {
+    pub fn selected_session<'a>(&self, sessions: &'a [SessionMeta]) -> Option<&'a SessionMeta> {
         if self.mode != PaletteMode::Sessions {
             return None;
         }

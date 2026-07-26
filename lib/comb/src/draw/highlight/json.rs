@@ -1,8 +1,8 @@
 //! JSON syntax highlighting.
 
 use crate::core::text::{Line, Span};
-use crate::draw::highlight::HighlightTheme;
 use crate::draw::highlight::helpers::ensure_nonempty;
+use crate::draw::highlight::HighlightTheme;
 
 pub fn highlight(source: &str, theme: &HighlightTheme) -> Vec<Line> {
     source.lines().map(|l| highlight_line(l, theme)).collect()

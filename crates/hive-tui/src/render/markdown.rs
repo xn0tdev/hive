@@ -7,7 +7,9 @@
 //! key/value fallback), links, strikethrough, inline code, bold, italic.
 
 use comb::{highlight, Line, Modifier, Span, Style};
-use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
@@ -53,7 +55,9 @@ impl MdStyles {
     fn new(theme: &Theme) -> Self {
         let bold = Style::default().fg(theme.heading).add(Modifier::BOLD);
         let italic = Style::default().fg(theme.fg).add(Modifier::ITALIC);
-        let bi = Style::default().fg(theme.heading).add(Modifier::BOLD | Modifier::ITALIC);
+        let bi = Style::default()
+            .fg(theme.heading)
+            .add(Modifier::BOLD | Modifier::ITALIC);
         Self {
             h: [bold, bold, bi, italic, italic, italic],
             code: Style::default().fg(theme.tool).bg(theme.code_bg),
@@ -223,7 +227,10 @@ impl<'t> Writer<'t> {
             Tag::TableHead => self.start_table_head(),
             Tag::TableRow => self.start_table_row(),
             Tag::TableCell => self.start_table_cell(),
-            Tag::HtmlBlock | Tag::FootnoteDefinition(_) | Tag::Image { .. } | Tag::MetadataBlock(_) => {}
+            Tag::HtmlBlock
+            | Tag::FootnoteDefinition(_)
+            | Tag::Image { .. }
+            | Tag::MetadataBlock(_) => {}
             Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {}
             Tag::Superscript | Tag::Subscript => {}
         }
@@ -249,8 +256,13 @@ impl<'t> Writer<'t> {
             TagEnd::TableHead => self.end_table_head(),
             TagEnd::TableRow => self.end_table_row(),
             TagEnd::TableCell => self.end_table_cell(),
-            TagEnd::HtmlBlock | TagEnd::FootnoteDefinition | TagEnd::Image | TagEnd::MetadataBlock(_) => {}
-            TagEnd::DefinitionList | TagEnd::DefinitionListTitle | TagEnd::DefinitionListDefinition => {}
+            TagEnd::HtmlBlock
+            | TagEnd::FootnoteDefinition
+            | TagEnd::Image
+            | TagEnd::MetadataBlock(_) => {}
+            TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition => {}
             TagEnd::Superscript | TagEnd::Subscript => {}
         }
     }
@@ -363,8 +375,7 @@ impl<'t> Writer<'t> {
         // Continuation lines indent to align text after the marker.
         let cont = indent_w + marker_w;
         let prefix = vec![Span::raw(" ".repeat(cont))];
-        self.indent_stack
-            .push(IndentCtx::new(prefix, Some(marker)));
+        self.indent_stack.push(IndentCtx::new(prefix, Some(marker)));
         self.needs_newline = false;
     }
 
@@ -463,7 +474,11 @@ impl<'t> Writer<'t> {
             if i > 0 {
                 self.flush_line();
             }
-            let style = self.inline_styles.last().copied().unwrap_or(Style::default().fg(self.theme.fg));
+            let style = self
+                .inline_styles
+                .last()
+                .copied()
+                .unwrap_or(Style::default().fg(self.theme.fg));
             self.push_text(line, style);
         }
         self.needs_newline = false;
@@ -479,8 +494,7 @@ impl<'t> Writer<'t> {
         if content.trim().is_empty() {
             self.current.push(Span::styled("  ", self.styles.code));
         } else {
-            self.current
-                .push(Span::styled(content, self.styles.code));
+            self.current.push(Span::styled(content, self.styles.code));
         }
     }
 
@@ -628,9 +642,7 @@ impl<'t> Writer<'t> {
         }
 
         let chrome = Style::default().fg(self.theme.dim);
-        let head_st = Style::default()
-            .fg(self.theme.heading)
-            .add(Modifier::BOLD);
+        let head_st = Style::default().fg(self.theme.heading).add(Modifier::BOLD);
         let body_st = Style::default().fg(self.theme.fg);
 
         // Natural column widths.
@@ -852,7 +864,11 @@ fn wrap_cell(cell: &TableCell, width: usize) -> Vec<Line> {
     }
     let mut out = Vec::new();
     for source_line in &cell.lines {
-        let plain: String = source_line.spans.iter().map(|s| s.content.as_str()).collect();
+        let plain: String = source_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_str())
+            .collect();
         if plain.is_empty() {
             out.push(Line::new());
             continue;
@@ -924,7 +940,10 @@ mod tests {
         assert!(t.contains("Check"));
         assert!(t.contains("Build"));
         assert!(!t.contains("|---"), "raw separator must not appear: {t}");
-        assert!(!t.contains("| Build"), "raw markdown pipes must not appear: {t}");
+        assert!(
+            !t.contains("| Build"),
+            "raw markdown pipes must not appear: {t}"
+        );
     }
 
     #[test]
@@ -997,7 +1016,10 @@ mod tests {
         let out = render("__bold text__", &Theme::gray(), 80);
         let t = text(&out);
         assert!(t.contains("bold text"));
-        assert!(!t.contains("__"), "underscore markers must be stripped: {t}");
+        assert!(
+            !t.contains("__"),
+            "underscore markers must be stripped: {t}"
+        );
     }
 
     #[test]

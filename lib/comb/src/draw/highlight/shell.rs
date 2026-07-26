@@ -1,8 +1,8 @@
 //! Shell / bash syntax highlighting.
 
 use crate::core::text::{Line, Span};
-use crate::draw::highlight::HighlightTheme;
 use crate::draw::highlight::helpers::ensure_nonempty;
+use crate::draw::highlight::HighlightTheme;
 
 const KEYWORDS: &[&str] = &[
     "if", "then", "else", "fi", "for", "do", "done", "in", "case", "esac", "function", "return",

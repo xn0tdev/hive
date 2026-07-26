@@ -138,20 +138,14 @@ pub fn horizontal(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 /// Convenience: vertical split returning a fixed-size array.
 /// Panics if `constraints.len()` != `N`.
-pub fn vertical_arr<const N: usize>(
-    area: Rect,
-    constraints: [Constraint; N],
-) -> [Rect; N] {
+pub fn vertical_arr<const N: usize>(area: Rect, constraints: [Constraint; N]) -> [Rect; N] {
     let v = vertical(area, &constraints);
     v.try_into().unwrap_or_else(|_| [Rect::default(); N])
 }
 
 /// Convenience: horizontal split returning a fixed-size array.
 /// Panics if `constraints.len()` != `N`.
-pub fn horizontal_arr<const N: usize>(
-    area: Rect,
-    constraints: [Constraint; N],
-) -> [Rect; N] {
+pub fn horizontal_arr<const N: usize>(area: Rect, constraints: [Constraint; N]) -> [Rect; N] {
     let v = horizontal(area, &constraints);
     v.try_into().unwrap_or_else(|_| [Rect::default(); N])
 }
@@ -191,7 +185,14 @@ mod tests {
     #[test]
     fn vertical_fixed_and_fill() {
         let area = Rect::new(0, 0, 80, 24);
-        let r = vertical(area, &[Constraint::Length(3), Constraint::Fill, Constraint::Length(1)]);
+        let r = vertical(
+            area,
+            &[
+                Constraint::Length(3),
+                Constraint::Fill,
+                Constraint::Length(1),
+            ],
+        );
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].height, 3);
         assert_eq!(r[1].height, 20);

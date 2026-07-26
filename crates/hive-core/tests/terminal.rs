@@ -200,7 +200,10 @@ async fn stop_and_drop_kill_descendant_processes() {
         "(sleep 1; printf leaked > '{}') & wait",
         stop_marker.display()
     );
-    let started = manager.start(&command, "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start(&command, "test", Path::new("."))
+        .await
+        .unwrap();
     manager.stop(&started.id).unwrap();
 
     let (events, _) = tokio::sync::mpsc::unbounded_channel();
@@ -209,7 +212,10 @@ async fn stop_and_drop_kill_descendant_processes() {
         "(sleep 1; printf leaked > '{}') & wait",
         drop_marker.display()
     );
-    dropped.start(&command, "test", Path::new(".")).await.unwrap();
+    dropped
+        .start(&command, "test", Path::new("."))
+        .await
+        .unwrap();
     drop(dropped);
 
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
@@ -227,7 +233,10 @@ async fn leader_exit_kills_detached_descendants_before_session_finishes() {
         "(trap '' HUP; sleep 1; printf leaked > '{}') & exit 0",
         leaked.display()
     );
-    let started = manager.start(&command, "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start(&command, "test", Path::new("."))
+        .await
+        .unwrap();
 
     for _ in 0..40 {
         let state = manager.read(&started.id, None, None).await.unwrap();
@@ -251,7 +260,10 @@ async fn leader_exit_kills_background_job_process_groups_in_same_session() {
         "set -m; (trap '' HUP; sleep 1; printf leaked > '{}') & exit 0",
         leaked.display()
     );
-    let started = manager.start(&command, "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start(&command, "test", Path::new("."))
+        .await
+        .unwrap();
 
     for _ in 0..40 {
         let state = manager.read(&started.id, None, None).await.unwrap();
@@ -278,7 +290,10 @@ async fn stop_kills_descendants_that_create_a_new_session() {
         "setsid sh -c \"trap '' HUP; sleep 1; printf leaked > '{}'\" >/dev/null 2>&1 & wait",
         leaked.display()
     );
-    let started = manager.start(&command, "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start(&command, "test", Path::new("."))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     manager.stop(&started.id).unwrap();
 
@@ -403,7 +418,10 @@ async fn terminal_tools_drive_prompt_and_emit_dedicated_events() {
 async fn continuous_output_coalesces_to_one_live_frame_plus_final() {
     let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let manager = TerminalManager::new(events);
-    let started = manager.start("yes flood", "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start("yes flood", "test", Path::new("."))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(75)).await;
     manager.stop(&started.id).unwrap();
 
@@ -424,7 +442,10 @@ async fn continuous_output_coalesces_to_one_live_frame_plus_final() {
 async fn stop_remains_responsive_while_large_input_write_is_blocked() {
     let (events, _) = tokio::sync::mpsc::unbounded_channel();
     let manager = TerminalManager::new(events);
-    let started = manager.start("sleep 30", "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start("sleep 30", "test", Path::new("."))
+        .await
+        .unwrap();
 
     let writer = manager.clone();
     let write_id = started.id.clone();
@@ -479,7 +500,10 @@ async fn stop_remains_responsive_while_large_input_write_is_blocked() {
 async fn detach_cancels_a_blocked_user_write_without_stopping_process() {
     let (events, _) = tokio::sync::mpsc::unbounded_channel();
     let manager = TerminalManager::new(events);
-    let started = manager.start("sleep 30", "test", Path::new(".")).await.unwrap();
+    let started = manager
+        .start("sleep 30", "test", Path::new("."))
+        .await
+        .unwrap();
     manager.attach(&started.id).unwrap();
     for _ in 0..8 {
         manager

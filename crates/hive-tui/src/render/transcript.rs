@@ -208,8 +208,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             let curr = &app.blocks[i];
             let tight = matches!(
                 (prev, curr),
-                (UiBlock::Tool(_), UiBlock::Tool(_))
-                    | (UiBlock::Notice(_), UiBlock::Notice(_))
+                (UiBlock::Tool(_), UiBlock::Tool(_)) | (UiBlock::Notice(_), UiBlock::Notice(_))
             );
             if !tight {
                 out.push(Line::from(""));

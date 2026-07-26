@@ -188,10 +188,8 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         .await;
     });
 
-    tokio::task::spawn_blocking(move || {
-        hive_tui::run(tui_init, event_rx, input_tx, interrupt)
-    })
-    .await??;
+    tokio::task::spawn_blocking(move || hive_tui::run(tui_init, event_rx, input_tx, interrupt))
+        .await??;
 
     Ok(())
 }

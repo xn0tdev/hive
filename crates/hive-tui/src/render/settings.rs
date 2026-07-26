@@ -109,10 +109,7 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
                 "Always show thoughts".into(),
                 on_off(app.ui.thoughts_always_open),
             ),
-            (
-                "Work summary".into(),
-                on_off(app.ui.show_work_summary),
-            ),
+            ("Work summary".into(), on_off(app.ui.show_work_summary)),
         ],
         SettingsPage::Sidebar => vec![
             ("Panel".into(), app.ui.sidebar_mode.label().into()),
