@@ -1681,7 +1681,7 @@ Keep everything else unless a note says otherwise.\n",
     /// Queue (or replace) a follow-up while the agent is busy.
     pub fn queue_follow_up(&mut self, fu: QueuedFollowUp) {
         self.follow_up = Some(fu);
-        self.flash("Follow-up queued · Enter again → next step");
+        self.flash("Follow-up queued · sent when task finishes");
     }
 
     /// Pull the queued follow-up into the composer for editing (↑).

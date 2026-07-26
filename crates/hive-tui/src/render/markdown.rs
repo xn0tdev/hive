@@ -130,10 +130,7 @@ struct TableState {
     in_header: bool,
 }
 
-const TABLE_GAP: usize = 2;
 const TABLE_PAD: usize = 1;
-const TABLE_HEAD_SEP: char = '━';
-const TABLE_BODY_SEP: char = '─';
 
 // ── Writer ──────────────────────────────────────────────────────────────
 
@@ -655,38 +652,43 @@ impl<'t> Writer<'t> {
             }
         }
 
-        let total_chrome = (cols - 1) * TABLE_GAP + (cols - 1) * TABLE_PAD;
-        let budget = self
-            .wrap_width
-            .saturating_sub(total_chrome)
-            .max(cols);
+        // Full box grid: `│ pad content pad │` per cell.
+        let chrome_w = (cols + 1) + cols * (2 * TABLE_PAD);
+        let budget = self.wrap_width.saturating_sub(chrome_w).max(cols);
         let widths = fit_columns(&natural, cols, budget);
 
-        let sep = |widths: &[usize], ch: char| -> Line {
+        let border = |widths: &[usize], left: char, mid: char, right: char| -> Line {
             let mut s = String::new();
+            s.push(left);
             for (i, w) in widths.iter().enumerate() {
                 if i > 0 {
-                    s.push_str(&" ".repeat(TABLE_GAP));
+                    s.push(mid);
                 }
-                // First column: no leading pad; rest: pad after.
-                s.push_str(&ch.to_string().repeat(w + TABLE_PAD));
+                s.push_str(&"─".repeat(w + 2 * TABLE_PAD));
             }
+            s.push(right);
             Line::from(Span::styled(s, chrome))
         };
 
         let mut out = Vec::new();
 
+        // Top border.
+        out.push(border(&widths, '┌', '┬', '┐'));
+
         // Header row.
         out.extend(self.render_table_row(&header, &widths, &t.alignments, head_st));
-        out.push(sep(&widths, TABLE_HEAD_SEP));
+        out.push(border(&widths, '├', '┼', '┤'));
 
         // Body rows.
         for (ri, row) in t.rows.iter().enumerate() {
             out.extend(self.render_table_row(row, &widths, &t.alignments, body_st));
             if ri + 1 < t.rows.len() {
-                out.push(sep(&widths, TABLE_BODY_SEP));
+                out.push(border(&widths, '├', '┼', '┤'));
             }
         }
+
+        // Bottom border.
+        out.push(border(&widths, '└', '┴', '┘'));
 
         out
     }
@@ -696,8 +698,9 @@ impl<'t> Writer<'t> {
         row: &[TableCell],
         widths: &[usize],
         aligns: &[Alignment],
-        _style: Style,
+        style: Style,
     ) -> Vec<Line> {
+        let chrome = Style::default().fg(self.theme.dim);
         let wrapped: Vec<Vec<Line>> = row
             .iter()
             .zip(widths)
@@ -707,12 +710,9 @@ impl<'t> Writer<'t> {
 
         let mut out = Vec::with_capacity(row_h);
         for li in 0..row_h {
-            let mut spans = Vec::new();
+            let mut spans = vec![Span::styled("│", chrome)];
             for (ci, w) in widths.iter().enumerate() {
-                if ci > 0 {
-                    spans.push(Span::raw(" ".repeat(TABLE_GAP)));
-                }
-                // No leading pad on first column; pad after content.
+                spans.push(Span::styled(" ".repeat(TABLE_PAD), chrome));
                 let line = wrapped[ci].get(li).cloned().unwrap_or_default();
                 let lw: usize = line.spans.iter().map(|s| s.content.width()).sum();
                 let rem = w.saturating_sub(lw);
@@ -722,17 +722,16 @@ impl<'t> Writer<'t> {
                     Alignment::Right => (rem, 0),
                 };
                 if lp > 0 {
-                    spans.push(Span::raw(" ".repeat(lp)));
+                    spans.push(Span::styled(" ".repeat(lp), style));
                 }
                 for s in line.spans {
                     spans.push(s);
                 }
-                if rp > 0 && ci + 1 < widths.len() {
-                    spans.push(Span::raw(" ".repeat(rp)));
+                if rp > 0 {
+                    spans.push(Span::styled(" ".repeat(rp), style));
                 }
-                if ci + 1 < widths.len() {
-                    spans.push(Span::raw(" ".repeat(TABLE_PAD)));
-                }
+                spans.push(Span::styled(" ".repeat(TABLE_PAD), chrome));
+                spans.push(Span::styled("│", chrome));
             }
             out.push(Line::from(spans));
         }

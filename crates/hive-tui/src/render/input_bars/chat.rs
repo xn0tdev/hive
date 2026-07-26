@@ -71,7 +71,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         let placeholder = if app.in_plan_view() && app.plan_composing() {
             "Comment · MARK saves · select more anytime"
         } else if app.has_follow_up() {
-            "Enter again → next step · ↑ edit"
+            "↑ edit · esc to cancel"
         } else if app.running {
             "Add a follow-up"
         } else if app.has_pending_attaches() {

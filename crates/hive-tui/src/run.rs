@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use hive_core::event::EventReceiver;
 use hive_core::message::ImageSource;
-use hive_core::{AgentMode, FollowUpSlot, UserInput};
+use hive_core::AgentMode;
 
 use crate::app::palette::PaletteMode;
 use crate::app::state::{Block, ContextAction, TerminalViewPhase};
@@ -36,7 +36,6 @@ pub fn run(
     mut events: EventReceiver,
     input_tx: UnboundedSender<InputCommand>,
     interrupt: Arc<AtomicBool>,
-    follow_up: FollowUpSlot,
 ) -> io::Result<()> {
     if !io::stdout().is_terminal() {
         return Err(io::Error::other(
@@ -56,7 +55,6 @@ pub fn run(
         &mut events,
         &input_tx,
         &interrupt,
-        &follow_up,
     )
 }
 
@@ -66,7 +64,6 @@ fn run_loop(
     events: &mut EventReceiver,
     input_tx: &UnboundedSender<InputCommand>,
     interrupt: &Arc<AtomicBool>,
-    follow_up: &FollowUpSlot,
 ) -> io::Result<()> {
     let mut dirty = true;
     let mut last_spinner = usize::MAX;
@@ -107,7 +104,7 @@ fn run_loop(
         if let Some(ev) = terminal.read_event(wait)? {
             match ev {
                 Event::Key(key) => {
-                    if handle_key(app, key, input_tx, interrupt, follow_up) {
+                    if handle_key(app, key, input_tx, interrupt) {
                         break;
                     }
                     dirty = true;
@@ -328,7 +325,6 @@ fn handle_key(
     key: Key,
     input_tx: &UnboundedSender<InputCommand>,
     interrupt: &Arc<AtomicBool>,
-    follow_up: &FollowUpSlot,
 ) -> bool {
     if app.in_terminal_view() {
         return handle_terminal_key(app, key, input_tx);
@@ -533,7 +529,7 @@ fn handle_key(
                 app.input.newline();
                 composer_activity = true;
             } else {
-                return submit(app, input_tx, follow_up);
+                return submit(app, input_tx);
             }
         }
         // Ctrl+J → newline when the host remaps it to Char('j')+CTRL.
@@ -1106,15 +1102,9 @@ fn complete_selected(app: &mut App) {
 fn submit(
     app: &mut App,
     input_tx: &UnboundedSender<InputCommand>,
-    follow_up: &FollowUpSlot,
 ) -> bool {
     let text = app.input.take();
     let trimmed = text.trim().to_string();
-
-    // Second Enter while a follow-up is queued: inject before the next tool round.
-    if app.running && trimmed.is_empty() && !app.has_pending_attaches() {
-        return inject_follow_up_now(app, follow_up);
-    }
 
     // A lone pasted path becomes an attachment tag instead of a message.
     if !trimmed.starts_with('/') {
@@ -1154,24 +1144,6 @@ fn submit(
     }
 
     dispatch_user(app, input_tx, prepared);
-    false
-}
-
-/// Empty composer + queued follow-up + Enter → stage for the next agent step.
-fn inject_follow_up_now(app: &mut App, slot: &FollowUpSlot) -> bool {
-    let Some(fu) = app.follow_up.take() else {
-        return false;
-    };
-    let images = fu.attaches.iter().filter_map(|a| a.image.clone()).collect();
-    app.push_user(fu.display);
-    if let Ok(mut g) = slot.lock() {
-        *g = Some(UserInput {
-            text: fu.text,
-            images,
-            mode: fu.mode,
-        });
-    }
-    app.flash("Follow-up → next step");
     false
 }
 
@@ -1831,10 +1803,6 @@ mod tests {
     use comb::{Key, KeyCode, KeyMods};
     use hive_core::event::{AgentEvent, SubagentStatus};
 
-    fn follow_slot() -> FollowUpSlot {
-        Arc::new(std::sync::Mutex::new(None))
-    }
-
     fn test_app() -> App {
         App::new(TuiInit {
             model: "m".into(),
@@ -1894,7 +1862,6 @@ mod tests {
             ctrl(KeyCode::Char('p')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.palette_open());
         assert_eq!(
@@ -1917,7 +1884,6 @@ mod tests {
             ctrl(KeyCode::Char('p')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!handle_key(
             &mut app,
@@ -1927,7 +1893,6 @@ mod tests {
             },
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         let pal = app.palette.as_ref().unwrap();
         assert!(pal.search_focused);
@@ -1990,7 +1955,7 @@ mod tests {
         app.input.value = "do this next".into();
         app.input.cursor = app.input.value.chars().count();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(!submit(&mut app, &tx, &follow_slot()));
+        assert!(!submit(&mut app, &tx));
         assert!(app.has_follow_up());
         assert!(app.input.is_empty());
         assert!(rx.try_recv().is_err(), "must not send while running");
@@ -2020,7 +1985,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_up_second_enter_injects_for_next_step() {
+    fn follow_up_second_enter_does_not_inject_mid_task() {
         let mut app = test_app();
         app.running = true;
         app.queue_follow_up(crate::app::QueuedFollowUp {
@@ -2030,14 +1995,10 @@ mod tests {
             attaches: Vec::new(),
             mode: AgentMode::Make,
         });
-        let slot = follow_slot();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(app.input.is_empty());
-        assert!(!submit(&mut app, &tx, &slot));
-        assert!(!app.has_follow_up());
-        assert!(rx.try_recv().is_err(), "inject uses slot, not InputCommand");
-        let staged = slot.lock().unwrap().take().expect("staged follow-up");
-        assert_eq!(staged.text, "now");
+        assert!(!submit(&mut app, &tx));
+        assert!(app.has_follow_up(), "follow-up must stay queued while running");
     }
 
     #[test]
@@ -2145,7 +2106,6 @@ mod tests {
             },
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.about_open());
     }
@@ -2168,7 +2128,6 @@ mod tests {
             esc_key(),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.palette_open());
     }
@@ -2189,7 +2148,6 @@ mod tests {
             esc_key(),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.palette_open());
         assert_eq!(
@@ -2201,7 +2159,6 @@ mod tests {
             esc_key(),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.palette_open());
     }
@@ -2491,7 +2448,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         app.input.value = "look".into();
-        assert!(!submit(&mut app, &tx, &follow_slot()));
+        assert!(!submit(&mut app, &tx));
         let _ = std::fs::remove_file(&path);
         // submit() defers the dispatch — flush it manually in tests.
         if let Some(pd) = app.take_pending_dispatch() {
@@ -2532,7 +2489,6 @@ mod tests {
             key(KeyCode::Char('h')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.input_focused);
         assert_eq!(app.input.value, "h");
@@ -2542,7 +2498,6 @@ mod tests {
             key(KeyCode::Char('i')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert_eq!(app.input.value, "hi");
     }
@@ -2561,7 +2516,6 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
@@ -2572,7 +2526,6 @@ mod tests {
             key(KeyCode::Down),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
@@ -2597,7 +2550,6 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
@@ -2607,7 +2559,6 @@ mod tests {
             key(KeyCode::Down),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
@@ -2618,7 +2569,6 @@ mod tests {
             key(KeyCode::Char('x')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.input_focused);
         assert_eq!(app.input.value, "x");
@@ -2641,7 +2591,6 @@ mod tests {
             key(KeyCode::Left),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.input_focused, "Left should restore composer focus");
         assert_eq!(app.input.cursor, 4);
@@ -2652,7 +2601,6 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(
             app.input_focused,
@@ -2677,14 +2625,12 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!handle_key(
             &mut app,
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2, "Up stops at top");
@@ -2695,7 +2641,6 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2);
@@ -2716,7 +2661,6 @@ mod tests {
             key(KeyCode::Esc),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.about_open());
         assert!(!app.input_focused);
@@ -2726,7 +2670,6 @@ mod tests {
             key(KeyCode::Up),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
@@ -2745,7 +2688,6 @@ mod tests {
             key(KeyCode::PageDown),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert_eq!(app.input_last_activity, before);
         assert!(app.input_focused);
@@ -2775,7 +2717,6 @@ mod tests {
             key(KeyCode::Char('x')),
             &tx,
             &interrupt,
-            &follow_slot()
         ));
         assert!(app.in_subagent_view());
         assert!(!app.input_focused);
@@ -2827,7 +2768,6 @@ mod tests {
             ctrl(KeyCode::Char(']')),
             &tx,
             &interrupt,
-            &follow_slot(),
         ));
         assert!(!app.in_terminal_view());
         assert!(matches!(
@@ -2850,7 +2790,6 @@ mod tests {
             ctrl(KeyCode::Char(']')),
             &tx,
             &interrupt,
-            &follow_slot(),
         );
         assert!(matches!(
             rx.try_recv(),
@@ -2873,7 +2812,6 @@ mod tests {
             key(KeyCode::Esc),
             &tx,
             &interrupt,
-            &follow_slot(),
         ));
         assert_eq!(terminal_input(&mut rx), b"\x1b");
         assert!(!handle_key(
@@ -2881,7 +2819,6 @@ mod tests {
             ctrl(KeyCode::Char('c')),
             &tx,
             &interrupt,
-            &follow_slot(),
         ));
         assert_eq!(terminal_input(&mut rx), b"\x03");
         assert!(!interrupt.load(Ordering::Relaxed));
@@ -2931,7 +2868,6 @@ mod tests {
                 key(KeyCode::Char('x')),
                 &tx,
                 &interrupt,
-                &follow_slot(),
             ));
             assert!(rx.try_recv().is_err());
             assert!(app.input.is_empty());
@@ -3037,7 +2973,6 @@ mod tests {
             shift_page_up,
             &tx,
             &interrupt,
-            &follow_slot(),
         ));
         assert!(app.terminal_view.scrollback > 0);
         assert!(rx.try_recv().is_err());
@@ -3047,7 +2982,6 @@ mod tests {
             key(KeyCode::PageUp),
             &tx,
             &interrupt,
-            &follow_slot(),
         ));
         assert_eq!(terminal_input(&mut rx), b"\x1b[5~");
     }
@@ -3071,7 +3005,6 @@ mod tests {
             key(KeyCode::Char('x')),
             &tx,
             &interrupt,
-            &follow_slot(),
         );
         handle_paste(&mut app, "secret", &tx);
 
