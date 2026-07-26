@@ -43,7 +43,7 @@ pub fn draw_follow_up(f: &mut Frame, area: Rect, app: &App) {
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let theme = &app.theme;
-    let bg = theme.strip;
+    let bg = theme.input;
 
     // Entire strip is the focus hit-target (pads + text).
     app.input_hit = Some(area);

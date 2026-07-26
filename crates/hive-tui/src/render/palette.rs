@@ -675,8 +675,10 @@ mod tests {
         a
     }
 
+    /// The panel tone, taken from the theme rather than pinned to a literal —
+    /// this test is about the fill reaching the edge, not about which grey.
     fn panel_bg() -> Color {
-        Color::Rgb(0x26, 0x26, 0x26)
+        crate::theme::Theme::from_name("gray").strip
     }
 
     #[test]

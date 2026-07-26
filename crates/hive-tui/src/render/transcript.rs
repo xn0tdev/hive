@@ -625,7 +625,7 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     let theme = &app.theme;
     let bg = if hovered {
-        theme.strip_hover
+        theme.user_strip_hover
     } else {
         theme.user_strip
     };
