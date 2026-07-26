@@ -11,6 +11,7 @@ pub enum SettingsPage {
     Root,
     Chat,
     Sidebar,
+    Tools,
 }
 
 #[derive(Debug, Clone)]
@@ -29,9 +30,10 @@ impl SettingsState {
 
     pub fn len(&self) -> usize {
         match self.page {
-            SettingsPage::Root => 2,
+            SettingsPage::Root => 3,
             SettingsPage::Chat => 2,
             SettingsPage::Sidebar => 3,
+            SettingsPage::Tools => 1,
         }
     }
 
@@ -61,6 +63,11 @@ impl SettingsState {
         self.selected = 0;
     }
 
+    pub fn enter_tools(&mut self) {
+        self.page = SettingsPage::Tools;
+        self.selected = 0;
+    }
+
     pub fn back(&mut self) -> bool {
         if self.page == SettingsPage::Root {
             return true; // close overlay
@@ -81,10 +88,10 @@ pub fn activate(app: &mut App) -> bool {
     let sel = st.selected;
     match page {
         SettingsPage::Root => {
-            if sel == 0 {
-                st.enter_chat();
-            } else {
-                st.enter_sidebar();
+            match sel {
+                0 => st.enter_chat(),
+                1 => st.enter_sidebar(),
+                _ => st.enter_tools(),
             }
             false
         }
@@ -109,6 +116,13 @@ pub fn activate(app: &mut App) -> bool {
                 true
             }
             2 => nudge_width(app, 2),
+            _ => false,
+        },
+        SettingsPage::Tools => match sel {
+            0 => {
+                app.ui.tool_revert = !app.ui.tool_revert;
+                true
+            }
             _ => false,
         },
     }

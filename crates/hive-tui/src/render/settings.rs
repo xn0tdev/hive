@@ -28,6 +28,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         SettingsPage::Root => "Settings",
         SettingsPage::Chat => "Chat",
         SettingsPage::Sidebar => "Sidebar",
+        SettingsPage::Tools => "Tools",
     };
     let hint = match st.page {
         SettingsPage::Root => "enter open  ·  esc close",
@@ -103,6 +104,7 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
         SettingsPage::Root => vec![
             ("Chat".into(), String::new()),
             ("Sidebar".into(), String::new()),
+            ("Tools".into(), String::new()),
         ],
         SettingsPage::Chat => vec![
             (
@@ -119,6 +121,7 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
             ),
             ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
         ],
+        SettingsPage::Tools => vec![("Revert file".into(), on_off(app.ui.tool_revert))],
     }
 }
 
@@ -137,9 +140,10 @@ struct Geom {
 
 fn geom(area: Rect, st: &SettingsState) -> Geom {
     let rows = match st.page {
-        SettingsPage::Root => 2,
+        SettingsPage::Root => 3,
         SettingsPage::Chat => 2,
         SettingsPage::Sidebar => 3,
+        SettingsPage::Tools => 1,
     };
     let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);
     let h = (PAD_Y * 2 + 1 + 1 + rows as u16 + 1)
@@ -186,5 +190,111 @@ fn darken(c: Color) -> Color {
             ((b as u16 * 160) / 255) as u8,
         ),
         Color::Reset => Color::Rgb(0x0a, 0x0a, 0x0a),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::settings::activate;
+    use crate::TuiInit;
+    use comb::{render, Size};
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+    }
+
+    fn text(app: &mut App) -> String {
+        render(Size::new(80, 24), |f| crate::render::draw(f, app))
+            .text()
+            .to_string()
+    }
+
+    #[test]
+    fn tools_page_toggles_revert_and_asks_to_persist() {
+        let mut a = app();
+        a.open_settings();
+        assert!(text(&mut a).contains("Tools"), "root lists the page");
+
+        // Root row 2 → Tools.
+        if let Some(st) = a.settings.as_mut() {
+            st.selected = 2;
+        }
+        assert!(!activate(&mut a), "drilling in changes nothing to save");
+        assert_eq!(
+            a.settings.as_ref().map(|s| s.page),
+            Some(SettingsPage::Tools)
+        );
+
+        let shown = text(&mut a);
+        assert!(shown.contains("Revert file"), "{shown}");
+        assert!(shown.contains("on"), "starts enabled: {shown}");
+
+        assert!(activate(&mut a), "a toggle must be persisted");
+        assert!(!a.ui.tool_revert);
+        assert!(text(&mut a).contains("off"));
+    }
+
+    #[test]
+    fn revert_disappears_from_the_tool_menu_when_off() {
+        use crate::app::state::{Block, FileSnapshot, ToolCard, ToolStatus};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Tool(ToolCard {
+            id: "t1".into(),
+            name: "write_file".into(),
+            args: "src/main.rs".into(),
+            output: "+1\tnew line".into(),
+            status: ToolStatus::Ok,
+            started: std::time::Instant::now(),
+            elapsed_ms: Some(1),
+            snapshot: Some(FileSnapshot {
+                path: "src/main.rs".into(),
+                content: "old".into(),
+            }),
+        }));
+
+        a.open_tool_menu(0);
+        let labels: Vec<String> = a
+            .context_menu
+            .as_ref()
+            .map(|m| m.items.iter().map(|i| i.label.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            labels.iter().any(|l| l.starts_with("Revert")),
+            "on by default: {labels:?}"
+        );
+
+        a.close_context_menu();
+        a.ui.tool_revert = false;
+        a.open_tool_menu(0);
+        let labels: Vec<String> = a
+            .context_menu
+            .as_ref()
+            .map(|m| m.items.iter().map(|i| i.label.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            !labels.iter().any(|l| l.starts_with("Revert")),
+            "a stray click must not be able to roll the file back: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "Copy output"),
+            "the rest of the menu stays: {labels:?}"
+        );
     }
 }

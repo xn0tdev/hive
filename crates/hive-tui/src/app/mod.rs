@@ -2161,7 +2161,7 @@ Keep everything else unless a note says otherwise.\n",
             _ => return,
         };
         let mut items = Vec::new();
-        if let Some(snap) = &snapshot {
+        if let Some(snap) = snapshot.filter(|_| self.ui.tool_revert).as_ref() {
             items.push(ContextMenuItem {
                 label: format!("Revert {}", snap.path),
                 action: ContextAction::RevertFile {

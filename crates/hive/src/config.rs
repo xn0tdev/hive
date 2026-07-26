@@ -458,6 +458,42 @@ pub fn write_setup(choices: &SetupChoices) -> Result<()> {
 }
 
 /// Merge UI preference fields into the existing `config.toml` `[ui]` table.
+/// Write every `[ui]` value we own into the table. Split out so it can be
+/// tested without touching the real config file.
+fn apply_ui_fields(
+    ui_table: &mut toml::map::Map<String, toml::Value>,
+    ui: &hive_core::config::UiConfig,
+) {
+    ui_table.insert("theme".into(), toml::Value::String(ui.theme.clone()));
+    ui_table.insert(
+        "setup_complete".into(),
+        toml::Value::Boolean(ui.setup_complete),
+    );
+    ui_table.insert(
+        "thoughts_always_open".into(),
+        toml::Value::Boolean(ui.thoughts_always_open),
+    );
+    ui_table.insert(
+        "sidebar_mode".into(),
+        toml::Value::String(ui.sidebar_mode.as_str().into()),
+    );
+    ui_table.insert(
+        "sidebar_collapse_sections".into(),
+        toml::Value::Boolean(ui.sidebar_collapse_sections),
+    );
+    ui_table.insert(
+        "sidebar_width".into(),
+        toml::Value::Integer(i64::from(ui.sidebar_width)),
+    );
+    // These two were toggled in Settings but never written, so they reset on
+    // every restart.
+    ui_table.insert(
+        "show_work_summary".into(),
+        toml::Value::Boolean(ui.show_work_summary),
+    );
+    ui_table.insert("tool_revert".into(), toml::Value::Boolean(ui.tool_revert));
+}
+
 pub fn patch_ui(ui: &hive_core::config::UiConfig) -> Result<()> {
     use hive_core::config::SidebarMode;
 
@@ -482,27 +518,7 @@ pub fn patch_ui(ui: &hive_core::config::UiConfig) -> Result<()> {
         .as_table_mut()
         .ok_or_else(|| anyhow!("[ui] must be a table"))?;
 
-    ui_table.insert("theme".into(), toml::Value::String(ui.theme.clone()));
-    ui_table.insert(
-        "setup_complete".into(),
-        toml::Value::Boolean(ui.setup_complete),
-    );
-    ui_table.insert(
-        "thoughts_always_open".into(),
-        toml::Value::Boolean(ui.thoughts_always_open),
-    );
-    ui_table.insert(
-        "sidebar_mode".into(),
-        toml::Value::String(ui.sidebar_mode.as_str().into()),
-    );
-    ui_table.insert(
-        "sidebar_collapse_sections".into(),
-        toml::Value::Boolean(ui.sidebar_collapse_sections),
-    );
-    ui_table.insert(
-        "sidebar_width".into(),
-        toml::Value::Integer(i64::from(ui.sidebar_width)),
-    );
+    apply_ui_fields(ui_table, ui);
 
     // Keep mode parseable even if an old build wrote an unknown string.
     let _ = SidebarMode::default();
@@ -835,6 +851,36 @@ fn mirror_profile_to_provider(
 mod tests {
     use super::*;
     use hive_core::config::AppConfig;
+
+    /// Every toggle in Settings has to survive a restart; two of them were
+    /// silently dropped because patch_ui never wrote them.
+    #[test]
+    fn every_ui_toggle_is_written_back() {
+        use hive_core::config::{SidebarMode, UiConfig};
+
+        let ui = UiConfig {
+            theme: "gray".into(),
+            setup_complete: true,
+            thoughts_always_open: true,
+            sidebar_mode: SidebarMode::Auto,
+            sidebar_collapse_sections: false,
+            sidebar_width: 40,
+            show_work_summary: false,
+            tool_revert: false,
+        };
+
+        let mut table = toml::map::Map::new();
+        apply_ui_fields(&mut table, &ui);
+
+        let round: UiConfig = toml::Value::Table(table.clone())
+            .try_into()
+            .expect("parse back");
+        assert_eq!(round.sidebar_width, 40);
+        assert!(round.thoughts_always_open);
+        assert!(!round.sidebar_collapse_sections);
+        assert!(!round.show_work_summary, "work summary must persist");
+        assert!(!round.tool_revert, "revert toggle must persist");
+    }
 
     #[test]
     fn resolve_prefers_non_empty_env() {

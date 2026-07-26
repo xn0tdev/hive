@@ -244,6 +244,10 @@ pub struct UiConfig {
     /// Show a "Worked for Nm" summary line at the end of each turn.
     #[serde(default = "default_true")]
     pub show_work_summary: bool,
+    /// Offer "Revert <file>" on tool cards. Off hides it entirely, so a stray
+    /// click can't roll a file back.
+    #[serde(default = "default_true")]
+    pub tool_revert: bool,
 }
 
 fn default_true() -> bool {
@@ -264,6 +268,7 @@ impl Default for UiConfig {
             sidebar_collapse_sections: true,
             sidebar_width: default_sidebar_width(),
             show_work_summary: true,
+            tool_revert: true,
         }
     }
 }
