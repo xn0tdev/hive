@@ -3013,8 +3013,18 @@ Keep everything else unless a note says otherwise.\n",
         }
     }
 
-    /// The expandable header (if any) drawn on this screen row in the last frame.
-    pub fn expandable_at_row(&self, row: u16) -> Option<usize> {
+    /// The expandable card (if any) drawn at this screen cell in the last frame.
+    ///
+    /// The column matters as much as the row: cards are only as wide as the chat
+    /// column, so the page margins beside it — and the sidebar — are not the
+    /// card, even on the card's own rows.
+    pub fn expandable_at(&self, col: u16, row: u16) -> Option<usize> {
+        if !self
+            .transcript_hit
+            .is_some_and(|band| band.contains(col, row))
+        {
+            return None;
+        }
         self.click_hits
             .iter()
             .find(|(r, _)| *r == row)

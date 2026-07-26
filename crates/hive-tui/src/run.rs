@@ -893,7 +893,7 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                 return true;
             }
             let cleared_selection = app.clear_assistant_selection();
-            if let Some(idx) = app.expandable_at_row(m.row) {
+            if let Some(idx) = app.expandable_at(m.col, m.row) {
                 let terminal = app.blocks.get(idx).and_then(|block| match block {
                     crate::app::state::Block::Terminal(card)
                         if matches!(card.process, hive_core::TerminalProcessState::Running) =>
@@ -988,7 +988,7 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                     .find(|(hit, _)| hit.contains(m.col, m.row))
                     .map(|(_, item)| item.clone());
                 dirty |= app.set_hover_sidebar_item(sidebar_item);
-                let card = app.expandable_at_row(m.row).and_then(|i| {
+                let card = app.expandable_at(m.col, m.row).and_then(|i| {
                     matches!(
                         app.blocks.get(i),
                         Some(crate::app::state::Block::Plan(_))

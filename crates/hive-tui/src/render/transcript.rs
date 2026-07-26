@@ -293,6 +293,21 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 };
                 heads.push((out.len(), i));
                 out.push(thought_header(&th_snap, app, show_hint));
+                // Live and collapsed: echo the newest sentence, so the header
+                // says what it is chewing on and not merely that it is busy.
+                // One row, rewritten in place — it never stacks up.
+                if body.is_none() && thought_is_live(&th_snap, app) {
+                    if let Some(tail) = newest_sentence(&th_snap.text, width.saturating_sub(4)) {
+                        heads.push((out.len(), i));
+                        out.push(Line::from(vec![
+                            spine(&app.theme),
+                            Span::styled(
+                                tail,
+                                Style::default().fg(app.theme.dim).add(Modifier::ITALIC),
+                            ),
+                        ]));
+                    }
+                }
                 if let Some(text) = body {
                     let style = Style::default().fg(app.theme.faint).add(Modifier::ITALIC);
                     let raw: Vec<Line> = text
@@ -300,7 +315,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                         .map(|l| Line::from(Span::styled(l.to_string(), style)))
                         .collect();
                     for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
-                        l.spans.insert(0, Span::raw("    "));
+                        l.spans.insert(0, spine(&app.theme));
                         // Click anywhere on the thought body also toggles it.
                         heads.push((out.len(), i));
                         out.push(l);
@@ -525,7 +540,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                     .map(|l| Line::from(Span::styled(l.to_string(), style)))
                     .collect();
                 for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
-                    l.spans.insert(0, Span::raw("    "));
+                    l.spans.insert(0, spine(&theme));
                     out.push(l);
                 }
                 out.push(Line::from(""));
@@ -575,11 +590,74 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
     out
 }
 
+/// A thought the model is still writing: the header shimmers and carries a
+/// live tail. Once it closes, the same block becomes a "Thought for Ns" summary.
+fn thought_is_live(th: &crate::app::state::Thought, app: &App) -> bool {
+    th.elapsed_ms.is_none() && app.running
+}
+
+/// The `▏` rule that ties a thought's text to its header — same thin bar as the
+/// streaming caret, so quoted reasoning reads as one column, not loose indent.
+fn spine(theme: &crate::theme::Theme) -> Span {
+    Span::styled("  ▏ ", Style::default().fg(theme.faint))
+}
+
+/// `4.2s` · `47s` · `1m 04s`. Live headers round to whole seconds so the
+/// decimal doesn't flicker while the counter ticks.
+fn think_secs(secs: f64, live: bool) -> String {
+    if secs >= 60.0 {
+        let t = secs.round() as u64;
+        return format!("{}m {:02}s", t / 60, t % 60);
+    }
+    // Keep the decimal only where it reads as precision: a live counter would
+    // just flicker it, and a long or instant think has nothing to say with it.
+    if !live && (0.05..10.0).contains(&secs) {
+        format!("{secs:.1}s")
+    } else {
+        format!("{secs:.0}s")
+    }
+}
+
+/// The newest sentence of a live thought, squashed onto one row.
+///
+/// Sentences replace one another as the model writes, so the row changes in
+/// place rather than crawling a character at a time. An over-long sentence
+/// keeps its newest words and marks the cut.
+fn newest_sentence(text: &str, width: usize) -> Option<String> {
+    if width == 0 {
+        return None;
+    }
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?.trim();
+    let mut sentence = line;
+    for (i, c) in line.char_indices() {
+        if matches!(c, '.' | '!' | '?') {
+            let rest = line[i + c.len_utf8()..].trim_start();
+            if !rest.is_empty() {
+                sentence = rest;
+            }
+        }
+    }
+    let one_row = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_row.is_empty() {
+        return None;
+    }
+    let n = one_row.chars().count();
+    if n <= width {
+        return Some(one_row);
+    }
+    let skip = n - (width - 1);
+    Some(
+        std::iter::once('…')
+            .chain(one_row.chars().skip(skip))
+            .collect(),
+    )
+}
+
 /// Thought header: bold shimmering "Thinking" while active, then a clear
 /// "Thought for Ns" summary. Click (or ctrl+t) to expand/collapse the body.
 fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -> Line {
     let theme = &app.theme;
-    let active = th.elapsed_ms.is_none() && app.running;
+    let active = thought_is_live(th, app);
 
     let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
@@ -591,12 +669,12 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
         };
         spans.extend(shimmer_bright(label, app.spinner));
         spans.push(Span::styled(
-            format!("  {:.0}s", th.secs()),
+            format!("  {}", think_secs(th.secs(), true)),
             Style::default().fg(theme.dim),
         ));
     } else {
         spans.push(Span::styled(
-            format!("Thought for {:.1}s", th.secs()),
+            format!("Thought for {}", think_secs(th.secs(), false)),
             Style::default().fg(theme.fg).add(Modifier::BOLD),
         ));
         if th.approx_tokens() > 0 {
@@ -889,9 +967,12 @@ mod tests {
         use hive_core::event::AgentEvent;
         let mut a = app();
         a.apply(AgentEvent::TurnStarted);
-        a.apply(AgentEvent::ReasoningDelta("let me ponder this".into()));
+        a.apply(AgentEvent::ReasoningDelta(
+            "First I read the lexer. Now let me ponder this.".into(),
+        ));
 
-        // Active: shimmering "Thinking" header, no body text.
+        // Active: shimmering header plus one row echoing the newest sentence —
+        // enough to see what it's on, never the whole body.
         let text = |lines: &[comb::Line]| {
             lines
                 .iter()
@@ -905,8 +986,9 @@ mod tests {
                 .join("\n")
         };
         let t = text(&super::lines(&mut a, 80));
-        assert!(t.contains("Thinking"));
-        assert!(!t.contains("ponder"));
+        assert!(t.contains("Thinking"), "{t}");
+        assert!(t.contains("let me ponder this"), "live tail: {t}");
+        assert!(!t.contains("First I read the lexer"), "newest only: {t}");
 
         // Model moves on → thought closes with a duration; still collapsed.
         // Latest thought omits the click hint (older ones keep it).
@@ -924,6 +1006,80 @@ mod tests {
         let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("ponder"));
         assert!(!t.contains("click to hide"), "{t}");
+    }
+
+    #[test]
+    fn the_live_tail_is_rewritten_in_place_not_stacked() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.blocks.clear();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("Reading the lexer.".into()));
+        let one = super::lines(&mut a, 80).len();
+
+        // Three more sentences land; the thought is still one header + one tail.
+        a.apply(AgentEvent::ReasoningDelta(
+            " Quotes break it. Switch to a scanner. Keep a quote state.".into(),
+        ));
+        let t = tool_text(&mut a, 80);
+        assert_eq!(super::lines(&mut a, 80).len(), one, "still two rows: {t}");
+        assert!(t.contains("Keep a quote state"), "newest sentence: {t}");
+        assert!(!t.contains("Quotes break it"), "older ones are gone: {t}");
+    }
+
+    #[test]
+    fn a_long_sentence_keeps_its_newest_words() {
+        let long = "we should probably rewrite the whole scanner from scratch today";
+        let cut = super::newest_sentence(long, 20).expect("tail");
+        assert_eq!(cut.chars().count(), 20, "fits the row exactly");
+        assert!(cut.starts_with('…'), "the cut is marked: {cut}");
+        assert!(
+            cut.ends_with("scratch today"),
+            "newest words survive: {cut}"
+        );
+        // Short enough to fit → untouched, no ellipsis.
+        assert_eq!(super::newest_sentence("all good", 20).unwrap(), "all good");
+        assert_eq!(super::newest_sentence("   \n  ", 20), None);
+        assert_eq!(super::newest_sentence("anything", 0), None);
+    }
+
+    #[test]
+    fn long_thoughts_read_in_minutes() {
+        assert_eq!(super::think_secs(4.24, false), "4.2s");
+        assert_eq!(
+            super::think_secs(4.24, true),
+            "4s",
+            "no live decimal jitter"
+        );
+        assert_eq!(super::think_secs(47.0, false), "47s");
+        assert_eq!(super::think_secs(64.0, true), "1m 04s");
+        assert_eq!(super::think_secs(600.0, false), "10m 00s");
+    }
+
+    #[test]
+    fn the_page_margin_beside_a_card_is_not_the_card() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.push_user("my message".into());
+        let _ = render(Size::new(100, 20), |f| crate::render::draw(f, &mut a));
+
+        let band = a.transcript_hit.expect("chat column");
+        let (row, block) = *a.click_hits.first().expect("message row");
+        assert_eq!(a.expandable_at(band.x, row), Some(block), "on the card");
+        assert_eq!(
+            a.expandable_at(band.right() - 1, row),
+            Some(block),
+            "the far edge is still the card"
+        );
+
+        // Left/right page padding and the sidebar share the row but are not it.
+        assert!(band.x > 0, "the chat column is inset");
+        assert_eq!(a.expandable_at(band.x - 1, row), None, "left margin");
+        assert_eq!(a.expandable_at(band.right(), row), None, "right margin");
+        assert_eq!(a.expandable_at(99, row), None, "screen edge");
     }
 
     #[test]
@@ -973,7 +1129,8 @@ mod tests {
         assert!(!before.text().contains("secret plan"));
 
         // A click on that row opens exactly that thought.
-        let idx = a.expandable_at_row(row).expect("click hits the header");
+        let col = a.transcript_hit.expect("chat column").x;
+        let idx = a.expandable_at(col, row).expect("click hits the header");
         a.activate_expandable_at(idx);
         let after = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
         assert!(after.text().contains("secret plan"));
@@ -1562,7 +1719,8 @@ mod tests {
         assert!(!rows.is_empty(), "tool card rows must be hit-testable");
 
         // Clicking one opens the tool menu — Copy / Revert live nowhere else.
-        let hit = a.expandable_at_row(rows[0]).expect("row maps to the card");
+        let col = a.transcript_hit.expect("chat column").x;
+        let hit = a.expandable_at(col, rows[0]).expect("row maps to the card");
         assert_eq!(hit, idx);
         a.activate_expandable_at(hit);
         assert!(a.context_menu_open(), "tool context menu");
