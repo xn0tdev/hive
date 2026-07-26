@@ -76,18 +76,32 @@ fn tool_body_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
     } else {
         String::new()
     };
+
+    // Code edits render a compact green/red diff block, whatever the status.
+    let is_edit = matches!(card.name.as_str(), "edit_file" | "write_file");
+    // How much changed belongs next to the file name, not buried in the rows.
+    let stat_suffix = if is_edit {
+        match diff_counts(&card.output) {
+            (0, 0) => String::new(),
+            (add, 0) => format!("  · +{add}"),
+            (0, del) => format!("  · −{del}"),
+            (add, del) => format!("  · +{add} −{del}"),
+        }
+    } else {
+        String::new()
+    };
+    let meta_suffix = format!("{stat_suffix}{dur_suffix}");
+
     let mut out = vec![tool_header_line(
         card,
         running,
         verb_st,
         args_st,
-        &dur_suffix,
+        &meta_suffix,
         meta_st,
         width,
     )];
 
-    // Code edits render a compact green/red diff block, whatever the status.
-    let is_edit = matches!(card.name.as_str(), "edit_file" | "write_file");
     if is_edit && !card.output.trim().is_empty() {
         out.extend(diff_lines(&card.output, app, width));
         return out;
@@ -243,41 +257,187 @@ fn truncate_width(s: &str, max: usize) -> String {
     out
 }
 
-/// Render a diff (lines prefixed `+`/`-`) as an indented block where each row's
-/// background hugs the content width — a green add / red delete band, never the
-/// full terminal width.
+/// One parsed row of a `compact_diff`: `{sign}{line}\t{text}`.
+struct DiffRow<'a> {
+    sign: Option<char>,
+    line: Option<u32>,
+    text: &'a str,
+}
+
+fn parse_diff_row(row: &str) -> DiffRow<'_> {
+    let sign = match row.chars().next() {
+        Some(c @ ('+' | '-')) => c,
+        _ => {
+            return DiffRow {
+                sign: None,
+                line: None,
+                text: row,
+            }
+        }
+    };
+    match row[1..].split_once('\t') {
+        Some((num, text)) => DiffRow {
+            sign: Some(sign),
+            line: num.parse().ok(),
+            text,
+        },
+        // No number (older output, or the "… N more" tail).
+        None => DiffRow {
+            sign: Some(sign),
+            line: None,
+            text: row[1..].trim_start(),
+        },
+    }
+}
+
+/// How many lines a diff adds and removes.
+pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
+    diff.lines()
+        .fold((0, 0), |(add, del), row| match parse_diff_row(row).sign {
+            Some('+') => (add + 1, del),
+            Some('-') => (add, del + 1),
+            _ => (add, del),
+        })
+}
+
+/// Render a diff as an indented block: a faint line-number gutter, then a
+/// green add / red delete band that hugs the content width rather than the
+/// whole terminal.
 pub(crate) fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
     let indent = 4usize;
-    let avail = width.saturating_sub(indent + 1).max(8);
-    let rows: Vec<&str> = diff.lines().filter(|l| !l.trim().is_empty()).collect();
+    let rows: Vec<DiffRow<'_>> = diff
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(parse_diff_row)
+        .collect();
+
+    // The gutter is as wide as the largest line number, so it reads as a column.
+    let gutter = rows
+        .iter()
+        .filter_map(|r| r.line)
+        .max()
+        .map(|n| n.to_string().len())
+        .unwrap_or(0);
+    let lead = if gutter > 0 { gutter + 1 } else { 0 };
+    let avail = width.saturating_sub(indent + lead + 1).max(8);
 
     // Block width tracks the longest row, but is capped to the space we have.
     let block_w = rows
         .iter()
-        .map(|l| l.chars().count())
+        .map(|r| r.text.chars().count() + 2)
         .max()
         .unwrap_or(0)
         .clamp(1, avail);
 
     rows.into_iter()
         .map(|row| {
-            let (fg, bg) = if row.starts_with("+ ") {
-                (theme.add_fg, theme.add_bg)
-            } else if row.starts_with("- ") {
-                (theme.del_fg, theme.del_bg)
-            } else {
-                (theme.faint, theme.code_bg)
+            let (fg, bg) = match row.sign {
+                Some('+') => (theme.add_fg, theme.add_bg),
+                Some('-') => (theme.del_fg, theme.del_bg),
+                _ => (theme.faint, theme.code_bg),
             };
-            let mut text: String = row.chars().take(block_w).collect();
+            let body = match row.sign {
+                Some(sign) => format!("{sign} {}", row.text),
+                None => row.text.to_string(),
+            };
+            let mut text: String = body.chars().take(block_w).collect();
             let pad = block_w.saturating_sub(text.chars().count());
             if pad > 0 {
                 text.push_str(&" ".repeat(pad));
             }
-            Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled(text, Style::default().fg(fg).bg(bg)),
-            ])
+
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            if gutter > 0 {
+                let num = match row.line {
+                    Some(n) => format!("{n:>gutter$} "),
+                    None => " ".repeat(gutter + 1),
+                };
+                spans.push(Span::styled(num, Style::default().fg(theme.faint)));
+            }
+            spans.push(Span::styled(text, Style::default().fg(fg).bg(bg)));
+            Line::from(spans)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::{diff_counts, diff_lines};
+    use crate::app::App;
+    use crate::TuiInit;
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+    }
+
+    fn rendered(diff: &str, width: usize) -> Vec<String> {
+        let a = app();
+        diff_lines(diff, &a, width)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
+            .collect()
+    }
+
+    const DIFF: &str = "-118\tlet mark = old;\n-119\t    inner\n+118\tlet mark = new;\n";
+
+    #[test]
+    fn rows_carry_the_line_they_changed() {
+        let rows = rendered(DIFF, 70);
+        assert!(rows[0].contains("118"), "{rows:?}");
+        assert!(rows[0].contains("- let mark = old;"), "{rows:?}");
+        assert!(rows[1].contains("119"), "{rows:?}");
+        assert!(rows[2].contains("+ let mark = new;"), "{rows:?}");
+
+        // The numbers form a column: same width for every row.
+        let gutters: Vec<&str> = rows.iter().map(|r| &r[..8]).collect();
+        assert!(
+            gutters.iter().all(|g| g.len() == gutters[0].len()),
+            "{gutters:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_keeps_its_own_indentation() {
+        let rows = rendered("+7\t\t\tdeeply indented\n", 70);
+        assert!(rows[0].contains("+ \t\tdeeply indented"), "{rows:?}");
+    }
+
+    #[test]
+    fn counts_are_what_the_header_shows() {
+        assert_eq!(diff_counts(DIFF), (1, 2));
+        assert_eq!(diff_counts(""), (0, 0));
+        // The truncation tail is not a changed line.
+        assert_eq!(diff_counts("+1\ta\n… 4 more\n"), (1, 0));
+    }
+
+    #[test]
+    fn output_without_numbers_still_renders() {
+        // Sessions saved before the format carried line numbers.
+        let rows = rendered("- old line\n+ new line\n", 70);
+        assert!(rows[0].contains("- old line"), "{rows:?}");
+        assert!(rows[1].contains("+ new line"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_narrow_card_still_renders_every_row() {
+        for width in [12usize, 20, 40] {
+            let rows = rendered(DIFF, width);
+            assert_eq!(rows.len(), 3, "width {width}");
+        }
+    }
 }

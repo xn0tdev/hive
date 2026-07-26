@@ -277,16 +277,16 @@ fn compact_diff(old: &str, new: &str) -> String {
 
     const CAP: usize = 14;
     let mut out = String::new();
+    // `{sign}{line}\t{text}`: the line number is what tells you *where* an edit
+    // landed, and `pre` already knows it. The tab keeps a source line's own
+    // leading whitespace intact.
     let mut push = |sign: char, lines: &[&str]| {
         for (i, l) in lines.iter().enumerate() {
             if i == CAP {
                 out.push_str(&format!("… {} more\n", lines.len() - CAP));
                 break;
             }
-            out.push(sign);
-            out.push(' ');
-            out.push_str(l);
-            out.push('\n');
+            out.push_str(&format!("{sign}{}\t{l}\n", pre + i + 1));
         }
     };
     push('-', removed);
@@ -589,15 +589,27 @@ mod tests {
 
     #[test]
     fn marks_changed_middle_only() {
-        assert_eq!(compact_diff("a\nb\nc\n", "a\nB\nc\n"), "- b\n+ B\n");
+        assert_eq!(compact_diff("a\nb\nc\n", "a\nB\nc\n"), "-2\tb\n+2\tB\n");
     }
 
     #[test]
     fn new_content_is_all_additions() {
         let d = compact_diff("", "x\ny\n");
-        assert!(d.contains("+ x"));
-        assert!(d.contains("+ y"));
-        assert!(!d.contains("- "));
+        assert_eq!(d, "+1\tx\n+2\ty\n");
+        assert!(!d.contains('-'));
+    }
+
+    #[test]
+    fn line_numbers_start_at_the_first_change() {
+        // Three unchanged lines, then an edit on line 4.
+        let d = compact_diff("a\nb\nc\nd\ne\n", "a\nb\nc\nD\ne\n");
+        assert_eq!(d, "-4\td\n+4\tD\n");
+    }
+
+    #[test]
+    fn a_tab_indented_line_keeps_its_indent() {
+        let d = compact_diff("x\n", "\t\tdeep\n");
+        assert_eq!(d, "-1\tx\n+1\t\t\tdeep\n");
     }
 
     #[test]
