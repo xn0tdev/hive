@@ -85,7 +85,27 @@ pub fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     Some(guard)
 }
 
-pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
+/// Which saved session to reopen at startup.
+#[derive(Debug, Clone)]
+pub enum Resume {
+    /// The most recently updated session.
+    Last,
+    Id(String),
+}
+
+impl Resume {
+    /// Resolve to a concrete session id, or `None` when there's nothing to open.
+    fn resolve(self) -> Option<String> {
+        match self {
+            Resume::Id(id) => Some(id),
+            Resume::Last => hive_core::agent::session_store::list()
+                .first()
+                .map(|m| m.id.clone()),
+        }
+    }
+}
+
+pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     let global_skills = config::config_dir().join("skills");
@@ -171,25 +191,39 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
 
     install_panic_hook();
 
-    let driver_interrupt = interrupt.clone();
-    let driver_follow_up = follow_up.clone();
+    // Queued before the driver starts, so the session is already loading while
+    // the TUI paints its first frame.
+    if let Some(target) = resume {
+        match target.resolve() {
+            Some(id) => {
+                let _ = input_tx.send(hive_tui::InputCommand::LoadSession { id });
+            }
+            None => {
+                let _ = event_tx.send(hive_core::event::AgentEvent::Notice(
+                    "no saved sessions yet — starting a new one".into(),
+                ));
+            }
+        }
+    }
+
+    let session_id: driver::SessionSlot = Arc::new(Mutex::new(None));
+    let shared = driver::DriverShared {
+        interrupt: interrupt.clone(),
+        follow_up: follow_up.clone(),
+        session_id: session_id.clone(),
+    };
     let driver_cfg = cfg.clone();
     let driver_events = event_tx.clone();
     tokio::spawn(async move {
-        driver::run(
-            agent,
-            input_rx,
-            driver_events,
-            driver_interrupt,
-            driver_follow_up,
-            terminal,
-            driver_cfg,
-        )
-        .await;
+        driver::run(agent, input_rx, driver_events, shared, terminal, driver_cfg).await;
     });
 
     tokio::task::spawn_blocking(move || hive_tui::run(tui_init, event_rx, input_tx, interrupt))
         .await??;
+
+    // The TUI has restored the terminal — leave the wordmark and a way back in.
+    let last_session = session_id.lock().ok().and_then(|id| id.clone());
+    hive_tui::print_farewell(last_session.as_deref());
 
     Ok(())
 }

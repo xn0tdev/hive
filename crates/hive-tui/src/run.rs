@@ -687,6 +687,10 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
                 app.blur_input();
                 return true;
             }
+            if app.scroll_bottom_contains(m.col, m.row) {
+                app.scroll_to_bottom();
+                return true;
+            }
             if let Some(hit) = app.sidebar_resize_hit {
                 if hit.contains(m.col, m.row) {
                     app.clear_assistant_selection();
@@ -835,6 +839,7 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
         }
         MouseKind::Moved => {
             let mut dirty = false;
+            dirty |= app.set_hover_scroll_bottom(app.scroll_bottom_contains(m.col, m.row));
             if app.in_special_view() {
                 dirty |= app.set_hover_block(None);
                 dirty |= app.set_hover_sidebar_item(None);

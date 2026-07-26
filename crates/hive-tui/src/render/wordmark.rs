@@ -34,7 +34,7 @@ impl LogoBonk {
 }
 
 // Equal-weight block letters (H=5, I=3, V=5, E=5) with single-cell gaps.
-const ART: [&str; 5] = [
+pub(crate) const ART: [&str; 5] = [
     "█   █ ███ █   █ █████",
     "█   █  █  █   █ █    ",
     "█████  █  █   █ ████ ",

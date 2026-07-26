@@ -298,6 +298,11 @@ pub struct App {
     pub(crate) hover_make: bool,
     /// Terminal-view STOP button hovered.
     pub(crate) hover_terminal_stop: bool,
+    /// Jump-to-bottom chip hovered.
+    pub(crate) hover_scroll_bottom: bool,
+    /// Hit target for the jump-to-bottom chip (last draw). `None` when the
+    /// transcript is already at the bottom, so the chip isn't there.
+    pub(crate) scroll_bottom_hit: Option<Rect>,
     /// Landing-screen logo rect from the last draw (for click hit-testing).
     pub(crate) logo_hit: Option<Rect>,
     /// Active "bonk" ripple on the HIVE wordmark.
@@ -423,6 +428,8 @@ impl App {
             hover_back: false,
             hover_make: false,
             hover_terminal_stop: false,
+            hover_scroll_bottom: false,
+            scroll_bottom_hit: None,
             logo_hit: None,
             logo_bonk: None,
             view: ChatView::Main,
@@ -798,6 +805,20 @@ impl App {
         }
         self.hover_make = on;
         true
+    }
+
+    pub fn set_hover_scroll_bottom(&mut self, on: bool) -> bool {
+        if self.hover_scroll_bottom == on {
+            return false;
+        }
+        self.hover_scroll_bottom = on;
+        true
+    }
+
+    /// True when the pointer is over the jump-to-bottom chip.
+    pub fn scroll_bottom_contains(&self, col: u16, row: u16) -> bool {
+        self.scroll_bottom_hit
+            .is_some_and(|hit| hit.contains(col, row))
     }
 
     pub fn set_hover_terminal_stop(&mut self, on: bool) -> bool {
@@ -1622,6 +1643,11 @@ Keep everything else unless a note says otherwise.\n",
 
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(n);
+    }
+
+    /// Snap the transcript back to the newest content.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_from_bottom = 0;
     }
 
     /// True when Up can move the transcript toward older content.

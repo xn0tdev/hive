@@ -2,6 +2,7 @@
 
 mod app;
 mod commands;
+mod farewell;
 mod intro;
 mod render;
 mod run;
@@ -14,6 +15,7 @@ use hive_core::message::ImageSource;
 use hive_core::AgentMode;
 use hive_core::UiConfig;
 
+pub use farewell::print as print_farewell;
 pub use intro::{run_intro, IntroOpts, IntroPrefill, IntroResult, SetupDraft, PRESETS};
 pub use run::run;
 

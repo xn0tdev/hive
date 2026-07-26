@@ -22,6 +22,7 @@ mod context_menu;
 mod footer;
 mod goal;
 mod input_bars;
+mod jump_bottom;
 mod menu;
 mod palette;
 mod settings;
@@ -43,6 +44,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Full-frame clear first: landing ↔ active, sidebar open/close, and
     // resize all shift rects; without this, vacated columns/rows keep ghosts.
     f.buffer().paint(area, Style::default());
+    // Only the chat layout re-arms this; landing and the special views have no
+    // scrollback of their own to jump to.
+    app.scroll_bottom_hit = None;
     if app.is_empty_chat() {
         app.click_hits.clear();
         // Landing has no scrollable transcript — keep scroll state honest so
@@ -208,6 +212,10 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         input_bars::draw(f, band(input_y, input_h), app);
         // Full band width: text flush left with strip, chip flush right.
         footer::draw_with_mode(f, band(footer_y, 2), app);
+        // Jump-to-bottom sits on the gap row the layout leaves above the
+        // composer, so it never pushes the transcript around.
+        let gap_y = follow_y.saturating_sub(1);
+        jump_bottom::draw(f.buffer(), band(gap_y, 1), app);
     }
 
     if plan || terminal {
@@ -298,4 +306,92 @@ fn input_height(app: &mut App, band_width: u16) -> u16 {
     // text rows + one padding row above and below, inside the strip
     let tag = u16::from(app.has_pending_attaches());
     app.input.visible_line_count(app.input.text_cols) as u16 + 2 + tag
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::Block;
+    use crate::TuiInit;
+    use comb::{render, Size};
+
+    fn chat_app() -> App {
+        let mut a = App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        });
+        a.blocks.clear();
+        for i in 0..40 {
+            a.blocks.push(Block::User(format!("question {i}")));
+            a.blocks.push(Block::Assistant {
+                text: format!("answer {i}"),
+                streaming: false,
+            });
+        }
+        a
+    }
+
+    #[test]
+    fn jump_chip_only_shows_when_scrolled_up() {
+        let mut a = chat_app();
+        let size = Size::new(80, 24);
+
+        let buf = render(size, |f| draw(f, &mut a));
+        assert!(!buf.text().contains('↓'), "at the bottom: no chip");
+        assert!(a.scroll_bottom_hit.is_none());
+
+        a.scroll_up(4);
+        let buf = render(size, |f| draw(f, &mut a));
+        assert!(buf.text().contains('↓'), "scrolled up: chip");
+        let hit = a.scroll_bottom_hit.expect("chip");
+
+        // The chip lives on the gap row, clear of the composer strip below it.
+        let input = a.input_hit.expect("input strip");
+        assert!(
+            hit.y < input.y,
+            "chip row {} must sit above the composer at {}",
+            hit.y,
+            input.y
+        );
+        assert_eq!(hit.y + 1, input.y, "chip belongs on the gap row");
+    }
+
+    #[test]
+    fn jump_chip_click_returns_to_the_bottom() {
+        let mut a = chat_app();
+        // A first paint teaches the app how far the transcript can scroll;
+        // `scroll_up` clamps to that, so scrolling before it is a no-op.
+        let _ = render(Size::new(80, 24), |f| draw(f, &mut a));
+        a.scroll_up(4);
+        let _ = render(Size::new(80, 24), |f| draw(f, &mut a));
+
+        let hit = a.scroll_bottom_hit.expect("chip");
+        assert!(a.scroll_bottom_contains(hit.x, hit.y));
+        assert!(!a.scroll_bottom_contains(hit.x, hit.y + 1), "composer row");
+
+        a.scroll_to_bottom();
+        let buf = render(Size::new(80, 24), |f| draw(f, &mut a));
+        assert!(!buf.text().contains('↓'), "chip retires at the bottom");
+    }
+
+    #[test]
+    fn landing_has_no_jump_chip() {
+        let mut a = chat_app();
+        a.blocks.clear();
+        a.scroll_up(4);
+        let buf = render(Size::new(80, 24), |f| draw(f, &mut a));
+        assert!(!buf.text().contains('↓'));
+        assert!(a.scroll_bottom_hit.is_none());
+    }
 }

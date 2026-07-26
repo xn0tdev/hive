@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -19,15 +19,30 @@ use hive_llm::catalog::{
 use hive_llm::FireworksProvider;
 use hive_tui::InputCommand;
 
+/// Id of the session the driver is writing to. The shell reads it after the
+/// TUI exits to print "resume with this id"; `None` until the first save.
+pub type SessionSlot = Arc<Mutex<Option<String>>>;
+
+/// Handles the shell, the TUI, and the driver all hold.
+pub struct DriverShared {
+    pub interrupt: Arc<AtomicBool>,
+    pub follow_up: FollowUpSlot,
+    pub session_id: SessionSlot,
+}
+
 pub async fn run(
     mut agent: Agent,
     mut input_rx: UnboundedReceiver<InputCommand>,
     events: EventSender,
-    interrupt: Arc<AtomicBool>,
-    follow_up: FollowUpSlot,
+    shared: DriverShared,
     terminal: TerminalHandle,
     mut cfg: Arc<AppConfig>,
 ) {
+    let DriverShared {
+        interrupt,
+        follow_up,
+        session_id: session_slot,
+    } = shared;
     let mut pending = VecDeque::new();
     let mut session: Option<ActiveSession> = None;
     // Autosave failures repeat every turn; say it once instead of nagging.
@@ -70,7 +85,14 @@ pub async fn run(
                     break 'commands;
                 }
                 // Auto-save after each turn so a crash never loses a transcript.
-                autosave(&agent, &mut session, &events, &mut autosave_warned).await;
+                autosave(
+                    &agent,
+                    &mut session,
+                    &session_slot,
+                    &events,
+                    &mut autosave_warned,
+                )
+                .await;
             }
             InputCommand::SetModel {
                 id,
@@ -330,6 +352,7 @@ pub async fn run(
                 // A cleared transcript starts a new session file, not an
                 // overwrite of the one we were just appending to.
                 session = None;
+                publish_session(&session_slot, None);
             }
             InputCommand::Compact => {
                 if let Err(e) = agent.compact().await {
@@ -379,6 +402,7 @@ pub async fn run(
                 let messages = snap.messages.clone();
                 let usage = snap.usage;
                 agent.restore_session(snap.messages, usage);
+                publish_session(&session_slot, Some(&snap.id));
                 session = Some(ActiveSession {
                     id: snap.id,
                     created_at: snap.created_at,
@@ -524,6 +548,7 @@ struct ActiveSession {
 async fn autosave(
     agent: &Agent,
     session: &mut Option<ActiveSession>,
+    slot: &SessionSlot,
     events: &EventSender,
     warned: &mut bool,
 ) {
@@ -532,6 +557,7 @@ async fn autosave(
         None => (session_store::new_id(), None),
     };
     let snap = agent.session_snapshot(&id, created_at);
+    publish_session(slot, Some(&snap.id));
     *session = Some(ActiveSession {
         id: snap.id.clone(),
         created_at: snap.created_at,
@@ -541,6 +567,14 @@ async fn autosave(
             *warned = true;
             let _ = events.send(AgentEvent::Notice(format!("session autosave failed: {e}")));
         }
+    }
+}
+
+/// Hand the current session id to the shell. A poisoned lock just means no
+/// resume hint at exit — never a reason to disturb the session.
+fn publish_session(slot: &SessionSlot, id: Option<&str>) {
+    if let Ok(mut current) = slot.lock() {
+        *current = id.map(str::to_string);
     }
 }
 
