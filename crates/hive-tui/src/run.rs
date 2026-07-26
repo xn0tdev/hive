@@ -734,7 +734,29 @@ fn handle_key(
 /// they don't leak through to the chat underneath.
 /// Returns `true` when the UI should redraw.
 fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
-    if app.about_open() || app.palette_open() || app.settings_open() || app.context_menu_open() {
+    // An open menu owns the pointer: pick an action, or dismiss by clicking
+    // away. Swallowing every mouse event instead left the mouse looking dead
+    // until you found the keyboard.
+    if app.context_menu_open() {
+        return match m.kind {
+            MouseKind::Moved => app.context_menu_hover(m.col, m.row),
+            MouseKind::Down(MouseButton::Left) => {
+                if app.context_menu_hover(m.col, m.row) || app.context_menu_on_item(m.col, m.row) {
+                    if let Some(action) = app.take_context_action() {
+                        app.close_context_menu();
+                        activate_context_action(app, action);
+                    } else {
+                        app.close_context_menu();
+                    }
+                } else if !app.context_menu_contains(m.col, m.row) {
+                    app.close_context_menu();
+                }
+                true
+            }
+            _ => false,
+        };
+    }
+    if app.about_open() || app.palette_open() || app.settings_open() {
         return false;
     }
     match m.kind {
@@ -2386,6 +2408,95 @@ mod tests {
         app.focus_input();
         press(&mut app, KeyCode::Down);
         assert_eq!(app.selected_attach(), None);
+    }
+
+    fn mouse(kind: MouseKind, col: u16, row: u16) -> Mouse {
+        Mouse { kind, col, row }
+    }
+
+    /// Opening a context menu used to swallow every mouse event until you
+    /// found the keyboard — clicking anything looked like a dead mouse.
+    fn app_with_menu() -> App {
+        use crate::app::state::{Block, FileSnapshot, ToolCard, ToolStatus};
+
+        let mut app = test_app();
+        app.blocks.clear();
+        app.blocks.push(Block::Tool(ToolCard {
+            id: "t1".into(),
+            name: "write_file".into(),
+            args: "src/main.rs".into(),
+            output: "+1\tnew".into(),
+            status: ToolStatus::Ok,
+            started: std::time::Instant::now(),
+            elapsed_ms: Some(1),
+            snapshot: Some(FileSnapshot {
+                path: "src/main.rs".into(),
+                content: "old".into(),
+            }),
+        }));
+        app.open_tool_menu(0);
+        let _ = comb::render(comb::Size::new(80, 24), |f| {
+            crate::render::draw(f, &mut app)
+        });
+        assert!(!app.context_menu_hits.is_empty(), "menu rows recorded");
+        app
+    }
+
+    #[test]
+    fn clicking_away_dismisses_the_context_menu() {
+        let mut app = app_with_menu();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // A corner far outside the panel.
+        assert!(!app.context_menu_contains(0, 0));
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseKind::Down(MouseButton::Left), 0, 0),
+            &tx
+        ));
+        assert!(!app.context_menu_open(), "click away closes it");
+
+        // And the mouse works again right after.
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseKind::ScrollUp, 10, 5),
+            &tx
+        ));
+    }
+
+    #[test]
+    fn clicking_a_menu_row_runs_it() {
+        let mut app = app_with_menu();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (rect, idx) = app.context_menu_hits[0];
+        assert_eq!(idx, 0);
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseKind::Down(MouseButton::Left), rect.x + 1, rect.y),
+            &tx
+        ));
+        assert!(
+            !app.context_menu_open(),
+            "running an action closes the menu"
+        );
+    }
+
+    #[test]
+    fn hovering_moves_the_menu_selection() {
+        let mut app = app_with_menu();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        if app.context_menu_hits.len() < 2 {
+            return; // only one action available
+        }
+
+        let (rect, idx) = app.context_menu_hits[1];
+        assert!(handle_mouse(
+            &mut app,
+            mouse(MouseKind::Moved, rect.x + 1, rect.y),
+            &tx
+        ));
+        assert_eq!(app.context_menu.as_ref().map(|m| m.selected), Some(idx));
     }
 
     #[test]

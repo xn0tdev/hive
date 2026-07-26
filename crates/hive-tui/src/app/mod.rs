@@ -277,6 +277,10 @@ pub struct App {
     /// Animation clock: frames derive from elapsed time, so the spinner and
     /// shimmer run at a constant speed no matter how often events arrive.
     pub(crate) anim_start: std::time::Instant,
+    /// Context-menu panel and item rects from the last draw, so the mouse can
+    /// pick an action or dismiss the menu.
+    pub(crate) context_menu_win: Option<Rect>,
+    pub(crate) context_menu_hits: Vec<(Rect, usize)>,
     /// Clickable cells of expandable blocks from the last draw. Rebuilt every
     /// frame; used to hit-test mouse clicks on thoughts / cards / prompts.
     pub(crate) click_hits: Vec<BlockHit>,
@@ -421,6 +425,8 @@ impl App {
             flash_msg: None,
             ctrl_c_armed: None,
             anim_start: std::time::Instant::now(),
+            context_menu_win: None,
+            context_menu_hits: Vec::new(),
             click_hits: Vec::new(),
             assistant_row_hits: Vec::new(),
             assistant_rows: Vec::new(),
@@ -2109,6 +2115,41 @@ Keep everything else unless a note says otherwise.\n",
 
     pub fn close_context_menu(&mut self) {
         self.context_menu = None;
+        self.context_menu_win = None;
+        self.context_menu_hits.clear();
+    }
+
+    /// Point the selection at the item under the cursor. False when the cursor
+    /// isn't on one, so hover doesn't force a redraw.
+    pub fn context_menu_hover(&mut self, col: u16, row: u16) -> bool {
+        let Some(idx) = self
+            .context_menu_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(col, row))
+            .map(|(_, i)| *i)
+        else {
+            return false;
+        };
+        match self.context_menu.as_mut() {
+            Some(menu) if menu.selected != idx => {
+                menu.selected = idx;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True when the cursor is on one of the menu's action rows.
+    pub fn context_menu_on_item(&self, col: u16, row: u16) -> bool {
+        self.context_menu_hits
+            .iter()
+            .any(|(rect, _)| rect.contains(col, row))
+    }
+
+    /// True when `(col, row)` is inside the open menu panel.
+    pub fn context_menu_contains(&self, col: u16, row: u16) -> bool {
+        self.context_menu_win
+            .is_some_and(|win| win.contains(col, row))
     }
 
     pub fn context_menu_up(&mut self) {

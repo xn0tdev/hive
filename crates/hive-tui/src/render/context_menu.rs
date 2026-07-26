@@ -36,8 +36,10 @@ fn geom(area: Rect, n_items: u16) -> MenuGeom {
     MenuGeom { win, content, list }
 }
 
-pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
-    let Some(menu) = &app.context_menu else {
+pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
+    app.context_menu_win = None;
+    app.context_menu_hits.clear();
+    let Some(menu) = app.context_menu.as_ref() else {
         return;
     };
     let theme = &app.theme;
@@ -45,6 +47,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let panel_style = Style::default().bg(panel);
 
     let g = geom(area, menu.items.len() as u16);
+    let win = g.win;
+    let hits: Vec<(Rect, usize)> = (0..menu.items.len())
+        .map(|i| (Rect::new(g.list.x, g.list.y + i as u16, g.list.width, 1), i))
+        .filter(|(rect, _)| rect.y < g.list.bottom())
+        .collect();
     dim_outside(buf, area, g.win);
     buf.paint(g.win, panel_style);
 
@@ -112,6 +119,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
             bg,
         );
     }
+
+    app.context_menu_win = Some(win);
+    app.context_menu_hits = hits;
 }
 
 fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
