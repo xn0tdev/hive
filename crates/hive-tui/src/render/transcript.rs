@@ -627,7 +627,7 @@ fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     let bg = if hovered {
         theme.strip_hover
     } else {
-        theme.strip
+        theme.user_strip
     };
     let body = Style::default().fg(theme.fg).bg(bg);
     let pad_row = || Line::from(Span::styled(" ".repeat(width), body));
@@ -879,7 +879,7 @@ mod tests {
             .expect("column") as u16;
         assert_eq!(
             buf.get(x, 0).and_then(|c| c.style.bg),
-            Some(a.theme.strip),
+            Some(a.theme.user_strip),
             "the top row belongs to the message band, not a gap"
         );
     }

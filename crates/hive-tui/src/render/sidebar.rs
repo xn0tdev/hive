@@ -613,12 +613,14 @@ fn file_line(f: &ChangedFile, app: &App, width: usize, stat_w: usize) -> Line {
 
     // Every path here starts with the same directories, so cutting the front
     // leaves a column of identical prefixes. Keep the end.
-    let name = truncate_start(&f.path, width.saturating_sub(stat_w + 1));
-    let gap = width.saturating_sub(name.chars().count() + own_w);
+    let name = truncate_start(&f.path, width.saturating_sub(stat_w + 2));
+    // One cell of air on the right — the counts shouldn't touch the edge.
+    let gap = width.saturating_sub(name.chars().count() + own_w + 1);
 
     let mut spans = vec![Span::styled(name, Style::default().fg(fg))];
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(stat);
+    spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
@@ -642,7 +644,7 @@ fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
     let theme = &app.theme;
     let tokens = format_token_count(card.usage.total_tokens);
     let tokens_w = tokens.chars().count();
-    let name_budget = width.saturating_sub(tokens_w.saturating_add(1));
+    let name_budget = width.saturating_sub(tokens_w.saturating_add(2));
     let label = if card.label.trim().is_empty() {
         "subagent"
     } else {
@@ -668,6 +670,7 @@ fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
         Span::styled(name, Style::default().fg(name_fg)),
         Span::raw(" ".repeat(pad.saturating_add(1))),
         Span::styled(tokens, Style::default().fg(theme.faint)),
+        Span::raw(" "),
     ])
 }
 
@@ -680,7 +683,7 @@ fn terminal_line(card: &TerminalCard, app: &App, width: usize) -> Line {
         TerminalProcessState::Failed { .. } => "fail".into(),
     };
     let meta_w = meta.chars().count();
-    let name_budget = width.saturating_sub(meta_w.saturating_add(1));
+    let name_budget = width.saturating_sub(meta_w.saturating_add(2));
     let label = if card.command.trim().is_empty() {
         "terminal"
     } else {
@@ -708,6 +711,7 @@ fn terminal_line(card: &TerminalCard, app: &App, width: usize) -> Line {
         Span::styled(name, Style::default().fg(name_fg)),
         Span::raw(" ".repeat(pad.saturating_add(1))),
         Span::styled(meta, Style::default().fg(theme.faint)),
+        Span::raw(" "),
     ])
 }
 
@@ -904,6 +908,31 @@ mod tests {
             ends.windows(2).all(|w| w[0] == w[1]),
             "paths must start on one column: {rows:?}"
         );
+    }
+
+    #[test]
+    fn right_aligned_columns_keep_a_margin() {
+        let mut app = with_changes(vec![changed("src/render/palette.rs", 12, 3, false)]);
+        app.apply(AgentEvent::SubagentSpawned {
+            id: "s1".into(),
+            label: "Reviewing".into(),
+            prompt: "r".into(),
+        });
+
+        let w = 34u16;
+        let mut buf = Buffer::blank(Size::new(w, 20));
+        draw(&mut buf, Rect::new(0, 0, w, 20), &mut app);
+
+        // The header keeps its `›` flush — it's the panel's edge control, not
+        // a data column.
+        for row in buf.text().lines().skip(1).filter(|l| !l.trim().is_empty()) {
+            let chars: Vec<char> = row.chars().collect();
+            assert_eq!(
+                chars.get(w as usize - 1).copied(),
+                Some(' '),
+                "nothing may touch the right edge: {row:?}"
+            );
+        }
     }
 
     #[test]

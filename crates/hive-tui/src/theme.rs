@@ -30,6 +30,9 @@ pub struct Theme {
     pub strip: Color,
     /// Lighter strip for hover on clickable cards / back control.
     pub strip_hover: Color,
+    /// Your own prompts in the transcript — lifted off the input strip so the
+    /// history reads as a conversation, not one long band.
+    pub user_strip: Color,
     /// Assistant-response drag selection. Foreground styling is preserved.
     pub assistant_selection_bg: Color,
     /// Pending plan selection (drag / mark without a note yet) — gray wash.
@@ -70,6 +73,7 @@ impl Theme {
             multitask: rgb(0x8e, 0x78, 0xd0),
             strip: rgb(0x26, 0x26, 0x26),
             strip_hover: rgb(0x3a, 0x3a, 0x3a),
+            user_strip: rgb(0x30, 0x30, 0x30),
             assistant_selection_bg: rgb(0x34, 0x34, 0x34),
             mark_pending_bg: rgb(0x4a, 0x4a, 0x4a),
             mark_pending_fg: rgb(0xe0, 0xe0, 0xe0),
