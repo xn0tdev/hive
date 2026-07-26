@@ -80,7 +80,6 @@ fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
             }
         },
         PaletteMode::Connect => pal.connect_rows(&app.connections).len().max(1) as u16,
-        PaletteMode::ConnectPresets => pal.preset_indices().len().max(1) as u16,
         PaletteMode::ConnectKey { .. } => 1,
         PaletteMode::Sessions => {
             if app.saved_sessions.is_empty() {
@@ -113,7 +112,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Commands => "Commands",
         PaletteMode::Models => "Switch model",
         PaletteMode::Connect => "Providers",
-        PaletteMode::ConnectPresets => "Add provider",
         PaletteMode::ConnectKey { .. } => "API key",
         PaletteMode::Sessions => "Resume session",
     };
@@ -135,7 +133,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Commands => draw_command_list(buf, g.list, pal, theme, panel),
         PaletteMode::Models => draw_model_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::Connect => draw_connect_list(buf, g.list, pal, app, theme, panel),
-        PaletteMode::ConnectPresets => draw_preset_list(buf, g.list, pal, theme, panel),
         PaletteMode::Sessions => draw_sessions_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::ConnectKey { preset_idx } => {
             draw_connect_key_hint(buf, g.list, preset_idx, theme, panel);
@@ -474,18 +471,30 @@ fn draw_connect_list(
         };
         let is_sel = idx == sel;
         let bg = if is_sel { theme.sel_bg } else { panel };
-        let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
+        // Providers you haven't set up read one step back from the rest.
+        let configured = !matches!(item, ConnectRow::Preset(_));
+        let name_fg = if is_sel {
+            theme.sel_fg
+        } else if configured {
+            theme.fg
+        } else {
+            theme.dim
+        };
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
         let (raw_left, raw_right) = match item {
             ConnectRow::Profile(c) => {
+                // ✓ it's set up; › it's the one in use right now.
                 let mark = if c.id == app.active_connection {
                     "›"
                 } else {
-                    " "
+                    "✓"
                 };
                 (format!("{mark} {}", c.label), c.detail.clone())
             }
-            ConnectRow::Add => ("  Add provider…".into(), String::new()),
+            ConnectRow::Preset(i) => match crate::PRESETS.get(*i) {
+                Some(p) => (format!("  {}", p.label), short_host(p.base_url)),
+                None => continue,
+            },
             ConnectRow::RemoveActive => ("  Remove active".into(), String::new()),
         };
         let (left, right, gap) =
@@ -567,57 +576,19 @@ fn draw_sessions_list(
     }
 }
 
-fn short_model(id: &str) -> String {
-    id.rsplit('/').next().unwrap_or(id).to_string()
+/// Host of a preset base URL — the same secondary line saved profiles show.
+fn short_host(base_url: &str) -> String {
+    base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(base_url)
+        .to_string()
 }
 
-fn draw_preset_list(
-    buf: &mut Buffer,
-    area: Rect,
-    pal: &PaletteState,
-    theme: &crate::theme::Theme,
-    panel: Color,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let panel_style = Style::default().bg(panel);
-    let indices = pal.preset_indices();
-    if indices.is_empty() {
-        let line = Line::from(Span::styled(
-            "No matching providers",
-            Style::default().fg(theme.faint).bg(panel),
-        ));
-        crate::render::strip_paint::set_line_on_strip(
-            buf, area.x, area.y, &line, area.width, panel,
-        );
-        return;
-    }
-    let sel = pal.selected.min(indices.len() - 1);
-    let visible = area.height as usize;
-    let offset = pal.visible_offset(&[], &[], &[], visible);
-    for row in 0..visible {
-        let idx = offset + row;
-        let y = area.y + row as u16;
-        let Some(&pi) = indices.get(idx) else {
-            buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
-            continue;
-        };
-        let preset = &PRESETS[pi];
-        let is_sel = idx == sel;
-        let bg = if is_sel { theme.sel_bg } else { panel };
-        let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
-        let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
-        let host = crate::render::two_col::host_hint(preset.base_url);
-        let (left, right, gap) =
-            crate::render::two_col::layout_label_host(preset.label, host, area.width as usize);
-        let line = Line::from(vec![
-            Span::styled(left, Style::default().fg(name_fg).bg(bg)),
-            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
-            Span::styled(right, Style::default().fg(detail_fg).bg(bg)),
-        ]);
-        crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, bg);
-    }
+fn short_model(id: &str) -> String {
+    id.rsplit('/').next().unwrap_or(id).to_string()
 }
 
 fn draw_connect_key_hint(
@@ -823,6 +794,43 @@ mod tests {
             });
             assert!(buf.text().contains("Resume session"), "width={width}");
         }
+    }
+
+    #[test]
+    fn providers_list_marks_configured_and_offers_the_rest() {
+        let mut a = app();
+        a.connections = vec![
+            hive_core::event::ConnectionInfo {
+                id: "fireworks".into(),
+                label: "Fireworks".into(),
+                detail: "api.fireworks.ai".into(),
+            },
+            hive_core::event::ConnectionInfo {
+                id: "groq".into(),
+                label: "Groq".into(),
+                detail: "api.groq.com".into(),
+            },
+        ];
+        a.active_connection = "groq".into();
+        a.palette = Some(PaletteState::connect());
+
+        let text = render(Size::new(90, 30), |f| crate::render::draw(f, &mut a))
+            .text()
+            .to_string();
+
+        assert!(text.contains("Providers"), "{text}");
+        assert!(
+            text.contains("\u{203a} Groq"),
+            "active provider marked: {text}"
+        );
+        assert!(
+            text.contains("\u{2713} Fireworks"),
+            "configured marked: {text}"
+        );
+        // Providers you haven't set up are right there in the same list.
+        assert!(text.contains("OpenRouter"), "{text}");
+        assert!(text.contains("openrouter.ai"), "host shown: {text}");
+        assert!(!text.contains("Add provider"), "no add step left: {text}");
     }
 
     #[test]

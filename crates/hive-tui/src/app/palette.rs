@@ -11,10 +11,8 @@ use crate::ModelChoice;
 pub enum PaletteMode {
     Commands,
     Models,
-    /// Saved providers + Add.
+    /// Every provider in one list — configured ones first, then the rest.
     Connect,
-    /// Pick a preset to add.
-    ConnectPresets,
     /// Paste API key for the chosen preset.
     ConnectKey {
         preset_idx: usize,
@@ -36,12 +34,37 @@ impl ModelRow<'_> {
     }
 }
 
-/// One row in the `/connect` list.
+/// One row in the `/connect` list. Configured providers and ones you could
+/// configure live in the same list — picking either does the obvious thing.
 #[derive(Debug, Clone, Copy)]
 pub enum ConnectRow<'a> {
+    /// A saved profile: selecting it switches to that provider.
     Profile(&'a ConnectionInfo),
-    Add,
+    /// A known provider with no key yet: selecting it asks for one.
+    Preset(usize),
     RemoveActive,
+}
+
+/// Host part of a base URL, matching how the shell builds `ConnectionInfo`.
+fn host_of(base_url: &str) -> &str {
+    base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(base_url)
+}
+
+/// Whether a saved profile is this preset. Labels match for anything added
+/// through Hive; the host catches profiles the user has since renamed.
+fn is_preset_configured(preset_idx: usize, connections: &[ConnectionInfo]) -> bool {
+    let Some(preset) = PRESETS.get(preset_idx) else {
+        return false;
+    };
+    let host = host_of(preset.base_url);
+    connections.iter().any(|c| {
+        c.label.eq_ignore_ascii_case(preset.label) || (!host.is_empty() && c.detail == host)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -85,17 +108,6 @@ impl PaletteState {
     pub fn connect() -> Self {
         PaletteState {
             mode: PaletteMode::Connect,
-            query: String::new(),
-            cursor: 0,
-            selected: 0,
-            list_offset: 0,
-            search_focused: false,
-        }
-    }
-
-    pub fn connect_presets() -> Self {
-        PaletteState {
-            mode: PaletteMode::ConnectPresets,
             query: String::new(),
             cursor: 0,
             selected: 0,
@@ -160,7 +172,6 @@ impl PaletteState {
             PaletteMode::Commands => self.command_rows().len(),
             PaletteMode::Models => self.model_rows(choices).len(),
             PaletteMode::Connect => self.connect_rows(connections).len(),
-            PaletteMode::ConnectPresets => self.preset_indices().len(),
             PaletteMode::ConnectKey { .. } => 0,
             PaletteMode::Sessions => self.session_rows(sessions).len(),
         };
@@ -208,6 +219,8 @@ impl PaletteState {
         rows
     }
 
+    /// Every provider Hive knows about: the ones you've set up first, then the
+    /// rest, so adding one is just picking it off the same list.
     pub fn connect_rows<'a>(&self, connections: &'a [ConnectionInfo]) -> Vec<ConnectRow<'a>> {
         let q = self.query.trim().to_ascii_lowercase();
         let mut rows: Vec<ConnectRow<'a>> = connections
@@ -220,27 +233,25 @@ impl PaletteState {
             })
             .map(ConnectRow::Profile)
             .collect();
-        rows.push(ConnectRow::Add);
+
+        rows.extend(
+            PRESETS
+                .iter()
+                .enumerate()
+                // "Custom" needs a base URL too, which only the intro asks for.
+                .filter(|(i, p)| !p.is_custom && !is_preset_configured(*i, connections))
+                .filter(|(_, p)| {
+                    q.is_empty()
+                        || p.label.to_ascii_lowercase().contains(&q)
+                        || p.base_url.to_ascii_lowercase().contains(&q)
+                })
+                .map(|(i, _)| ConnectRow::Preset(i)),
+        );
+
         if connections.len() > 1 {
             rows.push(ConnectRow::RemoveActive);
         }
         rows
-    }
-
-    /// Indices into [`PRESETS`] (Custom last, filterable).
-    pub fn preset_indices(&self) -> Vec<usize> {
-        let q = self.query.trim().to_ascii_lowercase();
-        PRESETS
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                !p.is_custom
-                    && (q.is_empty()
-                        || p.label.to_ascii_lowercase().contains(&q)
-                        || p.base_url.to_ascii_lowercase().contains(&q))
-            })
-            .map(|(i, _)| i)
-            .collect()
     }
 
     /// Filtered session rows for the sessions picker.
@@ -295,14 +306,6 @@ impl PaletteState {
                     self.selected = n - 1;
                 }
             }
-            PaletteMode::ConnectPresets => {
-                let n = self.preset_indices().len();
-                if n == 0 {
-                    self.selected = 0;
-                } else if self.selected >= n {
-                    self.selected = n - 1;
-                }
-            }
             PaletteMode::ConnectKey { .. } => {
                 self.selected = 0;
             }
@@ -338,12 +341,6 @@ impl PaletteState {
                     self.selected = (self.selected + n - 1) % n;
                 }
             }
-            PaletteMode::ConnectPresets => {
-                let n = self.preset_indices().len();
-                if n > 0 {
-                    self.selected = (self.selected + n - 1) % n;
-                }
-            }
             PaletteMode::ConnectKey { .. } => {}
             PaletteMode::Sessions => {
                 let n = self.session_rows(sessions).len();
@@ -371,12 +368,6 @@ impl PaletteState {
             }
             PaletteMode::Connect => {
                 let n = self.connect_rows(connections).len();
-                if n > 0 {
-                    self.selected = (self.selected + 1) % n;
-                }
-            }
-            PaletteMode::ConnectPresets => {
-                let n = self.preset_indices().len();
                 if n > 0 {
                     self.selected = (self.selected + 1) % n;
                 }
@@ -497,7 +488,7 @@ impl PaletteState {
                 let rows = self.model_rows(choices);
                 self.selected = first_selectable_model(&rows);
             }
-            PaletteMode::Connect | PaletteMode::ConnectPresets => {
+            PaletteMode::Connect => {
                 self.selected = 0;
                 self.clamp_selection(choices, connections, sessions);
             }
@@ -560,13 +551,6 @@ impl PaletteState {
         self.connect_rows(connections).get(self.selected).copied()
     }
 
-    pub fn selected_preset_idx(&self) -> Option<usize> {
-        if self.mode != PaletteMode::ConnectPresets {
-            return None;
-        }
-        self.preset_indices().get(self.selected).copied()
-    }
-
     pub fn selected_session<'a>(&self, sessions: &'a [SessionMeta]) -> Option<&'a SessionMeta> {
         if self.mode != PaletteMode::Sessions {
             return None;
@@ -596,4 +580,129 @@ fn move_model_selection(rows: &[ModelRow<'_>], current: usize, dir: isize) -> us
         }
     }
     current.min(rows.len() - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(id: &str, label: &str, host: &str) -> ConnectionInfo {
+        ConnectionInfo {
+            id: id.into(),
+            label: label.into(),
+            detail: host.into(),
+        }
+    }
+
+    fn preset_labels(rows: &[ConnectRow<'_>]) -> Vec<&'static str> {
+        rows.iter()
+            .filter_map(|r| match r {
+                ConnectRow::Preset(i) => Some(PRESETS[*i].label),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn offered_count() -> usize {
+        PRESETS.iter().filter(|p| !p.is_custom).count()
+    }
+
+    #[test]
+    fn nothing_configured_still_lists_every_provider() {
+        let rows = PaletteState::connect().connect_rows(&[]);
+        assert_eq!(rows.len(), offered_count());
+        assert!(rows.iter().all(|r| matches!(r, ConnectRow::Preset(_))));
+        assert!(preset_labels(&rows).contains(&"Fireworks"));
+    }
+
+    #[test]
+    fn a_configured_provider_is_not_offered_again() {
+        let conns = vec![conn("fireworks", "Fireworks", "api.fireworks.ai")];
+        let rows = PaletteState::connect().connect_rows(&conns);
+
+        assert!(
+            matches!(rows.first(), Some(ConnectRow::Profile(c)) if c.label == "Fireworks"),
+            "configured providers come first"
+        );
+        assert!(!preset_labels(&rows).contains(&"Fireworks"));
+        assert_eq!(rows.len(), offered_count(), "one row swapped, none added");
+    }
+
+    #[test]
+    fn a_renamed_profile_is_matched_by_host() {
+        let conns = vec![conn("work", "Work box", "api.groq.com")];
+        let rows = PaletteState::connect().connect_rows(&conns);
+        assert!(
+            !preset_labels(&rows).contains(&"Groq"),
+            "same host means it's already set up: {:?}",
+            preset_labels(&rows)
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_keeps_every_preset_on_offer() {
+        let conns = vec![conn("mine", "My gateway", "llm.internal")];
+        let rows = PaletteState::connect().connect_rows(&conns);
+        assert_eq!(preset_labels(&rows).len(), offered_count());
+        assert!(matches!(rows.first(), Some(ConnectRow::Profile(_))));
+    }
+
+    #[test]
+    fn search_spans_configured_and_offered() {
+        let conns = vec![conn("fireworks", "Fireworks", "api.fireworks.ai")];
+        let mut pal = PaletteState::connect();
+        pal.query = "gro".into();
+        let rows = pal.connect_rows(&conns);
+        assert_eq!(preset_labels(&rows), vec!["Groq"]);
+        assert!(!rows.iter().any(|r| matches!(r, ConnectRow::Profile(_))));
+
+        pal.query = "fire".into();
+        let rows = pal.connect_rows(&conns);
+        assert!(matches!(rows.first(), Some(ConnectRow::Profile(c)) if c.label == "Fireworks"));
+    }
+
+    #[test]
+    fn remove_appears_only_with_something_to_fall_back_to() {
+        let one = vec![conn("fireworks", "Fireworks", "api.fireworks.ai")];
+        let rows = PaletteState::connect().connect_rows(&one);
+        assert!(!rows.iter().any(|r| matches!(r, ConnectRow::RemoveActive)));
+
+        let two = vec![
+            conn("fireworks", "Fireworks", "api.fireworks.ai"),
+            conn("groq", "Groq", "api.groq.com"),
+        ];
+        let rows = PaletteState::connect().connect_rows(&two);
+        assert!(matches!(rows.last(), Some(ConnectRow::RemoveActive)));
+    }
+
+    #[test]
+    fn model_rows_group_every_provider() {
+        let model = |key: &str, group: &str, conn: &str| ModelChoice {
+            key: key.into(),
+            display: key.into(),
+            detail: String::new(),
+            group: group.into(),
+            connection_id: conn.into(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        };
+        let choices = vec![
+            model("a/one", "Fireworks", "fireworks"),
+            model("a/two", "Fireworks", "fireworks"),
+            model("b/one", "Groq", "groq"),
+        ];
+
+        let rows = PaletteState::models().model_rows(&choices);
+        let headers: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ModelRow::Header(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["Fireworks", "Groq"]);
+        assert_eq!(rows.iter().filter(|r| r.is_selectable()).count(), 3);
+    }
 }

@@ -206,8 +206,16 @@ fn sanitize_api_key(s: &str) -> String {
 fn paste_into_palette(app: &mut App, text: &str) -> bool {
     let mode = app.palette.as_ref().map(|p| p.mode);
     match mode {
-        Some(PaletteMode::ConnectPresets) => {
-            let idx = app.palette.as_ref().and_then(|p| p.selected_preset_idx());
+        // Pasting a key straight onto a highlighted provider skips the click.
+        Some(PaletteMode::Connect) => {
+            let idx = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_connect(&app.connections))
+                .and_then(|row| match row {
+                    crate::app::palette::ConnectRow::Preset(i) => Some(i),
+                    _ => None,
+                });
             let Some(idx) = idx else {
                 return false;
             };
@@ -1559,10 +1567,7 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
             if let Some(pal) = app.palette.as_ref() {
                 match pal.mode {
                     PaletteMode::Models | PaletteMode::Connect => app.open_palette(),
-                    PaletteMode::ConnectPresets => app.open_connect_picker(),
-                    PaletteMode::ConnectKey { .. } => {
-                        app.palette = Some(crate::app::palette::PaletteState::connect_presets());
-                    }
+                    PaletteMode::ConnectKey { .. } => app.open_connect_picker(),
                     PaletteMode::Commands | PaletteMode::Sessions => app.close_palette(),
                 }
             } else {
@@ -1665,7 +1670,7 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 .and_then(|p| p.selected_connect(&app.connections))
                 .map(|r| match r {
                     ConnectRow::Profile(c) => ConnectPick::Profile(c.id.clone()),
-                    ConnectRow::Add => ConnectPick::Add,
+                    ConnectRow::Preset(i) => ConnectPick::Preset(i),
                     ConnectRow::RemoveActive => ConnectPick::Remove,
                 });
             match row {
@@ -1674,8 +1679,8 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                     let _ = input_tx.send(InputCommand::SetConnection { id });
                     app.flash("Switching provider…");
                 }
-                Some(ConnectPick::Add) => {
-                    app.palette = Some(crate::app::palette::PaletteState::connect_presets());
+                Some(ConnectPick::Preset(idx)) => {
+                    app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
                 }
                 Some(ConnectPick::Remove) => {
                     let id = app.active_connection.clone();
@@ -1685,13 +1690,6 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                     }
                 }
                 None => {}
-            }
-            false
-        }
-        Some(PaletteMode::ConnectPresets) => {
-            let idx = app.palette.as_ref().and_then(|p| p.selected_preset_idx());
-            if let Some(idx) = idx {
-                app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
             }
             false
         }
@@ -1778,9 +1776,12 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
     }
 }
 
+/// What the highlighted `/connect` row does when you press Enter.
 enum ConnectPick {
+    /// Switch to a provider that's already set up.
     Profile(String),
-    Add,
+    /// Ask for a key for a provider that isn't.
+    Preset(usize),
     Remove,
 }
 
@@ -1913,6 +1914,55 @@ mod tests {
         let pal = app.palette.as_ref().unwrap();
         assert!(pal.search_focused);
         assert_eq!(pal.query, "m");
+    }
+
+    #[test]
+    fn picking_an_unconfigured_provider_asks_for_the_key() {
+        use crate::app::palette::{ConnectRow, PaletteState};
+
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.connections = vec![hive_core::event::ConnectionInfo {
+            id: "fireworks".into(),
+            label: "Fireworks".into(),
+            detail: "api.fireworks.ai".into(),
+        }];
+        app.active_connection = "fireworks".into();
+        app.palette = Some(PaletteState::connect());
+
+        // Row 0 is the configured provider: Enter switches to it.
+        assert!(matches!(
+            app.palette
+                .as_ref()
+                .and_then(|p| p.selected_connect(&app.connections)),
+            Some(ConnectRow::Profile(_))
+        ));
+        assert!(!activate_palette(&mut app, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::SetConnection { id }) if id == "fireworks"
+        ));
+
+        // Row 1 is a provider with no key: Enter goes straight to the key
+        // prompt, with no "Add provider" detour in between.
+        app.palette = Some(PaletteState::connect());
+        if let Some(pal) = app.palette.as_mut() {
+            pal.move_down(&[], &app.connections.clone(), &[]);
+        }
+        let idx = match app
+            .palette
+            .as_ref()
+            .and_then(|p| p.selected_connect(&app.connections))
+        {
+            Some(ConnectRow::Preset(i)) => i,
+            other => panic!("expected a preset row, got {other:?}"),
+        };
+        assert!(!activate_palette(&mut app, &tx));
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::ConnectKey { preset_idx: idx })
+        );
+        assert!(rx.try_recv().is_err(), "nothing sent until a key is typed");
     }
 
     #[test]
