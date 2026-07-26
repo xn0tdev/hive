@@ -160,19 +160,31 @@ fn wrap_one(line: Line, width: usize) -> Vec<WrappedLine> {
                     line: to_line(&cur),
                     join_before: cur_join,
                 });
-                cur = reindent(vec![(ch, st)], &indent, preserve_indent);
-                cur_w = cur.iter().map(|(c, _)| char_width(*c)).sum();
                 cur_join = if ch.is_whitespace() {
                     WrapJoin::SoftSpace
                 } else {
                     WrapJoin::SoftNone
                 };
                 last_space = None;
-                skip_leading_spaces = !preserve_indent;
+                if ch == ' ' && !preserve_indent {
+                    // The break landed on the separator itself: the next row
+                    // starts after that space, not with it.
+                    cur = Vec::new();
+                    cur_w = 0;
+                    skip_leading_spaces = true;
+                } else {
+                    cur = reindent(vec![(ch, st)], &indent, preserve_indent);
+                    cur_w = cur.iter().map(|(c, _)| char_width(*c)).sum();
+                    // The row already holds the character that overflowed.
+                    skip_leading_spaces = false;
+                }
                 continue;
             }
             last_space = None;
-            skip_leading_spaces = !preserve_indent;
+            // Only swallow spaces when the new row genuinely starts empty. With
+            // a carried word already sitting on it, the next space is that
+            // word's separator — eating it welds two words into one.
+            skip_leading_spaces = !preserve_indent && cur.is_empty();
         }
 
         if skip_leading_spaces {
@@ -297,6 +309,28 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].join_before, WrapJoin::Hard);
         assert_eq!(rows[1].join_before, WrapJoin::SoftSpace);
+    }
+
+    #[test]
+    fn wrapping_never_welds_two_words_together() {
+        // When a row fills up exactly on a word separator, that space used to be
+        // swallowed as if it were leading indent on the new row — so the word
+        // carried over and the word after it fused (`whichbreaks`).
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        for width in 4..60 {
+            // Rebuild the paragraph from the rows and what each join says was
+            // dropped between them. A hard token break glues back with nothing,
+            // a soft one with the space it ate — so a *lost* space shows up.
+            let rows = wrap_lines_with_joins(vec![Line::from(text)], width);
+            let mut back = String::new();
+            for row in &rows {
+                if row.join_before == WrapJoin::SoftSpace {
+                    back.push(' ');
+                }
+                back.push_str(&line_text(&row.line));
+            }
+            assert_eq!(back, text, "width {width} lost a separator");
+        }
     }
 
     #[test]

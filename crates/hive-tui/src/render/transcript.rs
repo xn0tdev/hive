@@ -298,8 +298,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 // number of one-row sentences — the window slides, it never
                 // grows, and the transcript below it doesn't shift.
                 if body.is_none() && thought_is_live(&th_snap, app) {
-                    let window =
-                        recent_sentences(&th_snap.text, THOUGHT_WINDOW, width.saturating_sub(4));
+                    let window = recent_sentences(
+                        &th_snap.text,
+                        THOUGHT_WINDOW,
+                        width.saturating_sub(SPINE_W),
+                    );
                     let n = window.len();
                     for (k, sentence) in window.into_iter().enumerate() {
                         heads.push((out.len(), i));
@@ -320,7 +323,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                         .split('\n')
                         .map(|l| Line::from(Span::styled(l.to_string(), style)))
                         .collect();
-                    for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
+                    for mut l in wrap::wrap_lines(raw, width.saturating_sub(SPINE_W)) {
                         l.spans.insert(0, spine(&app.theme));
                         // Click anywhere on the thought body also toggles it.
                         heads.push((out.len(), i));
@@ -545,7 +548,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                     .lines()
                     .map(|l| Line::from(Span::styled(l.to_string(), style)))
                     .collect();
-                for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
+                for mut l in wrap::wrap_lines(raw, width.saturating_sub(SPINE_W)) {
                     l.spans.insert(0, spine(&theme));
                     out.push(l);
                 }
@@ -604,8 +607,15 @@ fn thought_is_live(th: &crate::app::state::Thought, app: &App) -> bool {
 
 /// The `▏` rule that ties a thought's text to its header — same thin bar as the
 /// streaming caret, so quoted reasoning reads as one column, not loose indent.
+///
+/// No space after it: `▏` is a left-eighth block, so the bar already sits at
+/// the far edge of its own cell. Padding it too only pushes the text out of
+/// line with the header above.
+const SPINE: &str = "  ▏";
+const SPINE_W: usize = 3;
+
 fn spine(theme: &crate::theme::Theme) -> Span {
-    Span::styled("  ▏ ", Style::default().fg(theme.faint))
+    Span::styled(SPINE, Style::default().fg(theme.faint))
 }
 
 /// `4.2s` · `47s` · `1m 04s`. Live headers round to whole seconds so the
@@ -1130,6 +1140,37 @@ mod tests {
 
         // Short enough to fit → untouched, no ellipsis.
         assert_eq!(super::fit("all good", 20, true), "all good");
+    }
+
+    #[test]
+    fn quoted_thought_rows_line_up_under_the_header() {
+        use hive_core::event::AgentEvent;
+
+        assert_eq!(
+            super::SPINE.chars().count(),
+            super::SPINE_W,
+            "wrap math is measured off SPINE_W — it must match the real prefix"
+        );
+
+        let mut a = app();
+        a.blocks.clear();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("One thought.".into()));
+
+        let lines = super::lines(&mut a, 80);
+        // Columns, not bytes — `▏` is three bytes wide but one cell.
+        let col = |l: &comb::Line, needle: &str| {
+            let text: String = l.spans.iter().map(|s| s.content.as_str()).collect();
+            let at = text.find(needle).expect("row text");
+            text[..at].chars().count()
+        };
+        let header = col(&lines[0], "Thinking");
+        let quoted = col(&lines[1], "One thought.");
+        assert_eq!(
+            quoted - header,
+            1,
+            "the bar takes one column, so quoted text sits just right of the header"
+        );
     }
 
     #[test]
