@@ -17,6 +17,15 @@ use crate::render::tools::{
 };
 use crate::render::{markdown, wrap};
 
+/// One clickable transcript line: which block it belongs to and, in columns
+/// relative to the transcript, how much of it actually answers to a click.
+struct HeadRow {
+    line: usize,
+    block: usize,
+    start: u16,
+    end: u16,
+}
+
 struct BuiltAssistantRow {
     line_idx: usize,
     block: usize,
@@ -55,10 +64,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     // Remember which screen rows hold expandable headers (thoughts / subagents)
     // so a mouse click can be mapped back to its block.
     app.click_hits.clear();
-    for (line_idx, block_idx) in heads {
-        if line_idx >= scroll && line_idx < scroll + target.height as usize {
-            app.click_hits
-                .push((target.y + (line_idx - scroll) as u16, block_idx));
+    for head in heads {
+        if head.line >= scroll && head.line < scroll + target.height as usize {
+            app.click_hits.push(crate::app::state::BlockHit {
+                row: target.y + (head.line - scroll) as u16,
+                start: target.x + head.start,
+                end: target.x + head.end.min(target.width),
+                block: head.block,
+            });
         }
     }
     app.assistant_rows.clear();
@@ -147,7 +160,7 @@ pub fn lines(app: &mut App, width: usize) -> Vec<Line> {
 
 /// Like `lines`, but also reports which line index holds each expandable
 /// header (thought / subagent) with its block index for mouse hit-testing.
-fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<BuiltAssistantRow>) {
+fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<HeadRow>, Vec<BuiltAssistantRow>) {
     if matches!(app.view, ChatView::Subagent(_)) {
         // Clone the card snapshot so we can still use `app` mutably for caches.
         if let Some(card) = app.viewed_subagent().cloned() {
@@ -164,7 +177,14 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
     }
 
     let mut out: Vec<Line> = Vec::new();
-    let mut heads: Vec<(usize, usize)> = Vec::new();
+    let mut heads: Vec<HeadRow> = Vec::new();
+    // Everything but a prompt answers to a click anywhere on its row.
+    let full = |line: usize, block: usize| HeadRow {
+        line,
+        block,
+        start: 0,
+        end: width as u16,
+    };
     let mut assistant_rows: Vec<BuiltAssistantRow> = Vec::new();
     let n = app.blocks.len();
 
@@ -224,9 +244,15 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let text = text.clone();
                 let hovered = app.hover_block == Some(i);
                 let start = out.len();
-                out.extend(user_lines(&text, app, width, hovered));
-                for line_idx in start..out.len() {
-                    heads.push((line_idx, i));
+                let (lines, content_w) = user_block(&text, app, width, hovered);
+                out.extend(lines);
+                for line in start..out.len() {
+                    heads.push(HeadRow {
+                        line,
+                        block: i,
+                        start: 0,
+                        end: content_w,
+                    });
                 }
             }
             UiBlock::Assistant { text, streaming } => {
@@ -291,7 +317,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     elapsed_ms: th.elapsed_ms,
                     open: th.open,
                 };
-                heads.push((out.len(), i));
+                heads.push(full(out.len(), i));
                 out.push(thought_header(&th_snap, app, show_hint));
                 if let Some(text) = body {
                     let style = Style::default().fg(app.theme.faint).add(Modifier::ITALIC);
@@ -302,7 +328,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     for mut l in wrap::wrap_lines(raw, width.saturating_sub(4)) {
                         l.spans.insert(0, Span::raw("    "));
                         // Click anywhere on the thought body also toggles it.
-                        heads.push((out.len(), i));
+                        heads.push(full(out.len(), i));
                         out.push(l);
                     }
                 }
@@ -315,7 +341,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let start = out.len();
                 out.extend(subagent_card_lines(&card, app, width, show_hint, hovered));
                 for line_idx in start..out.len() {
-                    heads.push((line_idx, i));
+                    heads.push(full(line_idx, i));
                 }
             }
             UiBlock::Plan(card) => {
@@ -325,7 +351,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let start = out.len();
                 out.extend(plan_card_lines(&card, app, width, show_hint, hovered));
                 for line_idx in start..out.len() {
-                    heads.push((line_idx, i));
+                    heads.push(full(line_idx, i));
                 }
             }
             UiBlock::Terminal(card) => {
@@ -334,7 +360,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let start = out.len();
                 out.extend(terminal_card_lines(card, app, width, show_hint, hovered));
                 for line_idx in start..out.len() {
-                    heads.push((line_idx, i));
+                    heads.push(full(line_idx, i));
                 }
             }
             UiBlock::Tool(card) => {
@@ -355,7 +381,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let start = out.len();
                 out.extend(tool_lines(&card, app, width, hovered));
                 for line_idx in start..out.len() {
-                    heads.push((line_idx, i));
+                    heads.push(full(line_idx, i));
                 }
             }
             UiBlock::ModeSwitch(card) => {
@@ -622,7 +648,9 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 /// User message: a full-width gray strip like the input bar — one tinted
 /// padding row above and below, text rows in the middle, lightly inset.
 /// `@path` chips keep the accent `@` so attachments read like the composer.
-fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
+/// The prompt strip, plus how many columns of it are actually the message.
+/// The band spans the chat column, but only the text should answer to a click.
+fn user_block(text: &str, app: &App, width: usize, hovered: bool) -> (Vec<Line>, u16) {
     let theme = &app.theme;
     let bg = if hovered {
         theme.strip_hover
@@ -639,6 +667,7 @@ fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     let wrapped = wrap::wrap_lines(raw, width.saturating_sub(4));
 
     let mut out = vec![pad_row()];
+    let mut content_w = 0usize;
     out.extend(wrapped.into_iter().map(|line| {
         let mut used = 2usize;
         let mut spans = vec![Span::styled("  ", body)];
@@ -647,13 +676,18 @@ fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
             used += s.width();
             spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
+        content_w = content_w.max(used);
         if width > used {
             spans.push(Span::styled(" ".repeat(width - used), body));
         }
         Line::from(spans)
     }));
     out.push(pad_row());
-    out
+    (out, content_w.min(width) as u16)
+}
+
+fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
+    user_block(text, app, width, hovered).0
 }
 
 fn style_user_line(text: &str, theme: &crate::theme::Theme, bg: Color) -> Vec<Span> {
@@ -885,6 +919,38 @@ mod tests {
     }
 
     #[test]
+    fn only_the_message_itself_answers_to_a_click() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.push_user("hi".into());
+
+        let buf = render(Size::new(80, 14), |f| crate::render::draw(f, &mut a));
+        let hit = *a.click_hits.first().expect("the prompt is clickable");
+
+        // On the text: opens the prompt menu.
+        assert_eq!(a.expandable_at(hit.start, hit.row), Some(0));
+        assert_eq!(a.expandable_at(hit.end - 1, hit.row), Some(0));
+
+        // The strip keeps spanning the chat column…
+        let band = a.theme.user_strip;
+        let painted: Vec<u16> = (0..80)
+            .filter(|x| buf.get(*x, hit.row).and_then(|c| c.style.bg) == Some(band))
+            .collect();
+        let right_edge = *painted.last().expect("painted band");
+        assert!(
+            right_edge > hit.end,
+            "band {right_edge} should reach past the text {}",
+            hit.end
+        );
+
+        // …but its empty right side is not a click target any more.
+        assert_eq!(a.expandable_at(right_edge, hit.row), None);
+        assert_eq!(a.expandable_at(hit.end, hit.row), None);
+    }
+
+    #[test]
     fn thoughts_collapse_and_expand() {
         use hive_core::event::AgentEvent;
         let mut a = app();
@@ -969,11 +1035,13 @@ mod tests {
         let before = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
 
         // Collapsed: the header row is registered for hit-testing, text hidden.
-        let (row, _) = *a.click_hits.first().expect("header row recorded");
+        let hit = *a.click_hits.first().expect("header row recorded");
         assert!(!before.text().contains("secret plan"));
 
         // A click on that row opens exactly that thought.
-        let idx = a.expandable_at_row(row).expect("click hits the header");
+        let idx = a
+            .expandable_at(hit.start, hit.row)
+            .expect("click hits the header");
         a.activate_expandable_at(idx);
         let after = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
         assert!(after.text().contains("secret plan"));
@@ -1556,13 +1624,15 @@ mod tests {
         let rows: Vec<u16> = a
             .click_hits
             .iter()
-            .filter(|(_, b)| *b == idx)
-            .map(|(row, _)| *row)
+            .filter(|h| h.block == idx)
+            .map(|h| h.row)
             .collect();
         assert!(!rows.is_empty(), "tool card rows must be hit-testable");
 
         // Clicking one opens the tool menu — Copy / Revert live nowhere else.
-        let hit = a.expandable_at_row(rows[0]).expect("row maps to the card");
+        let hit = a
+            .expandable_at(a.click_hits[0].start, rows[0])
+            .expect("row maps to the card");
         assert_eq!(hit, idx);
         a.activate_expandable_at(hit);
         assert!(a.context_menu_open(), "tool context menu");
@@ -1584,8 +1654,8 @@ mod tests {
         let row = a
             .click_hits
             .iter()
-            .find(|(_, b)| *b == idx)
-            .map(|(row, _)| *row)
+            .find(|h| h.block == idx)
+            .map(|h| h.row)
             .expect("tool row");
         assert!(!banded(&plain, row), "idle card stays unpainted");
 

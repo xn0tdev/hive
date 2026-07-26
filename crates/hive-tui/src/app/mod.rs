@@ -60,10 +60,10 @@ use settings::SettingsState;
 use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
-    Block, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot,
-    GoalCard, LoopDetectedCard, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
-    PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState,
-    Thought, ToolCard, ToolStatus, WorkSummaryCard,
+    Block, BlockHit, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem,
+    FileSnapshot, GoalCard, LoopDetectedCard, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection,
+    PlanStatus, PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase,
+    TerminalViewState, Thought, ToolCard, ToolStatus, WorkSummaryCard,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -277,9 +277,9 @@ pub struct App {
     /// Animation clock: frames derive from elapsed time, so the spinner and
     /// shimmer run at a constant speed no matter how often events arrive.
     pub(crate) anim_start: std::time::Instant,
-    /// Screen rows of expandable headers from the last draw: (row, block index).
-    /// Rebuilt every frame; used to hit-test mouse clicks on thoughts/subagents.
-    pub(crate) click_hits: Vec<(u16, usize)>,
+    /// Clickable cells of expandable blocks from the last draw. Rebuilt every
+    /// frame; used to hit-test mouse clicks on thoughts / cards / prompts.
+    pub(crate) click_hits: Vec<BlockHit>,
     /// Visible rows of completed assistant responses, rebuilt every frame.
     pub(crate) assistant_row_hits: Vec<AssistantRowHit>,
     /// All rendered rows of completed assistant responses, including offscreen rows.
@@ -2972,12 +2972,14 @@ Keep everything else unless a note says otherwise.\n",
         }
     }
 
-    /// The expandable header (if any) drawn on this screen row in the last frame.
-    pub fn expandable_at_row(&self, row: u16) -> Option<usize> {
+    /// The expandable block (if any) drawn under this cell in the last frame.
+    /// Columns matter: a message's strip runs the width of the chat column, but
+    /// only the text itself should answer to a click.
+    pub fn expandable_at(&self, col: u16, row: u16) -> Option<usize> {
         self.click_hits
             .iter()
-            .find(|(r, _)| *r == row)
-            .map(|(_, idx)| *idx)
+            .find(|hit| hit.row == row && col >= hit.start && col < hit.end)
+            .map(|hit| hit.block)
     }
 
     fn finalize_assistant(&mut self, final_text: String) {

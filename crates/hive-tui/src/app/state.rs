@@ -45,6 +45,16 @@ pub struct ToolCard {
     pub snapshot: Option<FileSnapshot>,
 }
 
+/// One clickable cell range of a block, in screen coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockHit {
+    pub row: u16,
+    pub start: u16,
+    /// Exclusive.
+    pub end: u16,
+    pub block: usize,
+}
+
 /// Saved file content for revert.
 #[derive(Clone)]
 pub struct FileSnapshot {
