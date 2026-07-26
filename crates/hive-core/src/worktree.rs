@@ -32,6 +32,9 @@ pub fn create(repo: &Path, id: &str) -> Result<(PathBuf, String), String> {
     let branch = branch_name(id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir worktrees: {e}"))?;
+        // Worker checkouts live inside the repo, so without this the user's
+        // next `git add -A` sweeps them in as embedded repositories.
+        let _ = std::fs::write(parent.join(".gitignore"), "*\n");
     }
     if path.exists() {
         let _ = remove(repo, id);
@@ -55,6 +58,19 @@ pub fn create(repo: &Path, id: &str) -> Result<(PathBuf, String), String> {
         ));
     }
     Ok((path, branch))
+}
+
+/// Characters of patch text handed to the orchestrator.
+const DIFF_CAP: usize = 6_000;
+
+/// Cap a patch, counting characters rather than bytes. Diffs carry whatever the
+/// code does — Cyrillic strings, box drawing, emoji — and a byte-index cut
+/// lands inside a character and panics, taking the whole turn with it.
+fn cap_patch(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…\n(diff truncated)", &s[..end]),
+        None => s.to_string(),
+    }
 }
 
 /// Short status + diff from a worktree (for the orchestrator).
@@ -89,12 +105,7 @@ pub fn summarize(worktree: &Path) -> String {
     {
         let s = String::from_utf8_lossy(&o.stdout);
         if !s.trim().is_empty() {
-            let capped = if s.len() > 6_000 {
-                format!("{}…\n(diff truncated)", &s[..6_000])
-            } else {
-                s.into_owned()
-            };
-            parts.push(format!("### git diff\n{capped}"));
+            parts.push(format!("### git diff\n{}", cap_patch(&s, DIFF_CAP)));
         }
     }
     if parts.is_empty() {
@@ -137,10 +148,19 @@ pub fn integrate(repo: &Path, id: &str) -> Result<String, String> {
     let stdout = String::from_utf8_lossy(&merge.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&merge.stderr).trim().to_string();
     if !merge.status.success() {
-        let _ = remove(repo, id);
+        // Put the main checkout back the way it was — a half-merged tree is
+        // worse than no merge, and MULTITASK has no shell to dig out of it.
+        // The branch and worktree stay: they hold the only copy of the work,
+        // and "retry after resolving" is meaningless once they're deleted.
+        let _ = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(repo)
+            .output();
         return Err(format!(
             "merge conflict or failure for `{branch}`:\n{stdout}\n{stderr}\n\
-Resolve conflicts in the main checkout, then retry or abort the merge."
+The merge was rolled back and the main checkout is clean. The work is kept on \
+branch `{branch}` (worker id `{id}`) — resolve it there or in MAKE mode, then \
+retry `integrate_worktree`."
         ));
     }
 
@@ -221,6 +241,102 @@ mod tests {
             .unwrap()
             .success());
         dir
+    }
+
+    fn write_commit(dir: &Path, name: &str, body: &str, msg: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-m", msg]] {
+            assert!(Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    #[test]
+    fn capping_a_patch_never_splits_a_character() {
+        // One ASCII byte then two-byte characters, so the byte at the cap is
+        // guaranteed to sit inside a character.
+        let text = format!("a{}", "я".repeat(DIFF_CAP));
+        let capped = cap_patch(&text, DIFF_CAP);
+
+        assert!(capped.ends_with("(diff truncated)"), "{capped}");
+        assert_eq!(
+            capped.chars().take_while(|c| *c != '…').count(),
+            DIFF_CAP,
+            "keeps exactly the cap in characters"
+        );
+
+        // Shorter than the cap: handed through untouched.
+        assert_eq!(cap_patch("привет", DIFF_CAP), "привет");
+    }
+
+    #[test]
+    fn a_non_ascii_diff_is_summarised_without_panicking() {
+        let repo = temp_repo();
+        let (path, _) = create(&repo, "cyr1").unwrap();
+        // Well past the 6 KB cap, and multi-byte throughout, so a byte-index
+        // cut lands inside a character.
+        std::fs::write(
+            path.join("notes.txt"),
+            "Кэш сброшен и RAM очищена. ".repeat(600),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&path)
+            .status()
+            .unwrap()
+            .success());
+
+        let summary = summarize(&path);
+        assert!(summary.contains("(diff truncated)"), "{summary}");
+        assert!(summary.contains("Кэш"), "{summary}");
+
+        let _ = remove(&repo, "cyr1");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_conflicting_merge_keeps_the_work_and_leaves_a_clean_tree() {
+        let repo = temp_repo();
+        write_commit(&repo, "shared.txt", "base\n", "base");
+        let (path, branch) = create(&repo, "conf1").unwrap();
+
+        // Both sides touch the same line.
+        write_commit(&path, "shared.txt", "from the worker\n", "worker");
+        write_commit(&repo, "shared.txt", "from main\n", "main");
+
+        let err = integrate(&repo, "conf1").expect_err("should conflict");
+        assert!(err.contains(&branch), "names the branch to recover: {err}");
+
+        // The branch still exists — the work isn't thrown away.
+        let branches = Command::new("git")
+            .args(["branch", "--list", &branch])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).contains(&branch),
+            "the worker's branch must survive a conflict"
+        );
+
+        // And the main checkout isn't left mid-merge.
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            !status.contains("UU") && !status.contains("AA"),
+            "merge left conflicts behind: {status}"
+        );
+
+        let _ = remove(&repo, "conf1");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

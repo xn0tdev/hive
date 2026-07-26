@@ -75,9 +75,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         } else if app.running {
             "Add a follow-up"
         } else if app.just_pasted_image() {
-            "Pasted image — describe what to do with it"
+            "Pasting image…"
         } else if app.has_pending_attaches() {
-            "Describe what to do with the attachment(s)"
+            "Describe the task"
         } else {
             "Ask hive anything"
         };
@@ -248,7 +248,7 @@ mod tests {
         let text = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a))
             .text()
             .to_string();
-        assert!(text.contains("Pasted image"), "{text}");
+        assert!(text.contains("Pasting image"), "{text}");
         assert!(a.needs_animation(), "must keep painting so it can expire");
 
         // Once the moment has passed the composer goes back to its usual ask.
@@ -256,8 +256,8 @@ mod tests {
         let text = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a))
             .text()
             .to_string();
-        assert!(!text.contains("Pasted image"), "{text}");
-        assert!(text.contains("Describe what to do"), "{text}");
+        assert!(!text.contains("Pasting image"), "{text}");
+        assert!(text.contains("Describe the task"), "{text}");
     }
 
     #[test]

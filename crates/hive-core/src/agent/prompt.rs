@@ -61,8 +61,8 @@ When the plan is ready, say so briefly and stop. Do not begin the work.\n\n",
     } else if mode == AgentMode::Multitask && !subagent {
         p.push_str(
             "- You orchestrate — do not implement features yourself.\n\
-- Split independent work into clear tasks; spawn subagents; wait for their results.\n\
-- After workers finish, integrate their branches with `integrate_worktree`.\n\
+- Split independent work into clear tasks, spawn the workers in one call, and \
+integrate every branch when they finish. Don't stop half way.\n\
 - Only ask the user when blocked on a real ambiguity tools cannot resolve.\n\n",
         );
     } else {
@@ -217,14 +217,24 @@ tasks, do NOT switch — just implement.\n\n",
     } else if mode == AgentMode::Multitask {
         p.push_str("## MULTITASK mode\n");
         p.push_str(
-            "You are the orchestrator. You do NOT implement code yourself.\n\
-- Split the user's request into independent tasks (different features / files).\n\
-- Call `spawn_swarm` with those tasks (or `spawn_subagent` for a single worker).\n\
-- Each worker runs in an isolated git worktree so they do not clash.\n\
-- You write each worker's full prompt with all needed context.\n\
-- Wait for results, then call `integrate_worktree` with each worker id/branch to merge.\n\
-- If integrate reports conflicts, describe them clearly — do not silently force merges.\n\
-- Read/search tools are available so you can inspect the repo before splitting work.\n\
+            "You are the orchestrator. You do NOT implement code yourself — you run \
+this loop to the end without stopping to check in between steps.\n\
+1. Look before splitting: read/search tools are available, use them to find the \
+files each task will touch.\n\
+2. Split into tasks that touch *different* files. Overlapping tasks conflict at \
+merge time, and merging is the expensive part. Two well-separated tasks beat five \
+tangled ones; a job that can't be split is one `spawn_subagent`, not a swarm.\n\
+3. Call `spawn_swarm` with the task list (`spawn_subagent` for a single worker). \
+Each task string is the worker's entire brief — it sees none of this conversation, \
+so state the goal, the files, the constraints, and what \"done\" means.\n\
+4. Workers run in isolated git worktrees, in parallel. One call spawns them all; \
+don't spawn them one at a time and wait between.\n\
+5. When results come back, call `integrate_worktree` once per worker id from the \
+results. Do this for every worker — work left unintegrated is work thrown away.\n\
+6. A conflict rolls the merge back and keeps the branch. Say which worker and which \
+files conflicted; don't retry the same merge blindly.\n\
+7. Then `switch_mode` to `make` and verify the merged result — you cannot build or \
+test from here, and unverified merges are not finished work.\n\
 Forbidden for you: `write_file`, `edit_file`, `delete_path`, `run_shell`, `verify_project`.\n\n",
         );
         p.push_str("## Existing plan\n");
@@ -247,6 +257,26 @@ mod tests {
     use crate::skill::no_skills;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The orchestrator has no way to build or test, so the prompt has to hand
+    /// it the whole loop — split, spawn once, integrate every worker, verify.
+    #[test]
+    fn multitask_prompt_describes_the_whole_loop() {
+        let dir = std::env::temp_dir();
+        let p = build_system_prompt(&dir, no_skills().as_ref(), false, AgentMode::Multitask);
+
+        assert!(p.contains("spawn_swarm"), "{p}");
+        assert!(p.contains("integrate_worktree"), "{p}");
+        assert!(p.contains("different* files"), "warns about overlap: {p}");
+        assert!(
+            p.contains("switch_mode") && p.contains("verify"),
+            "must hand off to MAKE to verify: {p}"
+        );
+        assert!(
+            p.contains("sees none of this conversation"),
+            "workers need self-contained briefs: {p}"
+        );
+    }
 
     #[test]
     fn prompt_includes_agents_md_section() {
