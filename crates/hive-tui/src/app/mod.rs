@@ -2800,12 +2800,16 @@ Keep everything else unless a note says otherwise.\n",
     /// What the agent is visibly busy with, for the live status line. A running
     /// terminal is the honest answer while one is open — "Thinking" is not.
     pub fn activity_label(&self) -> &'static str {
-        let terminal_running = self.blocks.iter().any(|b| match b {
-            Block::Terminal(card) => {
-                matches!(card.process, hive_core::TerminalProcessState::Running)
+        let mut terminal_running = false;
+        for block in &self.blocks {
+            if let Block::Terminal(card) = block {
+                if card.awaiting_user().is_some() {
+                    return "Waiting for you";
+                }
+                terminal_running |=
+                    matches!(card.process, hive_core::TerminalProcessState::Running);
             }
-            _ => false,
-        });
+        }
         if terminal_running {
             return "Working in terminal";
         }

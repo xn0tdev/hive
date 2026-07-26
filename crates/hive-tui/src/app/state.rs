@@ -75,6 +75,26 @@ pub struct TerminalCard {
 }
 
 impl TerminalCard {
+    /// The prompt this terminal is blocked on, when it's one only the user can
+    /// answer (a password, a yes/no). `None` while it's just working.
+    pub fn awaiting_user(&self) -> Option<String> {
+        if !matches!(self.process, TerminalProcessState::Running) {
+            return None;
+        }
+        let (rows, cols) = self.screen.size();
+        let mut text = String::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                match self.screen.cell(row, col) {
+                    Some(cell) if cell.has_contents() => text.push_str(cell.contents()),
+                    _ => text.push(' '),
+                }
+            }
+            text.push('\n');
+        }
+        hive_core::terminal::awaiting_user_input(&text)
+    }
+
     pub fn secs(&self) -> f64 {
         match self.elapsed_ms {
             Some(ms) => ms as f64 / 1000.0,

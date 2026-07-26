@@ -6,8 +6,8 @@ mod types;
 pub use manager::TerminalManager;
 pub use session::TerminalOutputFrame;
 pub use types::{
-    TerminalController, TerminalError, TerminalKey, TerminalProcessState, TerminalReadResult,
-    TerminalSnapshot, TerminalWriteRequest,
+    awaiting_user_input, TerminalController, TerminalError, TerminalKey, TerminalProcessState,
+    TerminalReadResult, TerminalSnapshot, TerminalWriteRequest,
 };
 pub type TerminalHandle = std::sync::Arc<TerminalManager>;
 

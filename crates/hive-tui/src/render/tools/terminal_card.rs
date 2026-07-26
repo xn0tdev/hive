@@ -98,16 +98,70 @@ pub(crate) fn terminal_card_lines(
         )
     };
 
-    vec![
-        soft_bg_pad(bg, width),
-        title_line,
-        detail_line,
-        soft_bg_pad(bg, width),
-    ]
+    let mut out = vec![soft_bg_pad(bg, width), title_line, detail_line];
+    // A prompt only the user can answer: say so on the card, so nobody has to
+    // notice a stalled spinner and go looking.
+    if let Some(prompt) = card.awaiting_user() {
+        let text = format!("    ⌨ waiting for you · {prompt}");
+        let text = if text.chars().count() > width && width > 1 {
+            let mut t: String = text.chars().take(width - 1).collect();
+            t.push('…');
+            t
+        } else {
+            text
+        };
+        out.push(soft_bg_line(
+            Line::from(Span::styled(
+                text,
+                Style::default().fg(theme.warn).add(Modifier::BOLD),
+            )),
+            bg,
+            width,
+        ));
+    }
+    out.push(soft_bg_pad(bg, width));
+    out
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// A sudo prompt in a background terminal has to be visible without the
+    /// user noticing a stalled spinner and going looking for it.
+    #[test]
+    fn a_password_prompt_is_called_out_on_the_card() {
+        use crate::app::state::{Block, TerminalCard};
+        use hive_core::{TerminalController, TerminalProcessState};
+
+        let mut parser = vt100::Parser::new(8, 60, 0);
+        parser.process(b"[sudo] password for gotlib:");
+
+        let card = TerminalCard {
+            id: "t1".into(),
+            command: "sudo dnf upgrade".into(),
+            description: "upgrade packages".into(),
+            controller: TerminalController::Agent,
+            process: TerminalProcessState::Running,
+            revision: 1,
+            screen: parser.screen().clone(),
+            started: std::time::Instant::now(),
+            elapsed_ms: None,
+        };
+        assert_eq!(
+            card.awaiting_user().as_deref(),
+            Some("[sudo] password for gotlib:")
+        );
+
+        let mut a = app();
+        let text: String = terminal_card_lines(&card, &a, 70, false, false)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_str()))
+            .collect();
+        assert!(text.contains("waiting for you"), "{text}");
+
+        a.blocks.push(Block::Terminal(Box::new(card)));
+        assert_eq!(a.activity_label(), "Waiting for you");
+    }
     use super::*;
     use crate::{TuiInit, UiConfig};
     use hive_core::{TerminalController, TerminalProcessState};

@@ -138,7 +138,22 @@ an optional revision. Can briefly wait for a newer revision."
             )
             .await
         {
-            Ok(result) => serialized(&result),
+            Ok(result) => {
+                // A password or confirmation prompt is the user's to answer.
+                // Say so in the result, or the model sits in a read loop (or
+                // worse, guesses) while the terminal blocks.
+                let waiting = result
+                    .screen
+                    .as_deref()
+                    .and_then(crate::terminal::awaiting_user_input);
+                match (serialized(&result), waiting) {
+                    (out, Some(prompt)) if !out.is_error => ToolResult::ok(format!(
+                        "{}\n\nThis terminal is waiting for input only the user can give:\n  {prompt}\nTell them what it is asking for and that you will wait, then stop and let them answer in the terminal view. Do not guess a password and do not keep polling — you will see the result once they have answered.",
+                        out.content
+                    )),
+                    (out, _) => out,
+                }
+            }
             Err(error) => ToolResult::error(error.to_string()),
         }
     }

@@ -165,3 +165,76 @@ mod tests {
         ));
     }
 }
+
+/// What a terminal is asking the user for, when its last line is a prompt only
+/// a human can answer. The agent must not guess at these — it hands the
+/// terminal over and waits.
+pub fn awaiting_user_input(screen: &str) -> Option<String> {
+    let line = screen.lines().rev().find(|l| !l.trim().is_empty())?.trim();
+    let lower = line.to_ascii_lowercase();
+
+    let secret = (lower.contains("password") || lower.contains("passphrase"))
+        && (lower.ends_with(':') || lower.ends_with("? ") || lower.ends_with(':'));
+    let confirm = lower.ends_with("(yes/no)?")
+        || lower.ends_with("(yes/no)? ")
+        || lower.ends_with("[y/n]")
+        || lower.ends_with("[y/n] ")
+        || lower.ends_with("[y/n]:")
+        || lower.contains("(yes/no/[fingerprint])");
+    let code = (lower.contains("verification code")
+        || lower.contains("one-time")
+        || lower.contains("2fa")
+        || lower.contains("otp"))
+        && lower.ends_with(':');
+
+    if secret || confirm || code {
+        Some(line.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::awaiting_user_input;
+
+    #[test]
+    fn spots_the_prompts_a_human_has_to_answer() {
+        for screen in [
+            "building…\n[sudo] password for gotlib:",
+            "Password:",
+            "Enter passphrase for key '/home/u/.ssh/id_ed25519':",
+            "Are you sure you want to continue connecting (yes/no)?",
+            "Remove 3 packages? [y/N]",
+            "Enter verification code:",
+        ] {
+            assert!(
+                awaiting_user_input(screen).is_some(),
+                "missed a prompt: {screen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_output_is_not_a_prompt() {
+        for screen in [
+            "",
+            "Compiling hive-core v0.2.1",
+            "note: password rotation is documented in SECURITY.md",
+            "$ ",
+            "Finished in 3.2s",
+        ] {
+            assert_eq!(
+                awaiting_user_input(screen),
+                None,
+                "false positive on {screen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_the_prompt_line_itself() {
+        let got = awaiting_user_input("x\n[sudo] password for gotlib:").unwrap();
+        assert_eq!(got, "[sudo] password for gotlib:");
+    }
+}
