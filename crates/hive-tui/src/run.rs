@@ -262,6 +262,55 @@ fn read_clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// A screenshot on the clipboard, as PNG bytes. Clipboards hand images over as
+/// raw RGBA, so they have to be encoded before anything can be sent.
+fn read_clipboard_image() -> Option<Vec<u8>> {
+    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let (w, h) = (image.width as u32, image.height as u32);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    encode_png(w, h, &image.bytes)
+}
+
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    if rgba.len() < (width as usize) * (height as usize) * 4 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(rgba).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
+/// Ctrl+V / Insert: text if there is any, otherwise an image. Copying a file in
+/// a file manager puts its path on the clipboard as text, so the path-attach
+/// route keeps working and only a bare image falls through to here.
+fn paste_from_clipboard(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    if let Some(text) = read_clipboard_text().filter(|t| !t.trim().is_empty()) {
+        return handle_paste(app, &text, input_tx);
+    }
+    if !app.accepts_attachments() {
+        return false;
+    }
+    let Some(png) = read_clipboard_image() else {
+        return false;
+    };
+    app.focus_input();
+    match app.attach_clipboard_image(png) {
+        Ok(_) => {
+            app.flash(format!("Attached {}", app.attachment_tags_line()));
+            app.reset_menu();
+        }
+        Err(e) => app.flash(e),
+    }
+    true
+}
+
 fn write_clipboard_text(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text);
@@ -541,15 +590,11 @@ fn handle_key(
         }
         // Ctrl+V / Insert → system clipboard (bracketed paste is Event::Paste).
         KeyCode::Char('v') | KeyCode::Char('V') if ctrl => {
-            if let Some(text) = read_clipboard_text() {
-                let _ = handle_paste(app, &text, input_tx);
-            }
+            paste_from_clipboard(app, input_tx);
             composer_activity = true;
         }
         KeyCode::Insert => {
-            if let Some(text) = read_clipboard_text() {
-                let _ = handle_paste(app, &text, input_tx);
-            }
+            paste_from_clipboard(app, input_tx);
             composer_activity = true;
         }
         KeyCode::Char(ch) if !ctrl => {
@@ -2198,6 +2243,83 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(InputCommand::UpdateConnectionKey { id, .. }) if id == "openai"),
             "the key must land on the provider that was highlighted"
+        );
+    }
+
+    fn solid_rgba(w: usize, h: usize, px: [u8; 4]) -> Vec<u8> {
+        px.iter().copied().cycle().take(w * h * 4).collect()
+    }
+
+    #[test]
+    fn clipboard_rgba_becomes_a_readable_png() {
+        let rgba = solid_rgba(3, 2, [0x11, 0x22, 0x33, 0xff]);
+        let png = encode_png(3, 2, &rgba).expect("encoded");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "png magic");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+        let mut reader = decoder.read_info().expect("header");
+        let mut out = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut out).expect("frame");
+        assert_eq!((info.width, info.height), (3, 2));
+        assert_eq!(&out[..info.buffer_size()], &rgba[..]);
+    }
+
+    #[test]
+    fn a_truncated_clipboard_image_is_refused() {
+        // Fewer bytes than width * height * 4 — encoding would panic or emit junk.
+        assert!(encode_png(4, 4, &solid_rgba(2, 2, [0xff; 4])).is_none());
+    }
+
+    #[test]
+    fn pasted_images_queue_up_instead_of_overwriting() {
+        let mut app = test_app();
+        let png = encode_png(2, 2, &solid_rgba(2, 2, [0xff; 4])).expect("png");
+
+        assert_eq!(
+            app.attach_clipboard_image(png.clone()),
+            Ok("@clipboard.png".into())
+        );
+        assert_eq!(
+            app.attach_clipboard_image(png.clone()),
+            Ok("@clipboard-2.png".into())
+        );
+        assert_eq!(
+            app.pending_attaches.len(),
+            2,
+            "second paste must not vanish"
+        );
+        assert!(app
+            .pending_attaches
+            .iter()
+            .all(|a| matches!(&a.image, Some(hive_core::message::ImageSource::Base64 { media_type, data })
+                if media_type == "image/png" && !data.is_empty())));
+    }
+
+    #[test]
+    fn an_oversized_clipboard_image_is_reported_not_sent() {
+        let mut app = test_app();
+        let huge = vec![0u8; 11 * 1024 * 1024];
+        let err = app.attach_clipboard_image(huge).expect_err("refused");
+        assert!(err.contains("too large"), "{err}");
+        assert!(app.pending_attaches.is_empty());
+    }
+
+    #[test]
+    fn a_pasted_image_is_sent_as_a_vision_part() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let png = encode_png(2, 2, &solid_rgba(2, 2, [0x40; 4])).expect("png");
+        app.attach_clipboard_image(png).expect("attached");
+        app.input.value = "what is this".into();
+        app.input.cursor = app.input.value.chars().count();
+
+        assert!(!submit(&mut app, &tx));
+        let pd = app.pending_dispatch.as_ref().expect("dispatched");
+        assert_eq!(pd.images.len(), 1, "the image rides along with the prompt");
+        assert!(
+            !pd.agent_text.contains("[Attached file:"),
+            "an image isn't a file note: {}",
+            pd.agent_text
         );
     }
 

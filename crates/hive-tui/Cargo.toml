@@ -19,6 +19,8 @@ tokio = { workspace = true }
 base64 = { workspace = true }
 ignore = { workspace = true }
 unicode-width = "0.2"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
+# Clipboard images arrive as raw RGBA; encode them before sending.
+png = "0.18"
 vt100 = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }

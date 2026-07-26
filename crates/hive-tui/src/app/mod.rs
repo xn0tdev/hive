@@ -1711,6 +1711,17 @@ Keep everything else unless a note says otherwise.\n",
         self.md_cache = MdCache::default();
     }
 
+    /// True when the composer can take an attachment: plain chat, no overlay,
+    /// no pty, no read-only view.
+    pub fn accepts_attachments(&self) -> bool {
+        !self.in_terminal_view()
+            && !self.in_special_view()
+            && !self.about_open()
+            && !self.settings_open()
+            && !self.goal_overlay_open()
+            && !self.palette_open()
+    }
+
     pub fn has_pending_attaches(&self) -> bool {
         !self.pending_attaches.is_empty()
     }
@@ -1885,6 +1896,47 @@ Keep everything else unless a note says otherwise.\n",
                     .unwrap_or_else(|| abs.to_string_lossy().into_owned())
             });
         self.attach_path_inner(&abs, &label)
+    }
+
+    /// Attach an image pasted from the clipboard. There's no file behind it,
+    /// so the label doubles as its identity in the pending list.
+    pub fn attach_clipboard_image(&mut self, png: Vec<u8>) -> Result<String, String> {
+        /// Roughly what vision endpoints accept once base64 inflates it.
+        const MAX_BYTES: usize = 10 * 1024 * 1024;
+
+        if png.is_empty() {
+            return Err("clipboard image is empty".into());
+        }
+        if png.len() > MAX_BYTES {
+            return Err(format!(
+                "image is {:.1} MB — too large to send",
+                png.len() as f64 / (1024.0 * 1024.0)
+            ));
+        }
+
+        let label = self.next_clipboard_label();
+        let tag = format!("@{label}");
+        self.pending_attaches.push(PendingAttach {
+            path: label.clone(),
+            label,
+            image: Some(ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: base64_encode(&png),
+            }),
+        });
+        Ok(tag)
+    }
+
+    /// Pasting twice must queue two images, not silently drop the second.
+    fn next_clipboard_label(&self) -> String {
+        let taken = |name: &str| self.pending_attaches.iter().any(|a| a.path == name);
+        if !taken("clipboard.png") {
+            return "clipboard.png".into();
+        }
+        (2..)
+            .map(|n| format!("clipboard-{n}.png"))
+            .find(|name| !taken(name))
+            .unwrap_or_else(|| "clipboard.png".into())
     }
 
     fn attach_path_inner(&mut self, abs: &std::path::Path, label: &str) -> Result<String, String> {
