@@ -587,11 +587,11 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 
     let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
-        // Brighter + bold — not a tiny faint "thinking".
-        let label = if th.secs() > 10.0 {
-            "Thinking hard"
-        } else {
-            "Thinking"
+        // Say what's actually happening: a running terminal or tool is not
+        // "thinking", and the label updates in place instead of stacking.
+        let label = match app.activity_label() {
+            "Thinking" if th.secs() > 10.0 => "Thinking hard",
+            other => other,
         };
         spans.extend(shimmer_bright(label, app.spinner));
         spans.push(Span::styled(
@@ -793,6 +793,69 @@ mod tests {
             cost_input: 0.0,
             cost_output: 0.0,
         })
+    }
+
+    #[test]
+    fn the_live_line_says_what_the_agent_is_doing() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("planning the edit".into()));
+        assert_eq!(a.activity_label(), "Thinking");
+
+        a.apply(AgentEvent::ToolStarted {
+            id: "t1".into(),
+            name: "run_shell".into(),
+            args_preview: "cargo build".into(),
+        });
+        assert_eq!(
+            a.activity_label(),
+            "Working",
+            "a running tool isn't thinking"
+        );
+
+        // A terminal keeps running in the background while the model reasons,
+        // so that's the case with a live header to label.
+        a.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "sudo dnf upgrade".into(),
+            description: String::new(),
+            rows: 20,
+            cols: 80,
+        });
+        a.apply(AgentEvent::ReasoningDelta("waiting on the install".into()));
+        assert_eq!(a.activity_label(), "Working in terminal");
+
+        let t = tool_text(&mut a, 80);
+        assert!(t.contains("Working in terminal"), "{t}");
+        assert!(!t.contains("Thinking"), "not while a terminal is up: {t}");
+    }
+
+    #[test]
+    fn an_empty_thought_between_tools_leaves_no_gap() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.blocks.clear();
+        a.apply(AgentEvent::TurnStarted);
+        // Reasoning that never produced text, then a tool: the placeholder
+        // thought used to close as "Thought for 0.0s" and stack up.
+        a.apply(AgentEvent::ReasoningDelta("   ".into()));
+        a.apply(AgentEvent::ToolStarted {
+            id: "t1".into(),
+            name: "run_shell".into(),
+            args_preview: "ls".into(),
+        });
+
+        assert!(
+            !a.blocks
+                .iter()
+                .any(|b| matches!(b, crate::app::state::Block::Reasoning(_))),
+            "an empty thought is dropped, not stamped"
+        );
+        let t = tool_text(&mut a, 80);
+        assert!(!t.contains("Thought for"), "{t}");
     }
 
     #[test]

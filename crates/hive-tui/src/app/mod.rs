@@ -2779,15 +2779,45 @@ Keep everything else unless a note says otherwise.\n",
         self.blocks.push(Block::Reasoning(th));
     }
 
-    /// Stamp the duration on the most recent still-open thought, if any.
+    /// Stamp the duration on the most recent still-open thought, if any. A
+    /// thought that never got any text is dropped instead — an empty
+    /// "Thought for 0.0s" between two tool cards is just a gap.
     fn close_thought(&mut self) {
-        for block in self.blocks.iter_mut().rev() {
+        for (i, block) in self.blocks.iter_mut().enumerate().rev() {
             if let Block::Reasoning(th) = block {
                 if th.elapsed_ms.is_none() {
-                    th.elapsed_ms = Some(th.started.elapsed().as_millis());
+                    if th.text.trim().is_empty() {
+                        self.blocks.remove(i);
+                    } else {
+                        th.elapsed_ms = Some(th.started.elapsed().as_millis());
+                    }
                 }
                 return;
             }
+        }
+    }
+
+    /// What the agent is visibly busy with, for the live status line. A running
+    /// terminal is the honest answer while one is open — "Thinking" is not.
+    pub fn activity_label(&self) -> &'static str {
+        let terminal_running = self.blocks.iter().any(|b| match b {
+            Block::Terminal(card) => {
+                matches!(card.process, hive_core::TerminalProcessState::Running)
+            }
+            _ => false,
+        });
+        if terminal_running {
+            return "Working in terminal";
+        }
+        let tool_running = self.blocks.iter().any(|b| match b {
+            Block::Tool(c) => c.status == ToolStatus::Running,
+            Block::Subagent(c) => c.status == SubagentStatus::Running,
+            _ => false,
+        });
+        if tool_running {
+            "Working"
+        } else {
+            "Thinking"
         }
     }
 

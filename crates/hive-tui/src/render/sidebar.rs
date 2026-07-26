@@ -469,8 +469,33 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
                 None,
             ));
         } else {
-            for f in &snap.files {
-                lines.push((file_line(f, app, w), None, None));
+            // Changes is the last section, so without a cap the tail of a long
+            // list just falls off the bottom edge with nothing to say it did.
+            let room = (body.height as usize).saturating_sub(lines.len());
+            let (shown, hidden) = if snap.files.len() > room && room > 0 {
+                (room - 1, snap.files.len() - (room - 1))
+            } else {
+                (snap.files.len(), 0)
+            };
+            let stat_w = snap
+                .files
+                .iter()
+                .take(shown)
+                .map(|f| file_stat(f, theme).1)
+                .max()
+                .unwrap_or(0);
+            for f in snap.files.iter().take(shown) {
+                lines.push((file_line(f, app, w, stat_w), None, None));
+            }
+            if hidden > 0 {
+                lines.push((
+                    Line::from(Span::styled(
+                        format!("+{hidden} more"),
+                        Style::default().fg(theme.faint),
+                    )),
+                    None,
+                    None,
+                ));
             }
         }
     }
@@ -553,11 +578,64 @@ pub fn draw_collapsed_toggle(buf: &mut Buffer, area: Rect, app: &mut App) {
     });
 }
 
-fn file_line(f: &ChangedFile, app: &App, width: usize) -> Line {
+/// `+3 −1` for a file, plus how wide it is.
+fn file_stat(f: &ChangedFile, theme: &crate::theme::Theme) -> (Vec<Span>, usize) {
+    let mut spans: Vec<Span> = Vec::new();
+    if f.added > 0 {
+        spans.push(Span::styled(
+            format!("+{}", f.added),
+            Style::default().fg(theme.add_fg),
+        ));
+    }
+    if f.deleted > 0 {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("−{}", f.deleted),
+            Style::default().fg(theme.del_fg),
+        ));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("new", Style::default().fg(theme.faint)));
+    }
+    let w = spans.iter().map(|s| s.content.chars().count()).sum();
+    (spans, w)
+}
+
+/// `path                +3 −1` — the tail of the path (that's the part that
+/// identifies a file) and how much of it changed. `stat_w` is shared across the
+/// section so the paths line up instead of each ending wherever it happens to.
+fn file_line(f: &ChangedFile, app: &App, width: usize, stat_w: usize) -> Line {
     let theme = &app.theme;
-    let name = truncate(&f.path, width);
     let fg = if f.untracked { theme.add_fg } else { theme.dim };
-    Line::from(Span::styled(name, Style::default().fg(fg)))
+    let (stat, own_w) = file_stat(f, theme);
+
+    // Every path here starts with the same directories, so cutting the front
+    // leaves a column of identical prefixes. Keep the end.
+    let name = truncate_start(&f.path, width.saturating_sub(stat_w + 1));
+    let gap = width.saturating_sub(name.chars().count() + own_w);
+
+    let mut spans = vec![Span::styled(name, Style::default().fg(fg))];
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(stat);
+    Line::from(spans)
+}
+
+/// Truncate from the left, keeping the tail: `…/render/palette.rs`.
+fn truncate_start(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".into();
+    }
+    let tail: String = s.chars().skip(n - (max - 1)).collect();
+    format!("…{tail}")
 }
 
 fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
@@ -773,6 +851,75 @@ mod tests {
             terminal_line(card, &app, 34).spans[0].style.fg
         };
         assert_eq!(hover_fg, Some(app.theme.fg));
+    }
+
+    fn changed(path: &str, added: u32, deleted: u32, untracked: bool) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            added,
+            deleted,
+            untracked,
+        }
+    }
+
+    fn with_changes(files: Vec<ChangedFile>) -> App {
+        let mut app = test_app();
+        app.project = ProjectSnapshot {
+            name: "hive".into(),
+            branch: "development".into(),
+            files,
+            fetched_at: Some(Instant::now()),
+        };
+        app
+    }
+
+    #[test]
+    fn changed_files_keep_their_tail_and_show_their_stat() {
+        let mut app = with_changes(vec![
+            changed("crates/hive-tui/src/render/palette.rs", 12, 3, false),
+            changed("crates/hive-tui/src/render/sidebar.rs", 4, 0, false),
+            changed("crates/hive-tui/src/render/brand_new.rs", 0, 0, true),
+        ]);
+        let mut buf = Buffer::blank(Size::new(40, 24));
+        draw(&mut buf, Rect::new(0, 0, 34, 24), &mut app);
+        let text = buf.text();
+
+        // The end of a path is what tells two of them apart.
+        assert!(text.contains("palette.rs"), "{text}");
+        assert!(text.contains("sidebar.rs"), "{text}");
+        assert!(
+            !text.contains("crates/hive-tui/src/render/palette"),
+            "{text}"
+        );
+
+        assert!(text.contains("+12"), "{text}");
+        assert!(text.contains("−3"), "{text}");
+        assert!(text.contains("new"), "untracked says so: {text}");
+
+        // Stats share one column, so the paths end on the same cell.
+        let rows: Vec<&str> = text.lines().filter(|l| l.contains(".rs")).collect();
+        assert_eq!(rows.len(), 3);
+        let ends: Vec<usize> = rows.iter().map(|l| l.find('…').unwrap_or(0)).collect();
+        assert!(
+            ends.windows(2).all(|w| w[0] == w[1]),
+            "paths must start on one column: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_change_list_says_what_it_cut() {
+        let files = (0..60)
+            .map(|i| changed(&format!("src/file_{i}.rs"), 1, 1, false))
+            .collect();
+        let mut app = with_changes(files);
+
+        let mut buf = Buffer::blank(Size::new(40, 20));
+        draw(&mut buf, Rect::new(0, 0, 34, 20), &mut app);
+        let text = buf.text();
+
+        assert!(text.contains("more"), "cut list must own up to it: {text}");
+        let last = text.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(last.trim().starts_with('+'), "the tally goes last: {last}");
     }
 
     #[test]
