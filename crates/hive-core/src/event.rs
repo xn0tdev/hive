@@ -196,13 +196,10 @@ pub enum AgentEvent {
     SessionLoaded {
         title: String,
         model: String,
+        /// Context window of the restored model (0 = unknown, keep current).
+        context_window: u64,
         messages: Vec<crate::message::Message>,
         usage: crate::provider::Usage,
-    },
-    /// Current session was saved to disk.
-    SessionSaved {
-        id: String,
-        title: String,
     },
     Error(String),
     TurnFinished,

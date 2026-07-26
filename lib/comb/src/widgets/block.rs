@@ -124,10 +124,10 @@ impl<'a> Block<'a> {
                         })
                         .collect(),
                 };
-                let bs = self.border_style.patch(self.fill.unwrap_or(Style::new()));
+                let bs = self.border_style.patch(self.fill.unwrap_or_default());
                 buf.border_title(area, b, bs, &styled_title);
             } else {
-                let bs = self.border_style.patch(self.fill.unwrap_or(Style::new()));
+                let bs = self.border_style.patch(self.fill.unwrap_or_default());
                 buf.border(area, b, bs);
             }
         } else if let Some(ref title) = self.title {
@@ -143,7 +143,7 @@ impl<'a> Block<'a> {
                     })
                     .collect(),
             };
-            let ts = self.title_style.patch(self.fill.unwrap_or(Style::new()));
+            let ts = self.title_style.patch(self.fill.unwrap_or_default());
             buf.set_line(area.x, y, &title_line, area.width);
             let _ = ts;
         }
@@ -184,6 +184,9 @@ mod tests {
         });
         assert_eq!(buf.get(0, 0).unwrap().ch, '╭');
         assert_eq!(buf.get(11, 4).unwrap().ch, '╯');
-        assert_eq!(buf.get(0, 1).unwrap().style.bg, Some(Color::rgb(0x22, 0x22, 0x22)));
+        assert_eq!(
+            buf.get(0, 1).unwrap().style.bg,
+            Some(Color::rgb(0x22, 0x22, 0x22))
+        );
     }
 }

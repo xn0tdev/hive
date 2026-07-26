@@ -399,15 +399,37 @@ impl Agent {
         self.session.usage
     }
 
-    pub fn session_snapshot(&self, id: &str) -> SessionSnapshot {
-        session_store::snapshot(id, &self.model, self.session.messages.clone(), self.session.usage)
+    /// Prompt tokens from the most recent request — what the context gauge shows.
+    pub fn context_tokens(&self) -> u64 {
+        self.last_prompt_tokens
     }
 
-    pub fn restore_session(&mut self, snap: SessionSnapshot) {
-        self.session.replace_messages(snap.messages);
-        self.session.usage = snap.usage;
-        self.model = snap.model;
-        self.last_prompt_tokens = 0;
+    /// Snapshot the session for persistence. Pass `created_at` from an existing
+    /// snapshot when re-saving so the creation time stays put.
+    pub fn session_snapshot(&self, id: &str, created_at: Option<u64>) -> SessionSnapshot {
+        session_store::snapshot(
+            id,
+            &self.model,
+            self.session.messages.clone(),
+            self.session.usage,
+            session_store::SessionEnv {
+                connection_id: self.config.connections.active.clone(),
+                context_window: self.context_window(),
+                vision: self.vision_capable,
+                created_at,
+            },
+        )
+    }
+
+    /// Restore a saved transcript. Model and provider are *not* touched here —
+    /// a saved model id is only valid on the connection it came from, so the
+    /// caller switches connection first and then sets the model.
+    pub fn restore_session(&mut self, messages: Vec<Message>, usage: Usage) {
+        self.session.replace_messages(messages);
+        self.session.usage = usage;
+        // Approximate the restored context so the gauge and auto-compact aren't
+        // blind until the next response reports real prompt tokens.
+        self.last_prompt_tokens = estimate_tokens(&self.session.messages);
         self.loop_detector = LoopDetector::default();
     }
 

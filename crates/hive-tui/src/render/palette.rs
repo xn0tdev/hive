@@ -391,7 +391,12 @@ fn draw_model_list(
 
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&app.model_choices, &app.connections, &app.saved_sessions, visible);
+    let offset = pal.visible_offset(
+        &app.model_choices,
+        &app.connections,
+        &app.saved_sessions,
+        visible,
+    );
 
     for row in 0..visible {
         let idx = offset + row;
@@ -512,7 +517,9 @@ fn draw_sessions_list(
             "No saved sessions yet.",
             Style::default().fg(theme.faint).bg(panel),
         ));
-        crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
+        crate::render::strip_paint::set_line_on_strip(
+            buf, area.x, area.y, &line, area.width, panel,
+        );
         return;
     }
 
@@ -522,7 +529,9 @@ fn draw_sessions_list(
             "No matching sessions",
             Style::default().fg(theme.faint).bg(panel),
         ));
-        crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
+        crate::render::strip_paint::set_line_on_strip(
+            buf, area.x, area.y, &line, area.width, panel,
+        );
         return;
     }
 
@@ -542,28 +551,19 @@ fn draw_sessions_list(
         let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
 
-        let title = truncate_str(&item.title, area.width as usize / 2);
-        let detail = format!("{} msgs · {}", item.message_count, short_model(&item.model));
+        let raw_left = format!(" {}", item.title);
+        let raw_right = format!("{} msgs · {}", item.message_count, short_model(&item.model));
+        // Long titles and long model names both overflow narrow palettes;
+        // layout_label_host squeezes them instead of underflowing the gap.
+        let (left, right, gap) =
+            crate::render::two_col::layout_label_host(&raw_left, &raw_right, area.width as usize);
 
         let line = Line::from(vec![
-            Span::styled(format!(" {title}"), Style::default().fg(name_fg).bg(bg)),
-            Span::styled(
-                " ".repeat(area.width as usize - title.chars().count() - 1 - detail.len()),
-                Style::default().bg(bg),
-            ),
-            Span::styled(detail, Style::default().fg(detail_fg).bg(bg)),
+            Span::styled(left, Style::default().fg(name_fg).bg(bg)),
+            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+            Span::styled(right, Style::default().fg(detail_fg).bg(bg)),
         ]);
         crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, bg);
-    }
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let t: String = chars.iter().take(max.saturating_sub(1)).collect();
-        format!("{t}\u{2026}")
     }
 }
 
@@ -791,6 +791,38 @@ mod tests {
         assert_eq!(cell.style.fg, Some(Color::Rgb(0xa0, 0xa0, 0xa0))); // 255*160/255
         assert_eq!(cell.style.bg, Some(Color::Rgb(0x50, 0x50, 0x50))); // 128*160/255
         assert!(cell.style.mods.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn sessions_list_survives_long_titles_and_models() {
+        let mut a = app();
+        a.palette = Some(PaletteState::sessions());
+        a.saved_sessions = vec![
+            hive_core::SessionMeta {
+                id: "s_1_aaaaaaaa".into(),
+                title: "A very long session title that will not fit anywhere".into(),
+                model: "accounts/fireworks/models/some-extremely-long-model-name".into(),
+                message_count: 128,
+                created_at: 1,
+                updated_at: 2,
+            },
+            hive_core::SessionMeta {
+                id: "s_2_bbbbbbbb".into(),
+                title: "короткий".into(),
+                model: "acc/models/m".into(),
+                message_count: 3,
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+
+        // Narrow terminals used to underflow the padding width and panic.
+        for width in [20u16, 32, 48, 80, 120] {
+            let buf = render(Size::new(width, 24), |f| {
+                crate::render::draw(f, &mut a);
+            });
+            assert!(buf.text().contains("Resume session"), "width={width}");
+        }
     }
 
     #[test]

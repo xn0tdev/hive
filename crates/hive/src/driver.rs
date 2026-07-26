@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use hive_core::agent::session_store;
 use hive_core::config::{AppConfig, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
 use hive_core::provider::LlmProvider;
@@ -28,7 +29,9 @@ pub async fn run(
     mut cfg: Arc<AppConfig>,
 ) {
     let mut pending = VecDeque::new();
-    let mut session_id: Option<String> = None;
+    let mut session: Option<ActiveSession> = None;
+    // Autosave failures repeat every turn; say it once instead of nagging.
+    let mut autosave_warned = false;
     'commands: loop {
         let cmd = match pending.pop_front() {
             Some(command) => command,
@@ -66,12 +69,8 @@ pub async fn run(
                 {
                     break 'commands;
                 }
-                // Auto-save session after each turn.
-                let id = session_id.get_or_insert_with(||
-                    hive_core::agent::session_store::new_id()
-                );
-                let snap = agent.session_snapshot(id);
-                let _ = hive_core::agent::session_store::save(&snap);
+                // Auto-save after each turn so a crash never loses a transcript.
+                autosave(&agent, &mut session, &events, &mut autosave_warned).await;
             }
             InputCommand::SetModel {
                 id,
@@ -98,7 +97,9 @@ pub async fn run(
                     cfg_mut.agent.context_window = context;
                     agent.set_context_window(context);
                     if let Err(e) = crate::config::patch_context_window(context) {
-                        let _ = events.send(AgentEvent::Notice(format!("could not save context window: {e}")));
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "could not save context window: {e}"
+                        )));
                     }
                 }
                 if let Err(e) = crate::config::patch_model(&id, &display) {
@@ -119,11 +120,16 @@ pub async fn run(
                     cfg_mut.agent.context_window = context;
                     agent.set_context_window(context);
                     if let Err(e) = crate::config::patch_context_window(context) {
-                        let _ = events.send(AgentEvent::Notice(format!("could not save context window: {e}")));
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "could not save context window: {e}"
+                        )));
                     }
                 }
             }
-            InputCommand::SetGoal { objective, duration } => {
+            InputCommand::SetGoal {
+                objective,
+                duration,
+            } => {
                 let deadline = duration.map(|d| std::time::Instant::now() + d);
                 agent.set_goal(objective.clone(), deadline);
                 let _ = events.send(AgentEvent::GoalSet {
@@ -321,53 +327,82 @@ pub async fn run(
             InputCommand::Clear => {
                 terminal.shutdown();
                 agent.reset();
-                session_id = None;
+                // A cleared transcript starts a new session file, not an
+                // overwrite of the one we were just appending to.
+                session = None;
             }
             InputCommand::Compact => {
                 if let Err(e) = agent.compact().await {
                     let _ = events.send(AgentEvent::Notice(e));
                 }
             }
-            InputCommand::SaveSession => {
-                let id = hive_core::agent::session_store::new_id();
-                let snap = agent.session_snapshot(&id);
-                match hive_core::agent::session_store::save(&snap) {
-                    Ok(_) => {
-                        let _ = events.send(AgentEvent::SessionSaved {
-                            id: snap.id.clone(),
-                            title: snap.title.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        let _ = events.send(AgentEvent::Notice(format!("save failed: {e}")));
-                    }
-                }
-            }
             InputCommand::LoadSession { id } => {
-                match hive_core::agent::session_store::load(&id) {
-                    Ok(snap) => {
-                        let title = snap.title.clone();
-                        let model = snap.model.clone();
-                        let messages = snap.messages.clone();
-                        let usage = snap.usage;
-                        terminal.shutdown();
-                        agent.restore_session(snap);
-                        session_id = Some(id.clone());
-                        let _ = events.send(AgentEvent::SessionLoaded {
-                            title,
-                            model,
-                            messages,
-                            usage,
-                        });
-                    }
+                let snap = match blocking_io(move || session_store::load(&id)).await {
+                    Ok(snap) => snap,
                     Err(e) => {
                         let _ = events.send(AgentEvent::Notice(format!("load failed: {e}")));
+                        continue;
+                    }
+                };
+
+                // The model id in a snapshot is meaningless on another
+                // provider, so the connection has to come back first.
+                let mut model = snap.model.clone();
+                let mut context = snap.context_window;
+                let mut vision = snap.vision;
+                if !snap.connection_id.is_empty() && snap.connection_id != cfg.connections.active {
+                    if let Err(e) =
+                        apply_connection(&mut agent, &mut cfg, &events, &snap.connection_id).await
+                    {
+                        // Restoring the transcript is still useful; keep the
+                        // live model rather than firing a foreign id at it.
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "resume: staying on the current model — could not switch to '{}': {e}",
+                            snap.connection_id
+                        )));
+                        model = agent.model().to_string();
+                        context = 0;
+                        vision = agent.vision_capable();
                     }
                 }
+
+                agent.set_model(model.clone());
+                agent.set_vision_capable(vision);
+                if context > 0 {
+                    let cfg_mut = Arc::make_mut(&mut cfg);
+                    cfg_mut.agent.context_window = context;
+                    agent.set_context_window(context);
+                }
+
+                terminal.shutdown();
+                let title = snap.title.clone();
+                let messages = snap.messages.clone();
+                let usage = snap.usage;
+                agent.restore_session(snap.messages, usage);
+                session = Some(ActiveSession {
+                    id: snap.id,
+                    created_at: snap.created_at,
+                });
+                let _ = events.send(AgentEvent::SessionLoaded {
+                    title,
+                    model,
+                    context_window: context,
+                    messages,
+                    usage,
+                });
+                // Real prompt tokens land after the next turn; until then the
+                // gauge shows the agent's estimate of the restored context.
+                let _ = events.send(AgentEvent::ContextTokens(agent.context_tokens()));
             }
             InputCommand::ListSessions => {
-                let metas = hive_core::agent::session_store::list();
-                let _ = events.send(AgentEvent::SessionsListed(metas));
+                match tokio::task::spawn_blocking(session_store::list).await {
+                    Ok(metas) => {
+                        let _ = events.send(AgentEvent::SessionsListed(metas));
+                    }
+                    Err(e) => {
+                        let _ = events.send(AgentEvent::Notice(format!("sessions failed: {e}")));
+                    }
+                }
             }
             InputCommand::SaveUi(ui) => {
                 if let Err(e) = crate::config::patch_ui(&ui) {
@@ -474,6 +509,52 @@ where
                 }
             }
         }
+    }
+}
+
+/// The session file the current conversation is being appended to.
+struct ActiveSession {
+    id: String,
+    /// Kept across saves — `snapshot` would otherwise restamp it every turn.
+    created_at: u64,
+}
+
+/// Persist the transcript after a turn. A snapshot is the whole history, so
+/// serializing and writing it runs on a blocking thread, not a runtime worker.
+async fn autosave(
+    agent: &Agent,
+    session: &mut Option<ActiveSession>,
+    events: &EventSender,
+    warned: &mut bool,
+) {
+    let (id, created_at) = match session.as_ref() {
+        Some(s) => (s.id.clone(), Some(s.created_at)),
+        None => (session_store::new_id(), None),
+    };
+    let snap = agent.session_snapshot(&id, created_at);
+    *session = Some(ActiveSession {
+        id: snap.id.clone(),
+        created_at: snap.created_at,
+    });
+    if let Err(e) = blocking_io(move || session_store::save(&snap)).await {
+        if !*warned {
+            *warned = true;
+            let _ = events.send(AgentEvent::Notice(format!("session autosave failed: {e}")));
+        }
+    }
+}
+
+/// Run blocking file I/O off the runtime, folding a join failure into the
+/// error so callers have one failure mode to handle.
+async fn blocking_io<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -630,7 +711,11 @@ fn active_provider_label(cfg: &AppConfig, base_url: &str) -> String {
 fn build_goal_continuation(objective: &str, remaining_secs: u64) -> String {
     let time_line = if remaining_secs > 0 {
         if remaining_secs >= 3600 {
-            format!(" ({}h {}m left)", remaining_secs / 3600, (remaining_secs % 3600) / 60)
+            format!(
+                " ({}h {}m left)",
+                remaining_secs / 3600,
+                (remaining_secs % 3600) / 60
+            )
         } else if remaining_secs >= 60 {
             format!(" ({}m left)", remaining_secs / 60)
         } else {

@@ -2180,18 +2180,25 @@ Keep everything else unless a note says otherwise.\n",
             }
             AgentEvent::Compacted { before, after } => {
                 // Replace the in-progress compaction card if present, else add.
-                if let Some(Block::Compacted(c)) = self.blocks.iter_mut().rev().find(|b| matches!(b, Block::Compacted(_))) {
+                if let Some(Block::Compacted(c)) = self
+                    .blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|b| matches!(b, Block::Compacted(_)))
+                {
                     c.before = before;
                     c.after = after;
                 } else {
-                    self.blocks.push(Block::Compacted(CompactedCard {
-                        before,
-                        after,
-                    }));
+                    self.blocks
+                        .push(Block::Compacted(CompactedCard { before, after }));
                 }
                 self.scroll_from_bottom = 0;
                 if let Some(b) = before {
-                    self.flash(format!("Context compacted · {} → {}", short_tokens(b), short_tokens(after)));
+                    self.flash(format!(
+                        "Context compacted · {} → {}",
+                        short_tokens(b),
+                        short_tokens(after)
+                    ));
                 }
                 true
             }
@@ -2353,11 +2360,7 @@ Keep everything else unless a note says otherwise.\n",
                 // Apply context window / cost for the active model from the
                 // freshly loaded catalog (so the footer shows the right value
                 // without requiring a manual /model re-pick).
-                if let Some(m) = self
-                    .model_choices
-                    .iter()
-                    .find(|m| m.key == self.model)
-                {
+                if let Some(m) = self.model_choices.iter().find(|m| m.key == self.model) {
                     if m.context > 0 {
                         self.context_window = m.context;
                         self.pending_context_update = Some(m.context);
@@ -2367,7 +2370,11 @@ Keep everything else unless a note says otherwise.\n",
                 }
                 if let Some(pal) = self.palette.as_mut() {
                     if pal.mode == palette::PaletteMode::Models {
-                        pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
+                        pal.clamp_selection(
+                            &self.model_choices,
+                            &self.connections,
+                            &self.saved_sessions,
+                        );
                     }
                 }
                 true
@@ -2386,12 +2393,19 @@ Keep everything else unless a note says otherwise.\n",
                             | palette::PaletteMode::ConnectPresets
                             | palette::PaletteMode::ConnectKey { .. }
                     ) {
-                        pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
+                        pal.clamp_selection(
+                            &self.model_choices,
+                            &self.connections,
+                            &self.saved_sessions,
+                        );
                     }
                 }
                 true
             }
-            AgentEvent::GoalSet { objective, deadline } => {
+            AgentEvent::GoalSet {
+                objective,
+                deadline,
+            } => {
                 self.goal = Some(goal::GoalStatus {
                     objective: objective.clone(),
                     deadline,
@@ -2408,7 +2422,10 @@ Keep everything else unless a note says otherwise.\n",
                 self.scroll_from_bottom = 0;
                 true
             }
-            AgentEvent::GoalContinue { objective, remaining_secs } => {
+            AgentEvent::GoalContinue {
+                objective,
+                remaining_secs,
+            } => {
                 if let Some(g) = self.goal.as_mut() {
                     g.objective = objective;
                     if let Some(d) = g.deadline {
@@ -2436,7 +2453,8 @@ Keep everything else unless a note says otherwise.\n",
                 self.running = false;
                 self.close_thought();
                 self.finalize_streaming();
-                self.blocks.push(Block::Notice(format!("Goal time expired: {objective}")));
+                self.blocks
+                    .push(Block::Notice(format!("Goal time expired: {objective}")));
                 self.scroll_from_bottom = 0;
                 self.project.invalidate();
                 self.refresh_project();
@@ -2471,7 +2489,13 @@ Keep everything else unless a note says otherwise.\n",
                 self.set_sessions_list(metas);
                 true
             }
-            AgentEvent::SessionLoaded { title, model, messages, usage } => {
+            AgentEvent::SessionLoaded {
+                title,
+                model,
+                context_window,
+                messages,
+                usage,
+            } => {
                 self.new_chat();
                 self.blocks.clear();
                 let mut msg_count = 0usize;
@@ -2502,17 +2526,26 @@ Keep everything else unless a note says otherwise.\n",
                                     output: String::new(),
                                     status: ToolStatus::Ok,
                                     started: std::time::Instant::now(),
-                                    elapsed_ms: Some(0),
+                                    // Durations aren't persisted — don't invent one.
+                                    elapsed_ms: None,
                                     snapshot: None,
                                 }));
                             }
                         }
                         hive_core::Role::Tool => {
-                            let text = m.text();
-                            if let Some(Block::Tool(card)) = self.blocks.last_mut() {
-                                if card.id == m.tool_call_id.clone().unwrap_or_default() {
-                                    card.output = text;
-                                }
+                            // Match by call id, not position: one assistant
+                            // message can carry several tool calls, so the
+                            // last card is usually the wrong one.
+                            let Some(call_id) = m.tool_call_id.as_deref() else {
+                                continue;
+                            };
+                            if let Some(Block::Tool(card)) = self
+                                .blocks
+                                .iter_mut()
+                                .rev()
+                                .find(|b| matches!(b, Block::Tool(c) if c.id == call_id))
+                            {
+                                card.output = m.text();
                             }
                         }
                     }
@@ -2520,16 +2553,27 @@ Keep everything else unless a note says otherwise.\n",
                 if self.blocks.is_empty() {
                     self.blocks.push(Block::Welcome);
                 }
-                self.model = model.clone();
-                self.model_display = model.rsplit('/').next().unwrap_or(&model).to_string();
+                // Prefer the catalog's label and rates for the restored model;
+                // the snapshot only stores the provider id.
+                match self.model_choices.iter().find(|c| c.key == model) {
+                    Some(choice) => {
+                        self.model_display = choice.display.clone();
+                        self.cost_input = choice.cost_input;
+                        self.cost_output = choice.cost_output;
+                    }
+                    None => {
+                        self.model_display = model.rsplit('/').next().unwrap_or(&model).to_string();
+                    }
+                }
+                self.model = model;
+                if context_window > 0 {
+                    self.context_window = context_window;
+                }
                 self.usage = usage;
-                self.context_tokens = usage.total_tokens;
+                // `context_tokens` is the last prompt size, not the session
+                // total — the driver sends it right after this event.
                 self.scroll_from_bottom = 0;
                 self.flash(format!("Resumed: {title} ({msg_count} msgs)"));
-                true
-            }
-            AgentEvent::SessionSaved { id: _, title } => {
-                self.flash(format!("Saved: {title}"));
                 true
             }
             AgentEvent::Error(s) => {
@@ -2544,9 +2588,8 @@ Keep everything else unless a note says otherwise.\n",
                 if self.ui.show_work_summary {
                     if let Some(started) = self.turn_started_at.take() {
                         let secs = started.elapsed().as_secs();
-                        self.blocks.push(Block::WorkSummary(WorkSummaryCard {
-                            secs,
-                        }));
+                        self.blocks
+                            .push(Block::WorkSummary(WorkSummaryCard { secs }));
                         self.scroll_from_bottom = 0;
                     }
                 }
@@ -4027,5 +4070,86 @@ mod tests {
         assert!(a.pending_dispatch.is_none());
         assert_eq!(a.input.value, "test prompt");
         assert!(a.blocks.is_empty(), "user block should be removed");
+    }
+
+    #[test]
+    fn resume_restores_every_parallel_tool_output() {
+        use hive_core::message::{Message, ToolCall};
+
+        let mut assistant = Message::assistant("running two");
+        assistant.tool_calls = vec![
+            ToolCall {
+                id: "call_a".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"a\"}".into(),
+            },
+            ToolCall {
+                id: "call_b".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"b\"}".into(),
+            },
+        ];
+
+        let mut a = app();
+        a.apply(AgentEvent::SessionLoaded {
+            title: "two tools".into(),
+            model: "acc/models/test".into(),
+            context_window: 64_000,
+            messages: vec![
+                Message::system("sys"),
+                Message::user("go"),
+                assistant,
+                Message::tool_result("call_a", "read_file", "output A"),
+                Message::tool_result("call_b", "read_file", "output B"),
+            ],
+            usage: Default::default(),
+        });
+
+        let cards: Vec<&ToolCard> = a
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Tool(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].id, "call_a");
+        assert_eq!(cards[0].output, "output A");
+        assert_eq!(cards[1].id, "call_b");
+        assert_eq!(cards[1].output, "output B");
+        assert_eq!(a.context_window, 64_000);
+    }
+
+    #[test]
+    fn resume_does_not_fill_the_context_gauge_from_session_totals() {
+        use hive_core::message::Message;
+        use hive_core::provider::Usage;
+
+        let mut a = app();
+        a.context_tokens = 4_000;
+        a.apply(AgentEvent::SessionLoaded {
+            title: "long chat".into(),
+            model: "acc/models/test".into(),
+            context_window: 0,
+            messages: vec![Message::user("hi")],
+            // Cumulative session spend, far above the live context.
+            usage: Usage {
+                prompt_tokens: 900_000,
+                completion_tokens: 100_000,
+                total_tokens: 1_000_000,
+            },
+        });
+
+        // The gauge waits for ContextTokens instead of showing the total.
+        assert_eq!(a.context_tokens, 0);
+        assert_eq!(
+            a.context_window, 128_000,
+            "unknown window keeps the old one"
+        );
+        assert_eq!(a.usage.total_tokens, 1_000_000);
+
+        a.apply(AgentEvent::ContextTokens(12_345));
+        assert_eq!(a.context_tokens, 12_345);
     }
 }

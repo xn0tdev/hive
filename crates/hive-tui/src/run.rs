@@ -49,13 +49,7 @@ pub fn run(
     terminal.mouse_mode(MouseMode::Motion)?;
     let mut app = App::new(init);
 
-    run_loop(
-        &mut terminal,
-        &mut app,
-        &mut events,
-        &input_tx,
-        &interrupt,
-    )
+    run_loop(&mut terminal, &mut app, &mut events, &input_tx, &interrupt)
 }
 
 fn run_loop(
@@ -1099,10 +1093,7 @@ fn complete_selected(app: &mut App) {
     }
 }
 
-fn submit(
-    app: &mut App,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
+fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let text = app.input.take();
     let trimmed = text.trim().to_string();
 
@@ -1360,7 +1351,7 @@ fn run_command(
         CmdId::Goal => {
             if app.goal_active() {
                 if let Some(g) = app.goal.as_ref() {
-                    app.flash(&format!("Goal: {} · {}", g.objective, g.timer_label()));
+                    app.flash(format!("Goal: {} · {}", g.objective, g.timer_label()));
                 }
             } else if !arg.is_empty() {
                 let objective = arg.trim().to_string();
@@ -1441,11 +1432,7 @@ fn handle_settings_key(app: &mut App, key: Key, input_tx: &UnboundedSender<Input
     false
 }
 
-fn handle_goal_key(
-    app: &mut App,
-    key: Key,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
+fn handle_goal_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let ctrl = key.mods.ctrl;
     match key.code {
         KeyCode::Esc => {
@@ -1935,7 +1922,11 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::Model) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
+                pal.move_down(
+                    &app.model_choices.clone(),
+                    &app.connections.clone(),
+                    &app.saved_sessions,
+                );
             }
         }
         assert_eq!(
@@ -1950,7 +1941,11 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(InputCommand::FetchModels)));
         app.models_catalog = crate::app::ModelsCatalogState::Ready;
         if let Some(pal) = app.palette.as_mut() {
-            pal.clamp_selection(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
+            pal.clamp_selection(
+                &app.model_choices.clone(),
+                &app.connections.clone(),
+                &app.saved_sessions,
+            );
         }
         assert!(!activate_palette(&mut app, &tx));
         match rx.try_recv() {
@@ -2022,7 +2017,10 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(app.input.is_empty());
         assert!(!submit(&mut app, &tx));
-        assert!(app.has_follow_up(), "follow-up must stay queued while running");
+        assert!(
+            app.has_follow_up(),
+            "follow-up must stay queued while running"
+        );
     }
 
     #[test]
@@ -2104,7 +2102,11 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::About) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
+                pal.move_down(
+                    &app.model_choices.clone(),
+                    &app.connections.clone(),
+                    &app.saved_sessions,
+                );
             }
         }
         assert_eq!(
@@ -2147,12 +2149,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
         app.open_palette();
-        assert!(!handle_key(
-            &mut app,
-            esc_key(),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt,));
         assert!(!app.palette_open());
     }
 
@@ -2167,23 +2164,13 @@ mod tests {
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Models)
         );
-        assert!(!handle_key(
-            &mut app,
-            esc_key(),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt,));
         assert!(app.palette_open());
         assert_eq!(
             app.palette.as_ref().map(|p| p.mode),
             Some(PaletteMode::Commands)
         );
-        assert!(!handle_key(
-            &mut app,
-            esc_key(),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt,));
         assert!(!app.palette_open());
     }
 
@@ -2535,22 +2522,12 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert!(app.input.is_empty());
         assert_eq!(app.scroll_from_bottom, 1);
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Down),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
     }
@@ -2569,21 +2546,11 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Down),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Down), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 0);
 
@@ -2610,22 +2577,12 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Left),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Left), &tx, &interrupt,));
         assert!(app.input_focused, "Left should restore composer focus");
         assert_eq!(app.input.cursor, 4);
 
         app.blur_input();
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(
             app.input_focused,
             "Up with nothing to scroll should focus, not no-op"
@@ -2644,28 +2601,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2, "Up stops at top");
 
         // Further Up cannot scroll — hand focus back to the composer.
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(app.input_focused);
         assert_eq!(app.scroll_from_bottom, 2);
     }
@@ -2680,21 +2622,11 @@ mod tests {
         let interrupt = Arc::new(AtomicBool::new(false));
 
         // Esc closes About; arrows must not stay swallowed afterward.
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Esc),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Esc), &tx, &interrupt,));
         assert!(!app.about_open());
         assert!(!app.input_focused);
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Up),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Up), &tx, &interrupt,));
         assert!(!app.input_focused);
         assert_eq!(app.scroll_from_bottom, 1);
     }
@@ -2809,12 +2741,7 @@ mod tests {
         );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
-        handle_key(
-            &mut app,
-            ctrl(KeyCode::Char(']')),
-            &tx,
-            &interrupt,
-        );
+        handle_key(&mut app, ctrl(KeyCode::Char(']')), &tx, &interrupt);
         assert!(matches!(
             rx.try_recv(),
             Ok(InputCommand::TerminalDetach { id }) if id == "term-1"
@@ -2831,12 +2758,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::Esc),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::Esc), &tx, &interrupt,));
         assert_eq!(terminal_input(&mut rx), b"\x1b");
         assert!(!handle_key(
             &mut app,
@@ -2992,21 +2914,11 @@ mod tests {
             code: KeyCode::PageUp,
             mods: KeyMods::SHIFT,
         };
-        assert!(!handle_key(
-            &mut app,
-            shift_page_up,
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, shift_page_up, &tx, &interrupt,));
         assert!(app.terminal_view.scrollback > 0);
         assert!(rx.try_recv().is_err());
 
-        assert!(!handle_key(
-            &mut app,
-            key(KeyCode::PageUp),
-            &tx,
-            &interrupt,
-        ));
+        assert!(!handle_key(&mut app, key(KeyCode::PageUp), &tx, &interrupt,));
         assert_eq!(terminal_input(&mut rx), b"\x1b[5~");
     }
 
@@ -3024,12 +2936,7 @@ mod tests {
             .count();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
-        handle_key(
-            &mut app,
-            key(KeyCode::Char('x')),
-            &tx,
-            &interrupt,
-        );
+        handle_key(&mut app, key(KeyCode::Char('x')), &tx, &interrupt);
         handle_paste(&mut app, "secret", &tx);
 
         assert_eq!(app.input.value, "draft");

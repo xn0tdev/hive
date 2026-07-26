@@ -175,10 +175,10 @@ pub enum InputCommand {
     Clear,
     /// Compress agent conversation history (keeps task continuity).
     Compact,
-    /// Save the current session to disk.
-    SaveSession,
     /// Load a saved session from disk.
-    LoadSession { id: String },
+    LoadSession {
+        id: String,
+    },
     /// List saved sessions (response comes back as AgentEvent).
     ListSessions,
     /// Persist UI prefs into `~/.config/hive/config.toml`.

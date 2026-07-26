@@ -90,7 +90,8 @@ impl Table {
     }
 
     pub fn row(mut self, cells: &[&str]) -> Self {
-        self.rows.push(cells.iter().map(|s| s.to_string()).collect());
+        self.rows
+            .push(cells.iter().map(|s| s.to_string()).collect());
         self
     }
 
@@ -166,10 +167,20 @@ impl Table {
         let mut y = area.y;
         let mut row_idx = self.scroll;
 
+        let layout = RowLayout {
+            widths: &widths,
+            pad,
+            cols: &self.cols,
+        };
+
         // Header
         if row_idx == 0 && y < area.bottom() {
-            let bg = self.header_bg.unwrap_or(Style::new());
-            render_row(buf, area.x, y, &widths, pad, &self.header, &self.cols, head_st, bg, chrome_st);
+            let st = RowStyle {
+                text: head_st,
+                bg: self.header_bg.unwrap_or_default(),
+                chrome: chrome_st,
+            };
+            render_row(buf, area.x, y, &layout, &self.header, st);
             y += 1;
             row_idx = 1;
         }
@@ -177,33 +188,51 @@ impl Table {
         // Body
         while y < area.bottom() && row_idx - 1 < self.rows.len() {
             let row = &self.rows[row_idx - 1];
-            let bg = self.cell_bg.unwrap_or(Style::new());
-            render_row(buf, area.x, y, &widths, pad, row, &self.cols, body_st, bg, chrome_st);
+            let st = RowStyle {
+                text: body_st,
+                bg: self.cell_bg.unwrap_or_default(),
+                chrome: chrome_st,
+            };
+            render_row(buf, area.x, y, &layout, row, st);
             y += 1;
             row_idx += 1;
         }
     }
 }
 
+/// Column geometry shared by every row of one render pass.
+struct RowLayout<'a> {
+    widths: &'a [u16],
+    pad: u16,
+    cols: &'a [TableCol],
+}
+
+/// Text, background, and border styles for a single row.
+#[derive(Clone, Copy)]
+struct RowStyle {
+    text: Style,
+    bg: Style,
+    chrome: Style,
+}
+
 fn render_row(
     buf: &mut Buffer,
     x: u16,
     y: u16,
-    widths: &[u16],
-    pad: u16,
+    layout: &RowLayout,
     cells: &[String],
-    cols: &[TableCol],
-    style: Style,
-    bg: Style,
-    chrome: Style,
+    style: RowStyle,
 ) {
+    let RowLayout { widths, pad, cols } = *layout;
+    let (chrome, row_bg) = (style.chrome, style.bg);
+    let style = style.text;
     let mut cx = x;
     buf.set(cx, y, '│', chrome);
     cx += 1;
     for (i, w) in widths.iter().enumerate() {
         let text = cells.get(i).map(|s| s.as_str()).unwrap_or("");
         let align = cols.get(i).map(|c| c.align).unwrap_or(Align::Start);
-        let bg = bg.patch(chrome);
+        let bg = row_bg.patch(chrome);
         let st = style.patch(bg);
 
         buf.paint(Rect::new(cx, y, pad, 1), bg);
@@ -219,7 +248,7 @@ fn render_row(
         }
         buf.set_str(cx + lp, y, text, st);
         if rp > 0 {
-            buf.paint(Rect::new(cx + lp + text_w.min(*w) as u16, y, rp, 1), bg);
+            buf.paint(Rect::new(cx + lp + text_w.min(*w), y, rp, 1), bg);
         }
         cx += *w;
         buf.paint(Rect::new(cx, y, pad, 1), bg);
