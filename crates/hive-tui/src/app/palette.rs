@@ -17,6 +17,8 @@ pub enum PaletteMode {
     ConnectKey {
         preset_idx: usize,
     },
+    /// Replace the API key of an already configured provider.
+    EditConnectionKey,
     /// Saved sessions picker.
     Sessions,
 }
@@ -42,7 +44,6 @@ pub enum ConnectRow<'a> {
     Profile(&'a ConnectionInfo),
     /// A known provider with no key yet: selecting it asks for one.
     Preset(usize),
-    RemoveActive,
 }
 
 /// Host part of a base URL, matching how the shell builds `ConnectionInfo`.
@@ -79,6 +80,8 @@ pub struct PaletteState {
     pub list_offset: usize,
     /// Search field has the caret.
     pub search_focused: bool,
+    /// Provider whose key is being replaced, for `EditConnectionKey`.
+    pub edit_connection: Option<String>,
 }
 
 impl PaletteState {
@@ -91,6 +94,7 @@ impl PaletteState {
             selected: commands::first_selectable(&rows),
             list_offset: 0,
             search_focused: false,
+            edit_connection: None,
         }
     }
 
@@ -102,6 +106,7 @@ impl PaletteState {
             selected: 0,
             list_offset: 0,
             search_focused: false,
+            edit_connection: None,
         }
     }
 
@@ -113,6 +118,7 @@ impl PaletteState {
             selected: 0,
             list_offset: 0,
             search_focused: false,
+            edit_connection: None,
         }
     }
 
@@ -124,6 +130,19 @@ impl PaletteState {
             selected: 0,
             list_offset: 0,
             search_focused: true,
+            edit_connection: None,
+        }
+    }
+
+    pub fn edit_connection_key(connection_id: impl Into<String>) -> Self {
+        PaletteState {
+            mode: PaletteMode::EditConnectionKey,
+            query: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_offset: 0,
+            search_focused: true,
+            edit_connection: Some(connection_id.into()),
         }
     }
 
@@ -135,6 +154,7 @@ impl PaletteState {
             selected: 0,
             list_offset: 0,
             search_focused: false,
+            edit_connection: None,
         }
     }
 
@@ -172,7 +192,7 @@ impl PaletteState {
             PaletteMode::Commands => self.command_rows().len(),
             PaletteMode::Models => self.model_rows(choices).len(),
             PaletteMode::Connect => self.connect_rows(connections).len(),
-            PaletteMode::ConnectKey { .. } => 0,
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => 0,
             PaletteMode::Sessions => self.session_rows(sessions).len(),
         };
         (len, visible)
@@ -248,9 +268,6 @@ impl PaletteState {
                 .map(|(i, _)| ConnectRow::Preset(i)),
         );
 
-        if connections.len() > 1 {
-            rows.push(ConnectRow::RemoveActive);
-        }
         rows
     }
 
@@ -306,7 +323,7 @@ impl PaletteState {
                     self.selected = n - 1;
                 }
             }
-            PaletteMode::ConnectKey { .. } => {
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => {
                 self.selected = 0;
             }
             PaletteMode::Sessions => {
@@ -341,7 +358,7 @@ impl PaletteState {
                     self.selected = (self.selected + n - 1) % n;
                 }
             }
-            PaletteMode::ConnectKey { .. } => {}
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => {}
             PaletteMode::Sessions => {
                 let n = self.session_rows(sessions).len();
                 if n > 0 {
@@ -372,7 +389,7 @@ impl PaletteState {
                     self.selected = (self.selected + 1) % n;
                 }
             }
-            PaletteMode::ConnectKey { .. } => {}
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => {}
             PaletteMode::Sessions => {
                 let n = self.session_rows(sessions).len();
                 if n > 0 {
@@ -496,7 +513,7 @@ impl PaletteState {
                 self.selected = 0;
                 self.clamp_selection(choices, connections, sessions);
             }
-            PaletteMode::ConnectKey { .. } => {}
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => {}
         }
     }
 
@@ -662,17 +679,17 @@ mod tests {
     }
 
     #[test]
-    fn remove_appears_only_with_something_to_fall_back_to() {
-        let one = vec![conn("fireworks", "Fireworks", "api.fireworks.ai")];
-        let rows = PaletteState::connect().connect_rows(&one);
-        assert!(!rows.iter().any(|r| matches!(r, ConnectRow::RemoveActive)));
-
-        let two = vec![
+    fn the_list_is_providers_and_nothing_else() {
+        let conns = vec![
             conn("fireworks", "Fireworks", "api.fireworks.ai"),
             conn("groq", "Groq", "api.groq.com"),
         ];
-        let rows = PaletteState::connect().connect_rows(&two);
-        assert!(matches!(rows.last(), Some(ConnectRow::RemoveActive)));
+        let rows = PaletteState::connect().connect_rows(&conns);
+        // No command rows mixed in: every row is a provider you can act on.
+        assert!(rows
+            .iter()
+            .all(|r| matches!(r, ConnectRow::Profile(_) | ConnectRow::Preset(_))));
+        assert_eq!(rows.len(), offered_count());
     }
 
     #[test]

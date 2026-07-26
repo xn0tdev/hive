@@ -2408,7 +2408,9 @@ Keep everything else unless a note says otherwise.\n",
                 if let Some(pal) = self.palette.as_mut() {
                     if matches!(
                         pal.mode,
-                        palette::PaletteMode::Connect | palette::PaletteMode::ConnectKey { .. }
+                        palette::PaletteMode::Connect
+                            | palette::PaletteMode::ConnectKey { .. }
+                            | palette::PaletteMode::EditConnectionKey
                     ) {
                         pal.clamp_selection(
                             &self.model_choices,

@@ -324,6 +324,37 @@ pub async fn run(
                     let _ = events.send(AgentEvent::Notice(format!("connect failed: {e}")));
                 }
             }
+            InputCommand::UpdateConnectionKey { id, api_key } => {
+                if let Err(e) = crate::config::update_connection_key(&id, &api_key) {
+                    let _ = events.send(AgentEvent::Notice(format!("could not update key: {e}")));
+                    continue;
+                }
+                match crate::config::load() {
+                    Ok(new_cfg) => {
+                        cfg = new_cfg;
+                        if cfg.connections.active == id {
+                            let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
+                                cfg.provider.base_url.clone(),
+                                cfg.secrets.provider_api_key.clone(),
+                            ));
+                            agent.set_provider(provider);
+                        }
+                        emit_connections(&cfg, &events);
+                        let label = cfg
+                            .connections
+                            .profiles
+                            .get(&id)
+                            .map(|p| p.label.as_str())
+                            .filter(|label| !label.is_empty())
+                            .unwrap_or(&id);
+                        let _ =
+                            events.send(AgentEvent::Notice(format!("API key updated: {label}")));
+                    }
+                    Err(e) => {
+                        let _ = events.send(AgentEvent::Notice(format!("reload failed: {e}")));
+                    }
+                }
+            }
             InputCommand::RemoveConnection { id } => {
                 if let Err(e) = crate::config::remove_connection(&id) {
                     let _ = events.send(AgentEvent::Notice(format!("could not remove: {e}")));

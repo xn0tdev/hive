@@ -170,6 +170,11 @@ pub enum InputCommand {
         model_id: String,
         model_name: String,
     },
+    /// Replace the stored API key without changing the active provider.
+    UpdateConnectionKey {
+        id: String,
+        api_key: String,
+    },
     /// Remove a saved provider profile.
     RemoveConnection {
         id: String,

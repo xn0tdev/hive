@@ -231,7 +231,7 @@ fn paste_into_palette(app: &mut App, text: &str) -> bool {
             }
             true
         }
-        Some(PaletteMode::ConnectKey { .. }) => {
+        Some(PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey) => {
             let cleaned = sanitize_api_key(text);
             if cleaned.is_empty() {
                 return false;
@@ -1547,6 +1547,14 @@ fn activate_context_action(app: &mut App, action: ContextAction) {
     }
 }
 
+/// The `/connect` row under the cursor, if the providers list is open.
+fn highlighted_provider<'a>(app: &'a App) -> Option<crate::app::palette::ConnectRow<'a>> {
+    app.palette
+        .as_ref()
+        .filter(|p| p.mode == PaletteMode::Connect)
+        .and_then(|p| p.selected_connect(&app.connections))
+}
+
 fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let ctrl = key.mods.ctrl;
     let choices = app.model_choices.clone();
@@ -1567,7 +1575,9 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
             if let Some(pal) = app.palette.as_ref() {
                 match pal.mode {
                     PaletteMode::Models | PaletteMode::Connect => app.open_palette(),
-                    PaletteMode::ConnectKey { .. } => app.open_connect_picker(),
+                    PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => {
+                        app.open_connect_picker()
+                    }
                     PaletteMode::Commands | PaletteMode::Sessions => app.close_palette(),
                 }
             } else {
@@ -1579,6 +1589,38 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
         }
         KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
         KeyCode::Char('q') if ctrl => return true,
+        // Set or replace the key of whatever provider is highlighted. Works on
+        // both kinds of row so it never looks dead.
+        KeyCode::Char('e') if ctrl => {
+            use crate::app::palette::{ConnectRow, PaletteState};
+            match highlighted_provider(app) {
+                Some(ConnectRow::Profile(c)) => {
+                    let id = c.id.clone();
+                    app.palette = Some(PaletteState::edit_connection_key(id));
+                }
+                Some(ConnectRow::Preset(idx)) => {
+                    app.palette = Some(PaletteState::connect_key(idx));
+                }
+                None => {}
+            }
+        }
+        // Drop the highlighted provider.
+        KeyCode::Char('r') if ctrl => {
+            use crate::app::palette::ConnectRow;
+            match highlighted_provider(app) {
+                Some(ConnectRow::Profile(c)) => {
+                    let (id, label) = (c.id.clone(), c.label.clone());
+                    if app.connections.len() <= 1 {
+                        app.flash("Can't remove the only provider");
+                    } else {
+                        let _ = input_tx.send(InputCommand::RemoveConnection { id });
+                        app.flash(format!("Removing {label}…"));
+                    }
+                }
+                Some(ConnectRow::Preset(_)) => app.flash("That provider isn't set up yet"),
+                None => {}
+            }
+        }
         KeyCode::Up => {
             let visible = app.palette_list_visible as usize;
             if let Some(pal) = app.palette.as_mut() {
@@ -1671,7 +1713,6 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 .map(|r| match r {
                     ConnectRow::Profile(c) => ConnectPick::Profile(c.id.clone()),
                     ConnectRow::Preset(i) => ConnectPick::Preset(i),
-                    ConnectRow::RemoveActive => ConnectPick::Remove,
                 });
             match row {
                 Some(ConnectPick::Profile(id)) => {
@@ -1681,13 +1722,6 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 }
                 Some(ConnectPick::Preset(idx)) => {
                     app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
-                }
-                Some(ConnectPick::Remove) => {
-                    let id = app.active_connection.clone();
-                    if !id.is_empty() {
-                        let _ = input_tx.send(InputCommand::RemoveConnection { id });
-                        app.flash("Removing provider…");
-                    }
                 }
                 None => {}
             }
@@ -1721,6 +1755,33 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 model_name,
             });
             app.flash(format!("Connecting {}…", preset.label));
+            false
+        }
+        Some(PaletteMode::EditConnectionKey) => {
+            let key = app
+                .palette
+                .as_ref()
+                .map(|p| p.query.trim().to_string())
+                .unwrap_or_default();
+            if key.is_empty() {
+                app.flash("Paste an API key");
+                return false;
+            }
+            let target = app.palette.as_ref().and_then(|p| p.edit_connection.clone());
+            let connection = target
+                .and_then(|id| app.connections.iter().find(|c| c.id == id))
+                .cloned();
+            let Some(connection) = connection else {
+                app.open_connect_picker();
+                app.flash("Provider is no longer available");
+                return false;
+            };
+            app.close_palette();
+            let _ = input_tx.send(InputCommand::UpdateConnectionKey {
+                id: connection.id,
+                api_key: key,
+            });
+            app.flash(format!("Updating {} key…", connection.label));
             false
         }
         Some(PaletteMode::Commands) => {
@@ -1782,7 +1843,6 @@ enum ConnectPick {
     Profile(String),
     /// Ask for a key for a provider that isn't.
     Preset(usize),
-    Remove,
 }
 
 fn unique_connection_id(label: &str, existing: &[hive_core::event::ConnectionInfo]) -> String {
@@ -1963,6 +2023,182 @@ mod tests {
             Some(PaletteMode::ConnectKey { preset_idx: idx })
         );
         assert!(rx.try_recv().is_err(), "nothing sent until a key is typed");
+    }
+
+    #[test]
+    fn ctrl_e_replaces_a_configured_provider_key() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        app.connections = vec![hive_core::event::ConnectionInfo {
+            id: "openai".into(),
+            label: "OpenAI".into(),
+            detail: "api.openai.com".into(),
+        }];
+        app.palette = Some(crate::app::palette::PaletteState::connect());
+
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('e')),
+            &tx,
+            &interrupt,
+        ));
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::EditConnectionKey)
+        );
+
+        if let Some(pal) = app.palette.as_mut() {
+            pal.query = "sk-new".into();
+        }
+        assert!(!activate_palette(&mut app, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::UpdateConnectionKey { id, api_key })
+                if id == "openai" && api_key == "sk-new"
+        ));
+    }
+
+    /// Providers palette with one saved profile selected.
+    fn provider_app() -> App {
+        let mut app = test_app();
+        app.connections = vec![
+            hive_core::event::ConnectionInfo {
+                id: "openai".into(),
+                label: "OpenAI".into(),
+                detail: "api.openai.com".into(),
+            },
+            hive_core::event::ConnectionInfo {
+                id: "groq".into(),
+                label: "Groq".into(),
+                detail: "api.groq.com".into(),
+            },
+        ];
+        app.active_connection = "openai".into();
+        app.palette = Some(crate::app::palette::PaletteState::connect());
+        app
+    }
+
+    /// Move the highlight onto the first provider that isn't set up.
+    fn select_first_preset(app: &mut App) {
+        use crate::app::palette::ConnectRow;
+        for _ in 0..40 {
+            if matches!(
+                app.palette
+                    .as_ref()
+                    .and_then(|p| p.selected_connect(&app.connections)),
+                Some(ConnectRow::Preset(_))
+            ) {
+                return;
+            }
+            let conns = app.connections.clone();
+            if let Some(pal) = app.palette.as_mut() {
+                pal.move_down(&[], &conns, &[]);
+            }
+        }
+        panic!("no preset row to land on");
+    }
+
+    #[test]
+    fn ctrl_e_on_an_unconfigured_provider_asks_for_its_key() {
+        let mut app = provider_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        select_first_preset(&mut app);
+
+        // It used to no-op here, which read as a dead binding.
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('e')),
+            &tx,
+            &interrupt,
+        ));
+        assert!(matches!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::ConnectKey { .. })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ctrl_r_removes_the_highlighted_provider() {
+        let mut app = provider_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('r')),
+            &tx,
+            &interrupt,
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::RemoveConnection { id }) if id == "openai"
+        ));
+    }
+
+    #[test]
+    fn ctrl_r_refuses_to_strand_you_without_a_provider() {
+        let mut app = provider_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        app.connections.truncate(1);
+
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('r')),
+            &tx,
+            &interrupt,
+        ));
+        assert!(rx.try_recv().is_err(), "nothing removed");
+
+        // And on a provider that isn't set up there's nothing to remove.
+        app.connections = provider_app().connections;
+        select_first_preset(&mut app);
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('r')),
+            &tx,
+            &interrupt,
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_provider_list_update_cannot_redirect_a_key_edit() {
+        let mut app = provider_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        assert!(!handle_key(
+            &mut app,
+            ctrl(KeyCode::Char('e')),
+            &tx,
+            &interrupt,
+        ));
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::EditConnectionKey)
+        );
+
+        // OpenAI slides to index 1 while the prompt is open.
+        app.connections.insert(
+            0,
+            hive_core::event::ConnectionInfo {
+                id: "fireworks".into(),
+                label: "Fireworks".into(),
+                detail: "api.fireworks.ai".into(),
+            },
+        );
+        if let Some(pal) = app.palette.as_mut() {
+            pal.query = "sk-new".into();
+        }
+        assert!(!activate_palette(&mut app, &tx));
+        assert!(
+            matches!(rx.try_recv(), Ok(InputCommand::UpdateConnectionKey { id, .. }) if id == "openai"),
+            "the key must land on the provider that was highlighted"
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ const MIN_W: u16 = 36;
 const MAX_W: u16 = 48;
 /// Wider panel for `/model` so long ids and badges fit.
 const MAX_W_MODELS: u16 = 72;
+/// `/connect` carries shortcut hints in its header — give them room.
+const MAX_W_CONNECT: u16 = 56;
+const MIN_W_CONNECT: u16 = 52;
 const PAD_X: u16 = 2;
 const PAD_Y: u16 = 1;
 /// Title + search + gap before the list.
@@ -28,6 +31,7 @@ struct PaletteGeom {
 fn max_width_for(mode: PaletteMode) -> u16 {
     match mode {
         PaletteMode::Models => MAX_W_MODELS,
+        PaletteMode::Connect => MAX_W_CONNECT,
         _ => MAX_W,
     }
 }
@@ -35,10 +39,10 @@ fn max_width_for(mode: PaletteMode) -> u16 {
 fn geom(area: Rect, list_rows: u16, mode: PaletteMode) -> PaletteGeom {
     let max_w = max_width_for(mode);
     // Prefer ~2/3 of the terminal for models; ~1/2 for compact palettes.
-    let prefer = if matches!(mode, PaletteMode::Models) {
-        area.width.saturating_mul(2) / 3
-    } else {
-        area.width / 2
+    let prefer = match mode {
+        PaletteMode::Models => area.width.saturating_mul(2) / 3,
+        PaletteMode::Connect => (area.width / 2).max(MIN_W_CONNECT),
+        _ => area.width / 2,
     };
     let w = prefer.clamp(MIN_W, max_w).min(area.width);
     let list_h = list_rows.clamp(1, MAX_LIST);
@@ -80,7 +84,7 @@ fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
             }
         },
         PaletteMode::Connect => pal.connect_rows(&app.connections).len().max(1) as u16,
-        PaletteMode::ConnectKey { .. } => 1,
+        PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => 1,
         PaletteMode::Sessions => {
             if app.saved_sessions.is_empty() {
                 1
@@ -112,10 +116,23 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Commands => "Commands",
         PaletteMode::Models => "Switch model",
         PaletteMode::Connect => "Providers",
-        PaletteMode::ConnectKey { .. } => "API key",
+        PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => "API key",
         PaletteMode::Sessions => "Resume session",
     };
-    draw_title(buf, g.content, title, theme.fg, theme.faint, panel);
+    let title_hint = if matches!(pal.mode, PaletteMode::Connect) {
+        "ctrl+e key · ctrl+r remove · esc"
+    } else {
+        "esc"
+    };
+    draw_title(
+        buf,
+        g.content,
+        title,
+        title_hint,
+        theme.fg,
+        theme.faint,
+        panel,
+    );
     draw_search(
         buf,
         Rect::new(g.content.x, g.search_y, g.content.width, 1),
@@ -135,28 +152,54 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Connect => draw_connect_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::Sessions => draw_sessions_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::ConnectKey { preset_idx } => {
-            draw_connect_key_hint(buf, g.list, preset_idx, theme, panel);
+            let label = PRESETS
+                .get(preset_idx)
+                .map(|p| p.label)
+                .unwrap_or("Provider");
+            draw_connect_key_hint(buf, g.list, label, theme, panel);
+        }
+        PaletteMode::EditConnectionKey => {
+            let label = pal
+                .edit_connection
+                .as_deref()
+                .and_then(|id| app.connections.iter().find(|c| c.id == id))
+                .map(|c| c.label.as_str())
+                .unwrap_or("Provider");
+            draw_connect_key_hint(buf, g.list, label, theme, panel);
         }
     }
 }
 
-fn draw_title(buf: &mut Buffer, area: Rect, title: &str, fg: Color, faint: Color, bg: Color) {
-    let esc = "esc";
+fn draw_title(
+    buf: &mut Buffer,
+    area: Rect,
+    title: &str,
+    hint: &str,
+    fg: Color,
+    faint: Color,
+    bg: Color,
+) {
     let base = Style::default().bg(bg);
+    let width = area.width as usize;
+    let title_w = title.chars().count();
+    // A hint that won't fit falls back to plain "esc", then to nothing —
+    // never onto the title.
+    const MIN_GAP: usize = 2;
+    let hint = if title_w + MIN_GAP + hint.chars().count() <= width {
+        hint
+    } else if title_w + MIN_GAP + 3 <= width {
+        "esc"
+    } else {
+        ""
+    };
+    let gap = width.saturating_sub(title_w + hint.chars().count());
     let title_line = Line::from(vec![
         Span::styled(
             title.to_string(),
             Style::default().fg(fg).bg(bg).add(Modifier::BOLD),
         ),
-        Span::styled(
-            " ".repeat(
-                area.width
-                    .saturating_sub(title.chars().count() as u16 + esc.len() as u16)
-                    as usize,
-            ),
-            base,
-        ),
-        Span::styled(esc, Style::default().fg(faint).bg(bg)),
+        Span::styled(" ".repeat(gap), base),
+        Span::styled(hint, Style::default().fg(faint).bg(bg)),
     ]);
     crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &title_line, area.width, bg);
 }
@@ -169,7 +212,10 @@ fn draw_search(
     bg: Color,
 ) {
     let empty = pal.query.is_empty();
-    let masked = matches!(pal.mode, PaletteMode::ConnectKey { .. });
+    let masked = matches!(
+        pal.mode,
+        PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey
+    );
     let placeholder = if masked { "Paste API key…" } else { "Search" };
     let shown = if empty {
         placeholder.to_string()
@@ -483,19 +529,14 @@ fn draw_connect_list(
         let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
         let (raw_left, raw_right) = match item {
             ConnectRow::Profile(c) => {
-                // ✓ it's set up; › it's the one in use right now.
-                let mark = if c.id == app.active_connection {
-                    "›"
-                } else {
-                    "✓"
-                };
-                (format!("{mark} {}", c.label), c.detail.clone())
+                // Every configured provider is authorized; the active runtime
+                // connection is intentionally not distinguished in this list.
+                (format!("✓ {}", c.label), c.detail.clone())
             }
             ConnectRow::Preset(i) => match crate::PRESETS.get(*i) {
                 Some(p) => (format!("  {}", p.label), short_host(p.base_url)),
                 None => continue,
             },
-            ConnectRow::RemoveActive => ("  Remove active".into(), String::new()),
         };
         let (left, right, gap) =
             crate::render::two_col::layout_label_host(&raw_left, &raw_right, area.width as usize);
@@ -594,17 +635,13 @@ fn short_model(id: &str) -> String {
 fn draw_connect_key_hint(
     buf: &mut Buffer,
     area: Rect,
-    preset_idx: usize,
+    label: &str,
     theme: &crate::theme::Theme,
     panel: Color,
 ) {
     if area.height == 0 {
         return;
     }
-    let label = PRESETS
-        .get(preset_idx)
-        .map(|p| p.label)
-        .unwrap_or("Provider");
     let line = Line::from(Span::styled(
         format!("Enter key for {label} · enter to save"),
         Style::default().fg(theme.faint).bg(panel),
@@ -820,17 +857,43 @@ mod tests {
 
         assert!(text.contains("Providers"), "{text}");
         assert!(
-            text.contains("\u{203a} Groq"),
-            "active provider marked: {text}"
+            text.contains("\u{2713} Groq"),
+            "active provider is shown as authorized: {text}"
         );
         assert!(
             text.contains("\u{2713} Fireworks"),
             "configured marked: {text}"
         );
+        assert!(
+            !text.contains("\u{203a} Groq"),
+            "no active-provider arrow: {text}"
+        );
+        assert!(text.contains("ctrl+e key"), "key shortcut shown: {text}");
         // Providers you haven't set up are right there in the same list.
         assert!(text.contains("OpenRouter"), "{text}");
         assert!(text.contains("openrouter.ai"), "host shown: {text}");
         assert!(!text.contains("Add provider"), "no add step left: {text}");
+    }
+
+    #[test]
+    fn the_header_hint_never_lands_on_the_title() {
+        let mut a = app();
+        a.connections = vec![hive_core::event::ConnectionInfo {
+            id: "openai".into(),
+            label: "OpenAI".into(),
+            detail: "api.openai.com".into(),
+        }];
+        a.palette = Some(PaletteState::connect());
+
+        for width in [30u16, 40, 60, 90, 140] {
+            let text = render(Size::new(width, 26), |f| crate::render::draw(f, &mut a))
+                .text()
+                .to_string();
+            assert!(
+                !text.contains("Providersctrl") && !text.contains("Providersesc"),
+                "hint collided with the title at width {width}: {text}"
+            );
+        }
     }
 
     #[test]

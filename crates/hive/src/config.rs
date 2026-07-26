@@ -653,6 +653,44 @@ pub fn upsert_connection(
     write_toml_root(&value)
 }
 
+/// Replace one saved provider's API key without activating that provider.
+pub fn update_connection_key(id: &str, api_key: &str) -> Result<()> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(anyhow!("API key cannot be empty"));
+    }
+
+    let mut value = read_toml_root()?;
+    let root = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("config root must be a table"))?;
+    let active = root
+        .get("connections")
+        .and_then(|v| v.get("active"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let profile = {
+        let profiles = root
+            .get_mut("connections")
+            .and_then(|v| v.get_mut("profiles"))
+            .and_then(|v| v.as_table_mut())
+            .ok_or_else(|| anyhow!("no connection profiles"))?;
+        let profile = profiles
+            .get_mut(id)
+            .and_then(|v| v.as_table_mut())
+            .ok_or_else(|| anyhow!("unknown connection: {id}"))?;
+        profile.insert("api_key".into(), toml::Value::String(api_key.to_string()));
+        profile.clone()
+    };
+
+    if active == id {
+        mirror_profile_to_provider(root, &profile)?;
+    }
+    write_toml_root(&value)
+}
+
 /// Remove a saved connection. Refuses to delete the last profile.
 pub fn remove_connection(id: &str) -> Result<()> {
     let mut value = read_toml_root()?;
