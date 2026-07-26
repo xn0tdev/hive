@@ -45,12 +45,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     app.assistant_selection_width = content_width;
     let (all, heads, assistant_rows) = build(app, width);
     let total = all.len();
-    // Top-down with one blank row of breathing room under the top edge.
-    let target = Rect {
-        y: area.y + 1,
-        height: area.height.saturating_sub(1),
-        ..area
-    };
+    // Flush with the top edge — the first message shouldn't sit under a gap.
+    let target = area;
     let viewport = target.height as usize;
     let max_scroll = total.saturating_sub(viewport);
     app.set_transcript_max_scroll(max_scroll);
@@ -856,6 +852,36 @@ mod tests {
         );
         let t = tool_text(&mut a, 80);
         assert!(!t.contains("Thought for"), "{t}");
+    }
+
+    #[test]
+    fn the_first_message_starts_at_the_top_edge() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.push_user("first message".into());
+
+        let buf = render(Size::new(70, 14), |f| crate::render::draw(f, &mut a));
+        let row = buf
+            .text()
+            .lines()
+            .position(|l| l.contains("first message"))
+            .expect("user message");
+        // Row 0 is the message strip's own padding, not a gap above it.
+        assert_eq!(row, 1, "no blank row above the first message");
+        // The chat column is centred, so sample inside it, not in the margin.
+        let x = buf
+            .text()
+            .lines()
+            .nth(1)
+            .and_then(|l| l.find("first message"))
+            .expect("column") as u16;
+        assert_eq!(
+            buf.get(x, 0).and_then(|c| c.style.bg),
+            Some(a.theme.strip),
+            "the top row belongs to the message band, not a gap"
+        );
     }
 
     #[test]
