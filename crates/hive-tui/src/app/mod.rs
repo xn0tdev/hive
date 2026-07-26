@@ -231,6 +231,11 @@ pub struct App {
     pub(crate) pending_attaches: Vec<PendingAttach>,
     /// Attachment chip the keyboard is on, once ↓ steps out of the composer.
     pub(crate) attach_selected: Option<usize>,
+    /// Set by ctrl+L: repaint every cell, not just the diff.
+    pub(crate) repaint_requested: bool,
+    /// When an image last landed from the clipboard, so the composer can say
+    /// so for a moment instead of the chip appearing out of nowhere.
+    pub(crate) image_pasted_at: Option<std::time::Instant>,
     /// Follow-up waiting for the current turn to finish.
     pub(crate) follow_up: Option<QueuedFollowUp>,
     /// Up/down arrow history of submitted prompts.
@@ -394,6 +399,8 @@ impl App {
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             attach_selected: None,
+            repaint_requested: false,
+            image_pasted_at: None,
             follow_up: None,
             prompt_history: PromptHistory::default(),
             pending_dispatch: None,
@@ -1404,6 +1411,10 @@ Keep everything else unless a note says otherwise.\n",
         if self.logo_bonk.is_some() || self.flash_text().is_some() {
             return true;
         }
+        // Keep painting so the paste notice can retire on its own.
+        if self.just_pasted_image() {
+            return true;
+        }
         if self.pending_dispatch.is_some() {
             return true;
         }
@@ -1726,6 +1737,21 @@ Keep everything else unless a note says otherwise.\n",
             && !self.palette_open()
     }
 
+    /// True just after an image paste, while the composer acknowledges it.
+    pub fn just_pasted_image(&self) -> bool {
+        self.image_pasted_at
+            .is_some_and(|at| at.elapsed().as_millis() < TOAST_MS)
+    }
+
+    /// Ask for a full repaint — the screen has something on it we didn't draw.
+    pub fn request_repaint(&mut self) {
+        self.repaint_requested = true;
+    }
+
+    pub fn take_repaint_request(&mut self) -> bool {
+        std::mem::take(&mut self.repaint_requested)
+    }
+
     pub fn has_pending_attaches(&self) -> bool {
         !self.pending_attaches.is_empty()
     }
@@ -1921,6 +1947,7 @@ Keep everything else unless a note says otherwise.\n",
         let label = self.next_clipboard_label();
         let tag = format!("@{label}");
         self.attach_selected = None;
+        self.image_pasted_at = Some(std::time::Instant::now());
         self.pending_attaches.push(PendingAttach {
             path: label.clone(),
             label,

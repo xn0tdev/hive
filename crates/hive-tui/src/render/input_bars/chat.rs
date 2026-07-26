@@ -74,6 +74,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             "↑ edit · esc to cancel"
         } else if app.running {
             "Add a follow-up"
+        } else if app.just_pasted_image() {
+            "Pasted image — describe what to do with it"
         } else if app.has_pending_attaches() {
             "Describe what to do with the attachment(s)"
         } else {
@@ -215,7 +217,7 @@ fn attach_chip_spans(app: &App, bg: comb::Color) -> Vec<Span> {
 
 #[cfg(test)]
 mod tests {
-    use comb::{render_with_cursor, Size};
+    use comb::{render, render_with_cursor, Size};
 
     use crate::app::App;
     use crate::TuiInit;
@@ -236,6 +238,26 @@ mod tests {
             cost_input: 0.0,
             cost_output: 0.0,
         })
+    }
+
+    #[test]
+    fn a_pasted_image_says_so_then_gets_out_of_the_way() {
+        let mut a = app();
+        a.attach_clipboard_image(b"png".to_vec()).expect("attached");
+
+        let text = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a))
+            .text()
+            .to_string();
+        assert!(text.contains("Pasted image"), "{text}");
+        assert!(a.needs_animation(), "must keep painting so it can expire");
+
+        // Once the moment has passed the composer goes back to its usual ask.
+        a.image_pasted_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        let text = render(Size::new(80, 24), |f| crate::render::draw(f, &mut a))
+            .text()
+            .to_string();
+        assert!(!text.contains("Pasted image"), "{text}");
+        assert!(text.contains("Describe what to do"), "{text}");
     }
 
     #[test]

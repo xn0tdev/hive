@@ -109,7 +109,22 @@ Executes immediately without confirmation."
         let mut cmd = {
             let mut c = Command::new("sh");
             c.arg("-c").arg(command);
-            c.process_group(0);
+            // A new *session*, not just a new process group. Without it the
+            // child keeps hive's controlling terminal, and anything that
+            // prompts through /dev/tty — sudo, ssh, gpg — writes its prompt
+            // straight over the TUI (stdio redirection doesn't stop it) and
+            // then blocks forever on input nobody can see. Detached, those
+            // tools fail immediately with "no tty present", which the agent
+            // can act on. setsid also makes the child a group leader, so the
+            // timeout still kills the whole tree with one killpg.
+            unsafe {
+                c.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
             c
         };
         #[cfg(windows)]
@@ -298,6 +313,48 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A command must not be able to reach hive's controlling terminal: that's
+    /// how a `sudo` prompt ended up painted over the TUI while the tool sat
+    /// blocked on a password until its timeout.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn commands_run_in_their_own_session() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let ctx = ToolContext {
+            cwd: PathBuf::from("."),
+            events,
+            spawner: noop_spawner(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+            terminal: None,
+            vision: false,
+            depth: 0,
+            call_id: "test".into(),
+            isolate_worktrees: false,
+            interrupt,
+        };
+
+        // Field 6 of /proc/self/stat is the session id.
+        let result = RunShell
+            .execute(json!({"command": "awk '{print $6}' /proc/self/stat"}), &ctx)
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        let child_sid: i32 = result
+            .content
+            .trim()
+            .lines()
+            .next_back()
+            .and_then(|l| l.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no session id in {:?}", result.content));
+        let own_sid = unsafe { libc::getsid(0) };
+        assert_ne!(
+            child_sid, own_sid,
+            "the child kept hive's session, so /dev/tty still reaches the TUI"
+        );
+    }
+
     #[tokio::test]
     async fn interrupt_kills_running_command() {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();

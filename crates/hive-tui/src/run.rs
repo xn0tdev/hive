@@ -83,6 +83,11 @@ fn run_loop(
         let animating = app.needs_animation();
         let spinner_moved = animating && app.spinner != last_spinner;
 
+        if app.take_repaint_request() {
+            terminal.invalidate()?;
+            dirty = true;
+        }
+
         if dirty || content_dirty || spinner_moved {
             terminal.draw(|f| render::draw(f, app))?;
             if let Some((id, rows, cols)) = app.take_pending_terminal_resize() {
@@ -475,6 +480,12 @@ fn handle_key(
         }
         KeyCode::Char('t') if ctrl => {
             app.toggle_thoughts();
+            return false;
+        }
+        // Something wrote over the alternate screen (a subprocess prompt, a
+        // kernel message): the frame diff can't know, so repaint everything.
+        KeyCode::Char('l') if ctrl => {
+            app.request_repaint();
             return false;
         }
         KeyCode::PageUp => {
@@ -2298,6 +2309,12 @@ mod tests {
         assert!(!handle_key(app, key(code), &tx, &interrupt));
     }
 
+    fn press_ctrl(app: &mut App, code: KeyCode) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(!handle_key(app, ctrl(code), &tx, &interrupt));
+    }
+
     #[test]
     fn down_steps_from_the_composer_onto_the_chips() {
         let mut app = attached_app();
@@ -2369,6 +2386,17 @@ mod tests {
         app.focus_input();
         press(&mut app, KeyCode::Down);
         assert_eq!(app.selected_attach(), None);
+    }
+
+    #[test]
+    fn ctrl_l_asks_for_a_full_repaint() {
+        let mut app = test_app();
+        assert!(!app.take_repaint_request());
+
+        press_ctrl(&mut app, KeyCode::Char('l'));
+        // Taken once by the draw loop, then it must not repaint forever.
+        assert!(app.take_repaint_request());
+        assert!(!app.take_repaint_request());
     }
 
     #[test]

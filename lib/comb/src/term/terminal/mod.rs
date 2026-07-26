@@ -170,6 +170,15 @@ impl Terminal {
         self.write_raw(seq)
     }
 
+    /// Forget what's on screen so the next [`draw`](Self::draw) repaints every
+    /// cell. Frames are flushed as a diff against the last one, so anything
+    /// that writes to the terminal from outside the app — a subprocess prompt,
+    /// a kernel message — leaves stale cells no diff will ever correct.
+    pub fn invalidate(&mut self) -> io::Result<()> {
+        self.front = Buffer::blank(self.size);
+        self.write_raw("\x1b[H\x1b[2J\x1b[3J")
+    }
+
     /// Build a frame, then flush the minimal diff to the terminal.
     pub fn draw<F: FnOnce(&mut Frame)>(&mut self, f: F) -> io::Result<()> {
         // Adapt to a resized window: reset our record of the screen and clear.
