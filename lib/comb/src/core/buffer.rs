@@ -241,15 +241,18 @@ impl Buffer {
         self.set_line_on(x, y, line, max_width, Style::new());
     }
 
-    /// Like [`set_line`], but every span is patched with `base` (typically a
-    /// panel background) so fg-only highlight styles don't wipe the row bg.
+    /// Like [`set_line`], but `base` (typically a panel background) fills what
+    /// each span leaves unset, so fg-only highlight styles don't wipe the row
+    /// bg — while a span that picked its own colours keeps them.
     /// Always clears the remainder of the row so scroll / short lines cannot
     /// leave stale glyphs behind.
     pub fn set_line_on(&mut self, x: u16, y: u16, line: &Line, max_width: u16, base: Style) {
         let mut cx = x;
         let limit = x.saturating_add(max_width).min(self.width);
         for span in &line.spans {
-            let st = span.style.patch(base);
+            // `base` fills what the span leaves unset — it must not repaint a
+            // span that chose its own colours (diff bands, selected chips).
+            let st = base.patch(span.style);
             for ch in span.content.chars() {
                 if cx >= limit {
                     // Still clear the rest of the row below.
@@ -424,6 +427,28 @@ mod tests {
     use super::*;
     use crate::core::style::{Color, Style};
     use crate::core::text::Span;
+
+    #[test]
+    fn base_style_fills_gaps_without_repainting_spans() {
+        let panel = Style::new().bg(Color::rgb(0x26, 0x26, 0x26));
+        let own = Style::new().bg(Color::rgb(0xd8, 0xd8, 0xd8));
+        let line = Line::from(vec![Span::raw("a"), Span::styled("b", own)]);
+
+        let mut buf = Buffer::blank(Size::new(4, 1));
+        buf.set_line_on(0, 0, &line, 4, panel);
+
+        assert_eq!(
+            buf.get(0, 0).unwrap().style.bg,
+            panel.bg,
+            "unstyled takes base"
+        );
+        assert_eq!(
+            buf.get(1, 0).unwrap().style.bg,
+            own.bg,
+            "a span that picked its own background keeps it"
+        );
+        assert_eq!(buf.get(3, 0).unwrap().style.bg, panel.bg, "tail keeps base");
+    }
 
     #[test]
     fn set_str_clips_at_edge() {

@@ -229,6 +229,8 @@ pub struct App {
     pub(crate) transcript_max_scroll: usize,
     /// Files / images queued for the next user message (shown as tags).
     pub(crate) pending_attaches: Vec<PendingAttach>,
+    /// Attachment chip the keyboard is on, once ↓ steps out of the composer.
+    pub(crate) attach_selected: Option<usize>,
     /// Follow-up waiting for the current turn to finish.
     pub(crate) follow_up: Option<QueuedFollowUp>,
     /// Up/down arrow history of submitted prompts.
@@ -391,6 +393,7 @@ impl App {
             scroll_from_bottom: 0,
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
+            attach_selected: None,
             follow_up: None,
             prompt_history: PromptHistory::default(),
             pending_dispatch: None,
@@ -1679,6 +1682,7 @@ Keep everything else unless a note says otherwise.\n",
         self.context_tokens = 0;
         self.scroll_from_bottom = 0;
         self.pending_attaches.clear();
+        self.attach_selected = None;
         self.follow_up = None;
         self.prompt_history.reset();
         self.pending_dispatch = None;
@@ -1916,6 +1920,7 @@ Keep everything else unless a note says otherwise.\n",
 
         let label = self.next_clipboard_label();
         let tag = format!("@{label}");
+        self.attach_selected = None;
         self.pending_attaches.push(PendingAttach {
             path: label.clone(),
             label,
@@ -1958,6 +1963,7 @@ Keep everything else unless a note says otherwise.\n",
         if self.pending_attaches.iter().any(|a| a.path == path) {
             return Ok(tag);
         }
+        self.attach_selected = None;
         self.pending_attaches
             .push(PendingAttach { label, path, image });
         Ok(tag)
@@ -1981,7 +1987,54 @@ Keep everything else unless a note says otherwise.\n",
     }
 
     pub fn take_pending_attaches(&mut self) -> Vec<PendingAttach> {
+        self.attach_selected = None;
         std::mem::take(&mut self.pending_attaches)
+    }
+
+    // ── Attachment chips: ↓ out of the composer, ⌫ to drop one ───────────
+
+    /// Chip the keyboard is on, if it stepped out of the composer.
+    pub fn selected_attach(&self) -> Option<usize> {
+        self.attach_selected
+            .filter(|i| *i < self.pending_attaches.len())
+    }
+
+    /// Step from the composer onto the first chip. False when there are none,
+    /// so the caller can fall back to scrolling.
+    pub fn select_first_attach(&mut self) -> bool {
+        if self.pending_attaches.is_empty() {
+            return false;
+        }
+        self.attach_selected = Some(0);
+        true
+    }
+
+    /// Walk the chips, wrapping at both ends.
+    pub fn move_attach_selection(&mut self, delta: isize) -> bool {
+        let Some(current) = self.selected_attach() else {
+            return false;
+        };
+        let n = self.pending_attaches.len() as isize;
+        self.attach_selected = Some((current as isize + delta).rem_euclid(n) as usize);
+        true
+    }
+
+    /// Drop the highlighted chip. The selection stays put so repeated
+    /// backspaces keep clearing, and returns to the composer when empty.
+    pub fn remove_selected_attach(&mut self) -> Option<String> {
+        let idx = self.selected_attach()?;
+        let removed = self.pending_attaches.remove(idx);
+        self.attach_selected = if self.pending_attaches.is_empty() {
+            None
+        } else {
+            Some(idx.min(self.pending_attaches.len() - 1))
+        };
+        Some(removed.label)
+    }
+
+    /// Hand the keyboard back to the composer.
+    pub fn clear_attach_selection(&mut self) -> bool {
+        self.attach_selected.take().is_some()
     }
 
     pub fn open_palette(&mut self) {

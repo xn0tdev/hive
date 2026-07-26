@@ -102,6 +102,19 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     if app.has_pending_attaches() {
         let mut spans = vec![Span::styled("  ", text_style)];
         spans.extend(attach_chip_spans(app, bg));
+        // Nobody guesses ↓ on their own; say it, then say what to press next.
+        let hint = if app.selected_attach().is_some() {
+            "  ⌫ remove · esc back"
+        } else {
+            "  ↓ to remove"
+        };
+        spans.push(Span::styled(
+            hint,
+            Style::default()
+                .fg(theme.faint)
+                .bg(bg)
+                .add(Modifier::ITALIC),
+        ));
         lines.push(Line::from(spans));
     }
 
@@ -131,7 +144,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    if !app.input_focused || app.palette_open() || app.about_open() {
+    if !app.input_focused
+        || app.palette_open()
+        || app.about_open()
+        // A highlighted chip owns the keyboard; two carets would be a lie.
+        || app.selected_attach().is_some()
+    {
         return;
     }
 
@@ -169,21 +187,27 @@ pub fn draw_mode_chip(f: &mut Frame, area: Rect, app: &App) {
     f.buffer().set_line(x, area.y, &line, w);
 }
 
-/// Soft `@path` chips for pending attachments (accent `@`, dim path).
+/// Soft `@path` chips for pending attachments (accent `@`, dim path). The one
+/// the keyboard is on wears the selection bar, like any other list row.
 fn attach_chip_spans(app: &App, bg: comb::Color) -> Vec<Span> {
     let theme = &app.theme;
+    let selected = app.selected_attach();
     let mut spans = Vec::new();
     for (i, a) in app.pending_attaches.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" ", Style::default().bg(bg)));
         }
+        let on = selected == Some(i);
+        let chip_bg = if on { theme.sel_bg } else { bg };
+        let at_fg = if on { theme.sel_fg } else { theme.accent };
+        let label_fg = if on { theme.sel_fg } else { theme.dim };
         spans.push(Span::styled(
             "@",
-            Style::default().fg(theme.accent).bg(bg).add(Modifier::BOLD),
+            Style::default().fg(at_fg).bg(chip_bg).add(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             a.label.clone(),
-            Style::default().fg(theme.dim).bg(bg),
+            Style::default().fg(label_fg).bg(chip_bg),
         ));
     }
     spans
@@ -212,6 +236,43 @@ mod tests {
             cost_input: 0.0,
             cost_output: 0.0,
         })
+    }
+
+    #[test]
+    fn a_selected_chip_is_highlighted_and_takes_the_caret() {
+        let mut a = app();
+        a.attach_clipboard_image(b"not really a png".to_vec())
+            .expect("attached");
+        a.focus_input();
+
+        let (buf, cursor) =
+            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let text = buf.text();
+        assert!(text.contains("@clipboard.png"), "{text}");
+        assert!(text.contains("↓ to remove"), "hint tells you how: {text}");
+        assert!(
+            cursor.is_some(),
+            "composer keeps the caret while unselected"
+        );
+
+        assert!(a.select_first_attach());
+        let (buf, cursor) =
+            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        assert!(
+            cursor.is_none(),
+            "the chip owns the keyboard, not the caret"
+        );
+        let text = buf.text();
+        assert!(text.contains("⌫ remove"), "hint switches: {text}");
+
+        // The chip row wears the selection background.
+        let row = (0..24)
+            .find(|y| (0..80).any(|x| buf.get(x, *y).is_some_and(|c| c.ch == '@')))
+            .expect("chip row");
+        assert!(
+            (0..80).any(|x| buf.get(x, row).and_then(|c| c.style.bg) == Some(a.theme.sel_bg)),
+            "selected chip must be visibly selected"
+        );
     }
 
     #[test]

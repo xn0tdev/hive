@@ -488,6 +488,35 @@ fn handle_key(
         _ => {}
     }
 
+    // An attachment chip has the keyboard: arrows walk the chips, backspace
+    // drops one, anything else hands control back to the composer.
+    if app.selected_attach().is_some() {
+        match key.code {
+            KeyCode::Left | KeyCode::Up => {
+                app.move_attach_selection(-1);
+                return false;
+            }
+            KeyCode::Right | KeyCode::Down => {
+                app.move_attach_selection(1);
+                return false;
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if let Some(label) = app.remove_selected_attach() {
+                    app.flash(format!("Removed @{label}"));
+                }
+                return false;
+            }
+            KeyCode::Esc => {
+                app.clear_attach_selection();
+                return false;
+            }
+            // Typing, Enter, chords: back to the composer, then handle normally.
+            _ => {
+                app.clear_attach_selection();
+            }
+        }
+    }
+
     // Blurred: Up/Down scroll the transcript when there is room; otherwise
     // (and for Left/Right/Home/End) focus the composer and fall through so
     // arrows stay useful after idle blur / click-away. Printable typing also
@@ -654,6 +683,9 @@ fn handle_key(
                 app.history_down();
                 composer_activity = true;
             } else if app.input.down() {
+                composer_activity = true;
+            } else if app.select_first_attach() {
+                // Past the last row of text sit the @chips.
                 composer_activity = true;
             } else {
                 app.scroll_down(1);
@@ -2248,6 +2280,95 @@ mod tests {
 
     fn solid_rgba(w: usize, h: usize, px: [u8; 4]) -> Vec<u8> {
         px.iter().copied().cycle().take(w * h * 4).collect()
+    }
+
+    /// Composer with two attachments queued and focused.
+    fn attached_app() -> App {
+        let mut app = test_app();
+        let png = encode_png(2, 2, &solid_rgba(2, 2, [0x40; 4])).expect("png");
+        app.attach_clipboard_image(png.clone()).expect("first");
+        app.attach_clipboard_image(png).expect("second");
+        app.focus_input();
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(!handle_key(app, key(code), &tx, &interrupt));
+    }
+
+    #[test]
+    fn down_steps_from_the_composer_onto_the_chips() {
+        let mut app = attached_app();
+        assert_eq!(app.selected_attach(), None);
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_attach(), Some(0));
+
+        // Arrows walk the chips and wrap.
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.selected_attach(), Some(1));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.selected_attach(), Some(0));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.selected_attach(), Some(1));
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.selected_attach(), None, "esc hands the keyboard back");
+    }
+
+    #[test]
+    fn backspace_removes_the_highlighted_chip() {
+        let mut app = attached_app();
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.selected_attach(), Some(1));
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.pending_attaches.len(), 1);
+        assert_eq!(app.pending_attaches[0].label, "clipboard.png");
+        assert_eq!(
+            app.selected_attach(),
+            Some(0),
+            "selection lands on what's left"
+        );
+
+        // A second backspace clears the last one and returns to the composer.
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.pending_attaches.is_empty());
+        assert_eq!(app.selected_attach(), None);
+    }
+
+    #[test]
+    fn backspace_still_edits_text_when_no_chip_is_selected() {
+        let mut app = attached_app();
+        app.input.value = "hi".into();
+        app.input.cursor = 2;
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.input.value, "h", "composer keeps its own backspace");
+        assert_eq!(app.pending_attaches.len(), 2, "nothing detached");
+    }
+
+    #[test]
+    fn typing_returns_the_keyboard_to_the_composer() {
+        let mut app = attached_app();
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_attach(), Some(0));
+
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.selected_attach(), None);
+        assert_eq!(app.input.value, "x", "the keystroke isn't swallowed");
+        assert_eq!(app.pending_attaches.len(), 2);
+    }
+
+    #[test]
+    fn down_still_scrolls_when_there_is_nothing_attached() {
+        let mut app = test_app();
+        app.focus_input();
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_attach(), None);
     }
 
     #[test]
