@@ -7,6 +7,7 @@ mod mode;
 mod prompt;
 mod run;
 mod session;
+pub mod session_store;
 
 pub use compact::{should_compact, COMPACT_RATIO};
 pub use context::{discover_context_files, ContextFile};
@@ -16,3 +17,4 @@ pub use mode::{
 };
 pub use run::{Agent, AgentBuilder, FollowUpSlot, GoalState, UserInput};
 pub use session::Session;
+pub use session_store::{SessionMeta, SessionSnapshot};

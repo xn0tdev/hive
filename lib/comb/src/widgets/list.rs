@@ -103,7 +103,7 @@ impl List {
         }
 
         if overflow {
-            let mut bar = self.scrollbar.clone();
+            let mut bar = self.scrollbar;
             if bar.style.track == crate::core::style::Style::new() {
                 bar.style.track = pal.track;
                 bar.style.thumb = pal.thumb;

@@ -49,7 +49,7 @@ impl Window {
             min_w: 16,
             min_h: 5,
             border: Border::Rounded,
-            fill: Style::new().bg(crate::core::style::Color::rgb(0x1c, 0x1c, 0x1c)),
+            fill: Style::new(),
             drag: None,
         }
     }
@@ -96,6 +96,8 @@ impl Window {
         }
         let fill = if self.fill.bg.is_some() {
             self.fill
+        } else if pal.window_fill.bg.is_some() {
+            pal.window_fill
         } else {
             pal.panel
         };
@@ -111,9 +113,13 @@ impl Window {
         buf.border_title(area, self.border, border.patch(fill), &title);
         // Subtle resize grip on the bottom-right corner.
         if area.width >= 3 && area.height >= 2 {
-            let grip = Style::new()
-                .fg(crate::core::style::Color::rgb(0x70, 0x70, 0x70))
-                .patch(fill);
+            let grip = if pal.window_grip.fg.is_some() || pal.window_grip.bg.is_some() {
+                pal.window_grip.patch(fill)
+            } else {
+                Style::new()
+                    .fg(crate::core::style::Color::rgb(0x70, 0x70, 0x70))
+                    .patch(fill)
+            };
             buf.set(area.right() - 1, area.bottom() - 1, '╯', grip);
         }
     }

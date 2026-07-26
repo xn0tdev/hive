@@ -93,6 +93,7 @@ fn main() -> std::io::Result<()> {
             .bold(),
         track: Style::new().fg(rgb(0x30, 0x30, 0x30)),
         thumb: Style::new().fg(rgb(0x86, 0x86, 0x86)),
+        ..Default::default()
     };
     let ctx_pal = Palette {
         normal: Style::new()

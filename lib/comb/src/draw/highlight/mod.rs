@@ -1,5 +1,6 @@
 //! Syntax-highlighting palettes and language dispatch.
 
+mod helpers;
 mod json;
 mod rust;
 mod shell;

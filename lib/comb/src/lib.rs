@@ -33,16 +33,17 @@ pub mod widgets;
 // The `effects` module is re-exported by name so `comb::effects::…` keeps working.
 pub use crate::draw::effects;
 pub use crate::draw::highlight::{self, HighlightTheme, Lang};
-pub use crate::widgets::{
-    unified_diff, CodeBlock, DiffOp, DiffTheme, DiffView, List, Menu, Palette, ResizeEdge,
-    ScrollView, Scrollbar, ScrollbarStyle, Tabs, TextInput, Toasts, Window,
-};
-
 pub use crate::core::buffer::{center_pad, chip_cols, label_cols, Buffer, Cell};
 pub use crate::core::geom::{Align, Pos, Rect, Size};
+pub use crate::core::layout::{self, Constraint, Margin};
 pub use crate::core::style::{Color, Modifier, Style};
 pub use crate::core::text::{Line, Span};
 pub use crate::draw::border::Border;
 pub use crate::draw::surface::{Compositor, Surface};
 pub use crate::term::event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
 pub use crate::term::terminal::{render, render_with_cursor, restore, Frame, MouseMode, Terminal};
+pub use crate::widgets::{
+    Block, Padding, Palette, Paragraph, Table, TableCol, TextInput, Widget, Interactive,
+    unified_diff, CodeBlock, DiffOp, DiffTheme, DiffView, List, Menu, ResizeEdge,
+    ScrollView, Scrollbar, ScrollbarStyle, Tabs, Toast, Toasts, Window,
+};

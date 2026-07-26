@@ -2,6 +2,7 @@
 
 use crate::core::text::{Line, Span};
 use crate::draw::highlight::HighlightTheme;
+use crate::draw::highlight::helpers::ensure_nonempty;
 
 const KEYWORDS: &[&str] = &[
     "if", "then", "else", "fi", "for", "do", "done", "in", "case", "esac", "function", "return",
@@ -88,8 +89,6 @@ fn highlight_line(line: &str, theme: &HighlightTheme) -> Line {
         out.push(Span::styled(chars[i].to_string(), theme.text));
         i += 1;
     }
-    if out.spans.is_empty() {
-        out.push(Span::raw(""));
-    }
+    ensure_nonempty(&mut out, theme.text);
     out
 }

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 use crate::message::Message;
 
@@ -23,7 +25,7 @@ pub struct ChatRequest {
 }
 
 /// Token accounting returned by the provider.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,

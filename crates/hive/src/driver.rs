@@ -28,6 +28,7 @@ pub async fn run(
     mut cfg: Arc<AppConfig>,
 ) {
     let mut pending = VecDeque::new();
+    let mut session_id: Option<String> = None;
     'commands: loop {
         let cmd = match pending.pop_front() {
             Some(command) => command,
@@ -65,6 +66,12 @@ pub async fn run(
                 {
                     break 'commands;
                 }
+                // Auto-save session after each turn.
+                let id = session_id.get_or_insert_with(||
+                    hive_core::agent::session_store::new_id()
+                );
+                let snap = agent.session_snapshot(id);
+                let _ = hive_core::agent::session_store::save(&snap);
             }
             InputCommand::SetModel {
                 id,
@@ -314,11 +321,53 @@ pub async fn run(
             InputCommand::Clear => {
                 terminal.shutdown();
                 agent.reset();
+                session_id = None;
             }
             InputCommand::Compact => {
                 if let Err(e) = agent.compact().await {
                     let _ = events.send(AgentEvent::Notice(e));
                 }
+            }
+            InputCommand::SaveSession => {
+                let id = hive_core::agent::session_store::new_id();
+                let snap = agent.session_snapshot(&id);
+                match hive_core::agent::session_store::save(&snap) {
+                    Ok(_) => {
+                        let _ = events.send(AgentEvent::SessionSaved {
+                            id: snap.id.clone(),
+                            title: snap.title.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = events.send(AgentEvent::Notice(format!("save failed: {e}")));
+                    }
+                }
+            }
+            InputCommand::LoadSession { id } => {
+                match hive_core::agent::session_store::load(&id) {
+                    Ok(snap) => {
+                        let title = snap.title.clone();
+                        let model = snap.model.clone();
+                        let messages = snap.messages.clone();
+                        let usage = snap.usage;
+                        terminal.shutdown();
+                        agent.restore_session(snap);
+                        session_id = Some(id.clone());
+                        let _ = events.send(AgentEvent::SessionLoaded {
+                            title,
+                            model,
+                            messages,
+                            usage,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = events.send(AgentEvent::Notice(format!("load failed: {e}")));
+                    }
+                }
+            }
+            InputCommand::ListSessions => {
+                let metas = hive_core::agent::session_store::list();
+                let _ = events.send(AgentEvent::SessionsListed(metas));
             }
             InputCommand::SaveUi(ui) => {
                 if let Err(e) = crate::config::patch_ui(&ui) {

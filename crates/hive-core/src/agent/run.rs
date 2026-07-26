@@ -14,6 +14,8 @@ use crate::spawner::SubagentSpawner;
 use crate::terminal::{is_terminal_tool, TerminalHandle};
 use crate::tool::{Tool, ToolContext, ToolResult};
 
+use super::session_store::{self, SessionSnapshot};
+
 use super::compact::{
     compacted_messages, estimate_tokens, format_transcript, should_compact, summarize_request,
     MIN_MESSAGES_TO_COMPACT,
@@ -395,6 +397,18 @@ impl Agent {
 
     pub fn usage(&self) -> Usage {
         self.session.usage
+    }
+
+    pub fn session_snapshot(&self, id: &str) -> SessionSnapshot {
+        session_store::snapshot(id, &self.model, self.session.messages.clone(), self.session.usage)
+    }
+
+    pub fn restore_session(&mut self, snap: SessionSnapshot) {
+        self.session.replace_messages(snap.messages);
+        self.session.usage = snap.usage;
+        self.model = snap.model;
+        self.last_prompt_tokens = 0;
+        self.loop_detector = LoopDetector::default();
     }
 
     pub fn reset(&mut self) {

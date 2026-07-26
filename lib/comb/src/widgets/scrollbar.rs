@@ -82,7 +82,7 @@ impl ScrollMetrics {
 }
 
 /// Stateful scrollbar: style + optional drag anchor (row offset inside the thumb).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Scrollbar {
     pub style: ScrollbarStyle,
     drag: Option<isize>,

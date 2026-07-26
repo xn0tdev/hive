@@ -12,6 +12,7 @@ pub enum CmdId {
     About,
     Settings,
     Goal,
+    Resume,
     Quit,
 }
 
@@ -149,6 +150,18 @@ pub const COMMANDS: &[CommandDef] = &[
         desc: "Autonomous agent loop",
         hint: "[objective]",
         takes_arg: true,
+        category: Category::Session,
+        shortcut: None,
+        suggested: true,
+    },
+    CommandDef {
+        id: CmdId::Resume,
+        name: "resume",
+        aliases: &["sessions", "history", "load"],
+        label: "Resume session",
+        desc: "Browse and resume saved chats",
+        hint: "",
+        takes_arg: false,
         category: Category::Session,
         shortcut: None,
         suggested: true,

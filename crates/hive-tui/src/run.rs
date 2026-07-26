@@ -225,7 +225,7 @@ fn paste_into_palette(app: &mut App, text: &str) -> bool {
             let choices = app.model_choices.clone();
             let connections = app.connections.clone();
             if let Some(pal) = app.palette.as_mut() {
-                pal.insert_str(&cleaned, &choices, &connections);
+                pal.insert_str(&cleaned, &choices, &connections, &app.saved_sessions);
             }
             true
         }
@@ -237,7 +237,7 @@ fn paste_into_palette(app: &mut App, text: &str) -> bool {
             let choices = app.model_choices.clone();
             let connections = app.connections.clone();
             if let Some(pal) = app.palette.as_mut() {
-                pal.insert_str(&cleaned, &choices, &connections);
+                pal.insert_str(&cleaned, &choices, &connections, &app.saved_sessions);
             }
             true
         }
@@ -248,7 +248,7 @@ fn paste_into_palette(app: &mut App, text: &str) -> bool {
             let choices = app.model_choices.clone();
             let connections = app.connections.clone();
             if let Some(pal) = app.palette.as_mut() {
-                pal.insert_str(text, &choices, &connections);
+                pal.insert_str(text, &choices, &connections, &app.saved_sessions);
             }
             true
         }
@@ -1374,6 +1374,17 @@ fn run_command(
         }
         CmdId::About => app.open_about(),
         CmdId::Settings => app.open_settings(),
+        CmdId::Resume => {
+            if arg.is_empty() {
+                let _ = input_tx.send(InputCommand::ListSessions);
+                app.open_sessions_picker();
+            } else {
+                let _ = input_tx.send(InputCommand::LoadSession {
+                    id: arg.trim().to_string(),
+                });
+                app.flash("Loading session…");
+            }
+        }
     }
     false
 }
@@ -1560,7 +1571,7 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
                     PaletteMode::ConnectKey { .. } => {
                         app.palette = Some(crate::app::palette::PaletteState::connect_presets());
                     }
-                    PaletteMode::Commands => app.close_palette(),
+                    PaletteMode::Commands | PaletteMode::Sessions => app.close_palette(),
                 }
             } else {
                 app.close_palette();
@@ -1575,9 +1586,9 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
             let visible = app.palette_list_visible as usize;
             if let Some(pal) = app.palette.as_mut() {
                 if visible > 0 {
-                    pal.move_up_visible(&choices, &connections, visible);
+                    pal.move_up_visible(&choices, &connections, &app.saved_sessions, visible);
                 } else {
-                    pal.move_up(&choices, &connections);
+                    pal.move_up(&choices, &connections, &app.saved_sessions);
                 }
             }
         }
@@ -1585,16 +1596,16 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
             let visible = app.palette_list_visible as usize;
             if let Some(pal) = app.palette.as_mut() {
                 if visible > 0 {
-                    pal.move_down_visible(&choices, &connections, visible);
+                    pal.move_down_visible(&choices, &connections, &app.saved_sessions, visible);
                 } else {
-                    pal.move_down(&choices, &connections);
+                    pal.move_down(&choices, &connections, &app.saved_sessions);
                 }
             }
         }
         KeyCode::Enter => return activate_palette(app, input_tx),
         KeyCode::Backspace => {
             if let Some(pal) = app.palette.as_mut() {
-                pal.backspace(&choices, &connections);
+                pal.backspace(&choices, &connections, &app.saved_sessions);
             }
         }
         KeyCode::Left => {
@@ -1609,7 +1620,7 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
         }
         KeyCode::Char(ch) if !ctrl => {
             if let Some(pal) = app.palette.as_mut() {
-                pal.insert(ch, &choices, &connections);
+                pal.insert(ch, &choices, &connections, &app.saved_sessions);
             }
         }
         _ => {}
@@ -1757,6 +1768,19 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 Some(id) => run_command(app, id, "", input_tx),
                 None => false,
             }
+        }
+        Some(PaletteMode::Sessions) => {
+            let picked = app
+                .palette
+                .as_ref()
+                .and_then(|p| p.selected_session(&app.saved_sessions))
+                .map(|s| s.id.clone());
+            app.close_palette();
+            if let Some(id) = picked {
+                let _ = input_tx.send(InputCommand::LoadSession { id });
+                app.flash("Loading session…");
+            }
+            false
         }
         None => false,
     }
@@ -1911,7 +1935,7 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::Model) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone(), &app.connections.clone());
+                pal.move_down(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
             }
         }
         assert_eq!(
@@ -1926,7 +1950,7 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(InputCommand::FetchModels)));
         app.models_catalog = crate::app::ModelsCatalogState::Ready;
         if let Some(pal) = app.palette.as_mut() {
-            pal.clamp_selection(&app.model_choices.clone(), &app.connections.clone());
+            pal.clamp_selection(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
         }
         assert!(!activate_palette(&mut app, &tx));
         match rx.try_recv() {
@@ -2080,7 +2104,7 @@ mod tests {
                 if pal.selected_cmd_id() == Some(CmdId::About) {
                     break;
                 }
-                pal.move_down(&app.model_choices.clone(), &app.connections.clone());
+                pal.move_down(&app.model_choices.clone(), &app.connections.clone(), &app.saved_sessions);
             }
         }
         assert_eq!(

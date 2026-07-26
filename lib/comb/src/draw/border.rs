@@ -5,8 +5,9 @@ use crate::core::geom::Rect;
 use crate::core::style::Style;
 use crate::core::text::{Line, Span};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Border {
+    #[default]
     Plain,
     Rounded,
     Double,

@@ -262,6 +262,8 @@ pub struct App {
     pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
     /// Active goal state for the autonomous loop (footer + transcript card).
     pub(crate) goal: Option<goal::GoalStatus>,
+    /// Saved sessions for the `/resume` picker.
+    pub(crate) saved_sessions: Vec<hive_core::SessionMeta>,
     /// Persisted UI prefs (`[ui]` in config.toml).
     pub(crate) ui: UiConfig,
     /// Selected row in the slash / `@file` menu.
@@ -404,6 +406,7 @@ impl App {
             settings: None,
             goal_overlay: None,
             goal: None,
+            saved_sessions: Vec::new(),
             ui: init.ui.clone(),
             menu_index: 0,
             file_index: None,
@@ -515,6 +518,25 @@ impl App {
 
     pub fn goal_overlay_open(&self) -> bool {
         self.goal_overlay.is_some()
+    }
+
+    // ── Sessions picker ─────────────────────────────────────────────────
+
+    pub fn open_sessions_picker(&mut self) {
+        self.about_open = false;
+        self.close_settings();
+        self.saved_sessions.clear();
+        self.palette = Some(palette::PaletteState::sessions());
+    }
+
+    pub fn set_sessions_list(&mut self, metas: Vec<hive_core::SessionMeta>) {
+        self.saved_sessions = metas;
+        if let Some(pal) = self.palette.as_mut() {
+            if pal.mode == palette::PaletteMode::Sessions {
+                pal.selected = 0;
+                pal.list_offset = 0;
+            }
+        }
     }
 
     pub fn goal_active(&self) -> bool {
@@ -1910,7 +1932,7 @@ Keep everything else unless a note says otherwise.\n",
         self.about_open = false;
         self.close_settings();
         let mut pal = PaletteState::connect();
-        pal.clamp_selection(&self.model_choices, &self.connections);
+        pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
         // Prefer selecting the active profile.
         if let Some(i) = pal.connect_rows(&self.connections).iter().position(
             |r| matches!(r, palette::ConnectRow::Profile(c) if c.id == self.active_connection),
@@ -2345,7 +2367,7 @@ Keep everything else unless a note says otherwise.\n",
                 }
                 if let Some(pal) = self.palette.as_mut() {
                     if pal.mode == palette::PaletteMode::Models {
-                        pal.clamp_selection(&self.model_choices, &self.connections);
+                        pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
                     }
                 }
                 true
@@ -2364,7 +2386,7 @@ Keep everything else unless a note says otherwise.\n",
                             | palette::PaletteMode::ConnectPresets
                             | palette::PaletteMode::ConnectKey { .. }
                     ) {
-                        pal.clamp_selection(&self.model_choices, &self.connections);
+                        pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
                     }
                 }
                 true
@@ -2443,6 +2465,71 @@ Keep everything else unless a note says otherwise.\n",
                 // Status feedback (model/provider switch, interrupt, …) lives in
                 // the bottom toast — same place as Ctrl+C — not the transcript.
                 self.flash(s);
+                true
+            }
+            AgentEvent::SessionsListed(metas) => {
+                self.set_sessions_list(metas);
+                true
+            }
+            AgentEvent::SessionLoaded { title, model, messages, usage } => {
+                self.new_chat();
+                self.blocks.clear();
+                let mut msg_count = 0usize;
+                for m in &messages {
+                    match m.role {
+                        hive_core::Role::System => {}
+                        hive_core::Role::User => {
+                            let text = m.text();
+                            if !text.is_empty() {
+                                self.blocks.push(Block::User(text));
+                                msg_count += 1;
+                            }
+                        }
+                        hive_core::Role::Assistant => {
+                            let text = m.text();
+                            if !text.is_empty() {
+                                self.blocks.push(Block::Assistant {
+                                    text,
+                                    streaming: false,
+                                });
+                                msg_count += 1;
+                            }
+                            for tc in &m.tool_calls {
+                                self.blocks.push(Block::Tool(ToolCard {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    args: tc.arguments.clone(),
+                                    output: String::new(),
+                                    status: ToolStatus::Ok,
+                                    started: std::time::Instant::now(),
+                                    elapsed_ms: Some(0),
+                                    snapshot: None,
+                                }));
+                            }
+                        }
+                        hive_core::Role::Tool => {
+                            let text = m.text();
+                            if let Some(Block::Tool(card)) = self.blocks.last_mut() {
+                                if card.id == m.tool_call_id.clone().unwrap_or_default() {
+                                    card.output = text;
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.blocks.is_empty() {
+                    self.blocks.push(Block::Welcome);
+                }
+                self.model = model.clone();
+                self.model_display = model.rsplit('/').next().unwrap_or(&model).to_string();
+                self.usage = usage;
+                self.context_tokens = usage.total_tokens;
+                self.scroll_from_bottom = 0;
+                self.flash(format!("Resumed: {title} ({msg_count} msgs)"));
+                true
+            }
+            AgentEvent::SessionSaved { id: _, title } => {
+                self.flash(format!("Saved: {title}"));
                 true
             }
             AgentEvent::Error(s) => {

@@ -1,6 +1,7 @@
 //! Command palette, model picker, and `/connect` provider menu.
 
 use hive_core::event::ConnectionInfo;
+use hive_core::SessionMeta;
 
 use crate::commands::{self, CmdId, PaletteRow};
 use crate::intro::PRESETS;
@@ -18,6 +19,8 @@ pub enum PaletteMode {
     ConnectKey {
         preset_idx: usize,
     },
+    /// Saved sessions picker.
+    Sessions,
 }
 
 /// One row in the model picker (provider header or selectable model).
@@ -112,13 +115,25 @@ impl PaletteState {
         }
     }
 
+    pub fn sessions() -> Self {
+        PaletteState {
+            mode: PaletteMode::Sessions,
+            query: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_offset: 0,
+            search_focused: false,
+        }
+    }
+
     pub fn ensure_selection_visible(
         &mut self,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
         visible: usize,
     ) {
-        let (len, vis) = self.scroll_metrics(choices, connections, visible);
+        let (len, vis) = self.scroll_metrics(choices, connections, sessions, visible);
         if len == 0 || vis == 0 {
             self.list_offset = 0;
             return;
@@ -138,6 +153,7 @@ impl PaletteState {
         &self,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
         visible: usize,
     ) -> (usize, usize) {
         let len = match self.mode {
@@ -146,6 +162,7 @@ impl PaletteState {
             PaletteMode::Connect => self.connect_rows(connections).len(),
             PaletteMode::ConnectPresets => self.preset_indices().len(),
             PaletteMode::ConnectKey { .. } => 0,
+            PaletteMode::Sessions => self.session_rows(sessions).len(),
         };
         (len, visible)
     }
@@ -226,7 +243,29 @@ impl PaletteState {
             .collect()
     }
 
-    pub fn clamp_selection(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    /// Filtered session rows for the sessions picker.
+    pub fn session_rows<'a>(&self, sessions: &'a [SessionMeta]) -> Vec<&'a SessionMeta> {
+        let q = self.query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            sessions.iter().collect()
+        } else {
+            sessions
+                .iter()
+                .filter(|s| {
+                    s.title.to_ascii_lowercase().contains(&q)
+                        || s.model.to_ascii_lowercase().contains(&q)
+                        || s.id.to_ascii_lowercase().contains(&q)
+                })
+                .collect()
+        }
+    }
+
+    pub fn clamp_selection(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
@@ -267,10 +306,23 @@ impl PaletteState {
             PaletteMode::ConnectKey { .. } => {
                 self.selected = 0;
             }
+            PaletteMode::Sessions => {
+                let n = self.session_rows(sessions).len();
+                if n == 0 {
+                    self.selected = 0;
+                } else if self.selected >= n {
+                    self.selected = n - 1;
+                }
+            }
         }
     }
 
-    pub fn move_up(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    pub fn move_up(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
@@ -293,10 +345,21 @@ impl PaletteState {
                 }
             }
             PaletteMode::ConnectKey { .. } => {}
+            PaletteMode::Sessions => {
+                let n = self.session_rows(sessions).len();
+                if n > 0 {
+                    self.selected = (self.selected + n - 1) % n;
+                }
+            }
         }
     }
 
-    pub fn move_down(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    pub fn move_down(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         match self.mode {
             PaletteMode::Commands => {
                 let rows = self.command_rows();
@@ -319,6 +382,12 @@ impl PaletteState {
                 }
             }
             PaletteMode::ConnectKey { .. } => {}
+            PaletteMode::Sessions => {
+                let n = self.session_rows(sessions).len();
+                if n > 0 {
+                    self.selected = (self.selected + 1) % n;
+                }
+            }
         }
     }
 
@@ -326,28 +395,30 @@ impl PaletteState {
         &mut self,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
         visible: usize,
     ) {
-        self.move_up(choices, connections);
-        self.ensure_selection_visible(choices, connections, visible);
+        self.move_up(choices, connections, sessions);
+        self.ensure_selection_visible(choices, connections, sessions, visible);
     }
 
     pub fn move_down_visible(
         &mut self,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
         visible: usize,
     ) {
-        self.move_down(choices, connections);
-        self.ensure_selection_visible(choices, connections, visible);
+        self.move_down(choices, connections, sessions);
+        self.ensure_selection_visible(choices, connections, sessions, visible);
     }
 
-    pub fn insert(&mut self, ch: char, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    pub fn insert(&mut self, ch: char, choices: &[ModelChoice], connections: &[ConnectionInfo], sessions: &[SessionMeta]) {
         self.focus_search();
         let idx = self.byte_at(self.cursor);
         self.query.insert(idx, ch);
         self.cursor += 1;
-        self.after_query_change(choices, connections);
+        self.after_query_change(choices, connections, sessions);
     }
 
     /// Insert a multi-char paste at the cursor (API key / search filter).
@@ -356,6 +427,7 @@ impl PaletteState {
         text: &str,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
     ) {
         if text.is_empty() {
             return;
@@ -365,10 +437,15 @@ impl PaletteState {
         let n = text.chars().count();
         self.query.insert_str(idx, text);
         self.cursor += n;
-        self.after_query_change(choices, connections);
+        self.after_query_change(choices, connections, sessions);
     }
 
-    pub fn backspace(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    pub fn backspace(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         if !self.search_focused {
             return;
         }
@@ -379,7 +456,7 @@ impl PaletteState {
         let end = self.byte_at(self.cursor);
         self.query.replace_range(start..end, "");
         self.cursor -= 1;
-        self.after_query_change(choices, connections);
+        self.after_query_change(choices, connections, sessions);
     }
 
     pub fn left(&mut self) {
@@ -398,7 +475,12 @@ impl PaletteState {
         }
     }
 
-    fn after_query_change(&mut self, choices: &[ModelChoice], connections: &[ConnectionInfo]) {
+    fn after_query_change(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+    ) {
         self.list_offset = 0;
         match self.mode {
             PaletteMode::Commands => {
@@ -411,7 +493,11 @@ impl PaletteState {
             }
             PaletteMode::Connect | PaletteMode::ConnectPresets => {
                 self.selected = 0;
-                self.clamp_selection(choices, connections);
+                self.clamp_selection(choices, connections, sessions);
+            }
+            PaletteMode::Sessions => {
+                self.selected = 0;
+                self.clamp_selection(choices, connections, sessions);
             }
             PaletteMode::ConnectKey { .. } => {}
         }
@@ -421,9 +507,10 @@ impl PaletteState {
         &self,
         choices: &[ModelChoice],
         connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
         visible: usize,
     ) -> usize {
-        let (len, vis) = self.scroll_metrics(choices, connections, visible);
+        let (len, vis) = self.scroll_metrics(choices, connections, sessions, visible);
         if len == 0 || vis == 0 {
             return 0;
         }
@@ -472,6 +559,16 @@ impl PaletteState {
             return None;
         }
         self.preset_indices().get(self.selected).copied()
+    }
+
+    pub fn selected_session<'a>(
+        &self,
+        sessions: &'a [SessionMeta],
+    ) -> Option<&'a SessionMeta> {
+        if self.mode != PaletteMode::Sessions {
+            return None;
+        }
+        self.session_rows(sessions).get(self.selected).copied()
     }
 
     pub fn selected_cmd_id(&self) -> Option<CmdId> {

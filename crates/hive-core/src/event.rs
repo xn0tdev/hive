@@ -190,6 +190,20 @@ pub enum AgentEvent {
     GoalResumed,
     /// Informational notice (e.g. "Exa disabled: no key").
     Notice(String),
+    /// Saved sessions list (response to ListSessions).
+    SessionsListed(Vec<crate::agent::SessionMeta>),
+    /// A session was loaded — the TUI rebuilds its transcript from messages.
+    SessionLoaded {
+        title: String,
+        model: String,
+        messages: Vec<crate::message::Message>,
+        usage: crate::provider::Usage,
+    },
+    /// Current session was saved to disk.
+    SessionSaved {
+        id: String,
+        title: String,
+    },
     Error(String),
     TurnFinished,
 }

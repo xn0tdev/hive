@@ -163,6 +163,7 @@ mod tests {
                 .bg(Color::rgb(0xd8, 0xd8, 0xd8)),
             track: Style::new(),
             thumb: Style::new(),
+            ..Default::default()
         }
     }
 

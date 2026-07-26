@@ -43,7 +43,7 @@ impl ScrollView {
         self.offset = self.offset.min(self.lines.len().saturating_sub(h));
         buf.set_lines_on(content, &self.lines, self.offset, pal.panel);
         if overflow {
-            let mut bar = self.scrollbar.clone();
+            let mut bar = self.scrollbar;
             if bar.style.track == crate::core::style::Style::new() {
                 bar.style.track = pal.track;
                 bar.style.thumb = pal.thumb;

@@ -2,6 +2,7 @@
 
 use crate::core::text::{Line, Span};
 use crate::draw::highlight::HighlightTheme;
+use crate::draw::highlight::helpers::{ensure_nonempty, is_ident_start, push_slice, read_char, read_ident, read_number, read_string};
 
 const KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "crate", "else", "enum", "extern",
@@ -67,22 +68,19 @@ fn highlight_line(line: &str, theme: &HighlightTheme, in_block: &mut bool) -> Li
         }
 
         if is_ident_start(chars[i]) {
-            let start = i;
-            i += 1;
-            while i < chars.len() && is_ident_continue(chars[i]) {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
+            let end = read_ident(&chars, i);
+            let word: String = chars[i..end].iter().collect();
             let st = if KEYWORDS.contains(&word.as_str()) {
                 theme.keyword
             } else if TYPES.contains(&word.as_str()) {
                 theme.type_name
-            } else if i < chars.len() && chars[i] == '(' {
+            } else if end < chars.len() && chars[end] == '(' {
                 theme.function
             } else {
                 theme.text
             };
             out.push(Span::styled(word, st));
+            i = end;
             continue;
         }
 
@@ -91,14 +89,9 @@ fn highlight_line(line: &str, theme: &HighlightTheme, in_block: &mut bool) -> Li
                 && i + 1 < chars.len()
                 && (chars[i + 1] == 'x' || chars[i + 1] == 'b'))
         {
-            let start = i;
-            i += 1;
-            while i < chars.len()
-                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
-            {
-                i += 1;
-            }
-            push_slice(&mut out, &chars[start..i], theme.number);
+            let end = read_number(&chars, i);
+            push_slice(&mut out, &chars[i..end], theme.number);
+            i = end;
             continue;
         }
 
@@ -112,57 +105,6 @@ fn highlight_line(line: &str, theme: &HighlightTheme, in_block: &mut bool) -> Li
         i += 1;
     }
 
-    if out.spans.is_empty() {
-        out.push(Span::raw(""));
-    }
+    ensure_nonempty(&mut out, theme.text);
     out
-}
-
-fn read_string(chars: &[char], start: usize, quote: char) -> (usize, String) {
-    let mut i = start + 1;
-    let mut s = String::from(quote);
-    while i < chars.len() {
-        s.push(chars[i]);
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            i += 1;
-            s.push(chars[i]);
-        } else if chars[i] == quote {
-            i += 1;
-            break;
-        }
-        i += 1;
-    }
-    (i, s)
-}
-
-fn read_char(chars: &[char], start: usize) -> (usize, String) {
-    let mut i = start + 1;
-    let mut s = String::from('\'');
-    while i < chars.len() {
-        s.push(chars[i]);
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            i += 1;
-            s.push(chars[i]);
-        } else if chars[i] == '\'' {
-            i += 1;
-            break;
-        }
-        i += 1;
-    }
-    (i, s)
-}
-
-fn push_slice(out: &mut Line, chars: &[char], style: crate::core::style::Style) {
-    if chars.is_empty() {
-        return;
-    }
-    out.push(Span::styled(chars.iter().collect::<String>(), style));
-}
-
-fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-fn is_ident_continue(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
 }

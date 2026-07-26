@@ -82,6 +82,13 @@ fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
         PaletteMode::Connect => pal.connect_rows(&app.connections).len().max(1) as u16,
         PaletteMode::ConnectPresets => pal.preset_indices().len().max(1) as u16,
         PaletteMode::ConnectKey { .. } => 1,
+        PaletteMode::Sessions => {
+            if app.saved_sessions.is_empty() {
+                1
+            } else {
+                pal.session_rows(&app.saved_sessions).len().max(1) as u16
+            }
+        }
     }
 }
 
@@ -108,6 +115,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Connect => "Providers",
         PaletteMode::ConnectPresets => "Add provider",
         PaletteMode::ConnectKey { .. } => "API key",
+        PaletteMode::Sessions => "Resume session",
     };
     draw_title(buf, g.content, title, theme.fg, theme.faint, panel);
     draw_search(
@@ -128,6 +136,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
         PaletteMode::Models => draw_model_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::Connect => draw_connect_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::ConnectPresets => draw_preset_list(buf, g.list, pal, theme, panel),
+        PaletteMode::Sessions => draw_sessions_list(buf, g.list, pal, app, theme, panel),
         PaletteMode::ConnectKey { preset_idx } => {
             draw_connect_key_hint(buf, g.list, preset_idx, theme, panel);
         }
@@ -265,7 +274,7 @@ fn draw_command_list(
     // Scroll via list_offset, keeping the selection in view.
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&[], &[], visible);
+    let offset = pal.visible_offset(&[], &[], &[], visible);
 
     for row in 0..visible {
         let idx = offset + row;
@@ -382,7 +391,7 @@ fn draw_model_list(
 
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&app.model_choices, &app.connections, visible);
+    let offset = pal.visible_offset(&app.model_choices, &app.connections, &app.saved_sessions, visible);
 
     for row in 0..visible {
         let idx = offset + row;
@@ -450,7 +459,7 @@ fn draw_connect_list(
     }
     let sel = pal.selected.min(rows.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&[], &app.connections, visible);
+    let offset = pal.visible_offset(&[], &app.connections, &[], visible);
     for row in 0..visible {
         let idx = offset + row;
         let y = area.y + row as u16;
@@ -485,6 +494,83 @@ fn draw_connect_list(
     }
 }
 
+fn draw_sessions_list(
+    buf: &mut Buffer,
+    area: Rect,
+    pal: &PaletteState,
+    app: &App,
+    theme: &crate::theme::Theme,
+    panel: Color,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let panel_style = Style::default().bg(panel);
+
+    if app.saved_sessions.is_empty() {
+        let line = Line::from(Span::styled(
+            "No saved sessions yet.",
+            Style::default().fg(theme.faint).bg(panel),
+        ));
+        crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
+        return;
+    }
+
+    let rows = pal.session_rows(&app.saved_sessions);
+    if rows.is_empty() {
+        let line = Line::from(Span::styled(
+            "No matching sessions",
+            Style::default().fg(theme.faint).bg(panel),
+        ));
+        crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &line, area.width, panel);
+        return;
+    }
+
+    let sel = pal.selected.min(rows.len() - 1);
+    let visible = area.height as usize;
+    let offset = pal.visible_offset(&[], &[], &app.saved_sessions, visible);
+
+    for row in 0..visible {
+        let idx = offset + row;
+        let y = area.y + row as u16;
+        let Some(item) = rows.get(idx) else {
+            buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
+            continue;
+        };
+        let is_sel = idx == sel;
+        let bg = if is_sel { theme.sel_bg } else { panel };
+        let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
+        let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
+
+        let title = truncate_str(&item.title, area.width as usize / 2);
+        let detail = format!("{} msgs · {}", item.message_count, short_model(&item.model));
+
+        let line = Line::from(vec![
+            Span::styled(format!(" {title}"), Style::default().fg(name_fg).bg(bg)),
+            Span::styled(
+                " ".repeat(area.width as usize - title.chars().count() - 1 - detail.len()),
+                Style::default().bg(bg),
+            ),
+            Span::styled(detail, Style::default().fg(detail_fg).bg(bg)),
+        ]);
+        crate::render::strip_paint::set_line_on_strip(buf, area.x, y, &line, area.width, bg);
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        let t: String = chars.iter().take(max.saturating_sub(1)).collect();
+        format!("{t}\u{2026}")
+    }
+}
+
+fn short_model(id: &str) -> String {
+    id.rsplit('/').next().unwrap_or(id).to_string()
+}
+
 fn draw_preset_list(
     buf: &mut Buffer,
     area: Rect,
@@ -509,7 +595,7 @@ fn draw_preset_list(
     }
     let sel = pal.selected.min(indices.len() - 1);
     let visible = area.height as usize;
-    let offset = pal.visible_offset(&[], &[], visible);
+    let offset = pal.visible_offset(&[], &[], &[], visible);
     for row in 0..visible {
         let idx = offset + row;
         let y = area.y + row as u16;
@@ -679,7 +765,7 @@ mod tests {
         let mut a = app();
         let choices = a.model_choices.clone();
         assert!(!a.palette.as_ref().unwrap().search_focused);
-        a.palette.as_mut().unwrap().insert('f', &choices, &[]);
+        a.palette.as_mut().unwrap().insert('f', &choices, &[], &[]);
         assert!(a.palette.as_ref().unwrap().search_focused);
         assert_eq!(a.palette.as_ref().unwrap().query, "f");
     }

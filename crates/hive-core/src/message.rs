@@ -11,7 +11,7 @@ pub enum Role {
 }
 
 /// Where an image comes from. Either a remote URL or inline base64 bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageSource {
     Url(String),
     Base64 { media_type: String, data: String },
@@ -30,14 +30,14 @@ impl ImageSource {
 }
 
 /// A single piece of message content. A message can mix text and images.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentPart {
     Text(String),
     Image(ImageSource),
 }
 
 /// A tool call requested by the assistant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -47,7 +47,7 @@ pub struct ToolCall {
 
 /// A chat message in hive's internal representation. `hive-llm` converts this
 /// to/from the provider wire format so the rest of the app never sees JSON.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentPart>,
