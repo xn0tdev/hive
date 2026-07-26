@@ -645,12 +645,17 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
     Line::from(spans)
 }
 
-/// User message: a full-width gray strip like the input bar — one tinted
-/// padding row above and below, text rows in the middle, lightly inset.
-/// `@path` chips keep the accent `@` so attachments read like the composer.
-/// The prompt strip, plus how many columns of it are actually the message.
-/// The band spans the chat column, but only the text should answer to a click.
+/// User message: a gray strip like the input bar — one tinted padding row
+/// above and below, text rows in the middle, lightly inset. `@path` chips keep
+/// the accent `@` so attachments read like the composer.
+///
+/// The band hugs its text instead of spanning the chat column: an empty tail
+/// of background that still answers to the mouse is a card that lies about
+/// where it ends. Returns the band width so hit-testing matches what's drawn.
 fn user_block(text: &str, app: &App, width: usize, hovered: bool) -> (Vec<Line>, u16) {
+    /// Inset on each side of the text, inside the band.
+    const INSET: usize = 2;
+
     let theme = &app.theme;
     let bg = if hovered {
         theme.strip_hover
@@ -658,32 +663,38 @@ fn user_block(text: &str, app: &App, width: usize, hovered: bool) -> (Vec<Line>,
         theme.user_strip
     };
     let body = Style::default().fg(theme.fg).bg(bg);
-    let pad_row = || Line::from(Span::styled(" ".repeat(width), body));
 
     let raw: Vec<Line> = text
         .split('\n')
         .map(|l| Line::from(style_user_line(l, theme, bg)))
         .collect();
-    let wrapped = wrap::wrap_lines(raw, width.saturating_sub(4));
+    let wrapped = wrap::wrap_lines(raw, width.saturating_sub(INSET * 2));
+
+    // One pass to size the band, so every row of it ends on the same column.
+    let text_w = wrapped
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.width()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let band = (text_w + INSET * 2).min(width).max(1);
+    let pad_row = || Line::from(Span::styled(" ".repeat(band), body));
 
     let mut out = vec![pad_row()];
-    let mut content_w = 0usize;
     out.extend(wrapped.into_iter().map(|line| {
-        let mut used = 2usize;
-        let mut spans = vec![Span::styled("  ", body)];
+        let mut used = INSET;
+        let mut spans = vec![Span::styled(" ".repeat(INSET), body)];
         // Re-tint the content spans onto the strip background.
         for s in line.spans {
             used += s.width();
             spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
-        content_w = content_w.max(used);
-        if width > used {
-            spans.push(Span::styled(" ".repeat(width - used), body));
+        if band > used {
+            spans.push(Span::styled(" ".repeat(band - used), body));
         }
         Line::from(spans)
     }));
     out.push(pad_row());
-    (out, content_w.min(width) as u16)
+    (out, band as u16)
 }
 
 fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
@@ -919,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_message_itself_answers_to_a_click() {
+    fn the_prompt_band_and_its_click_target_are_the_same_thing() {
         use comb::{render, Size};
 
         let mut a = app();
@@ -929,25 +940,47 @@ mod tests {
         let buf = render(Size::new(80, 14), |f| crate::render::draw(f, &mut a));
         let hit = *a.click_hits.first().expect("the prompt is clickable");
 
-        // On the text: opens the prompt menu.
-        assert_eq!(a.expandable_at(hit.start, hit.row), Some(0));
-        assert_eq!(a.expandable_at(hit.end - 1, hit.row), Some(0));
-
-        // The strip keeps spanning the chat column…
+        // The band stops at the message instead of running the chat column.
         let band = a.theme.user_strip;
         let painted: Vec<u16> = (0..80)
             .filter(|x| buf.get(*x, hit.row).and_then(|c| c.style.bg) == Some(band))
             .collect();
-        let right_edge = *painted.last().expect("painted band");
-        assert!(
-            right_edge > hit.end,
-            "band {right_edge} should reach past the text {}",
-            hit.end
+        assert_eq!(painted.first().copied(), Some(hit.start));
+        assert_eq!(
+            painted.last().copied(),
+            Some(hit.end - 1),
+            "painted background must end where the click target does"
         );
+        assert!(hit.end < 40, "a short prompt gets a short band");
 
-        // …but its empty right side is not a click target any more.
-        assert_eq!(a.expandable_at(right_edge, hit.row), None);
+        // Everything drawn answers; nothing beyond it does.
+        assert_eq!(a.expandable_at(hit.start, hit.row), Some(0));
+        assert_eq!(a.expandable_at(hit.end - 1, hit.row), Some(0));
         assert_eq!(a.expandable_at(hit.end, hit.row), None);
+    }
+
+    #[test]
+    fn a_long_prompt_wraps_inside_one_band() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.push_user("word ".repeat(40).trim().into());
+
+        let buf = render(Size::new(60, 20), |f| crate::render::draw(f, &mut a));
+        let band = a.theme.user_strip;
+
+        // Every row of the band ends on the same column.
+        let widths: Vec<Option<u16>> = a
+            .click_hits
+            .iter()
+            .map(|h| (0..60).rfind(|x| buf.get(*x, h.row).and_then(|c| c.style.bg) == Some(band)))
+            .collect();
+        assert!(widths.len() > 3, "a wrapped prompt has several rows");
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "ragged band: {widths:?}"
+        );
     }
 
     #[test]
