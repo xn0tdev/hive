@@ -293,17 +293,23 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 };
                 heads.push((out.len(), i));
                 out.push(thought_header(&th_snap, app, show_hint));
-                // Live and collapsed: echo the newest sentence, so the header
-                // says what it is chewing on and not merely that it is busy.
-                // One row, rewritten in place — it never stacks up.
+                // Live and collapsed: a short window on the train of thought,
+                // newest brightest, older ones fading out behind it. A fixed
+                // number of one-row sentences — the window slides, it never
+                // grows, and the transcript below it doesn't shift.
                 if body.is_none() && thought_is_live(&th_snap, app) {
-                    if let Some(tail) = newest_sentence(&th_snap.text, width.saturating_sub(4)) {
+                    let window =
+                        recent_sentences(&th_snap.text, THOUGHT_WINDOW, width.saturating_sub(4));
+                    let n = window.len();
+                    for (k, sentence) in window.into_iter().enumerate() {
                         heads.push((out.len(), i));
                         out.push(Line::from(vec![
                             spine(&app.theme),
                             Span::styled(
-                                tail,
-                                Style::default().fg(app.theme.dim).add(Modifier::ITALIC),
+                                sentence,
+                                Style::default()
+                                    .fg(fade(&app.theme, k, n))
+                                    .add(Modifier::ITALIC),
                             ),
                         ]));
                     }
@@ -618,39 +624,91 @@ fn think_secs(secs: f64, live: bool) -> String {
     }
 }
 
-/// The newest sentence of a live thought, squashed onto one row.
-///
-/// Sentences replace one another as the model writes, so the row changes in
-/// place rather than crawling a character at a time. An over-long sentence
-/// keeps its newest words and marks the cut.
-fn newest_sentence(text: &str, width: usize) -> Option<String> {
-    if width == 0 {
-        return None;
+/// How many sentences of a live thought stay on screen at once.
+const THOUGHT_WINDOW: usize = 3;
+
+/// Fade across the thought window: the oldest sentence sits at `faint`, the
+/// newest at `dim`, so the train of thought reads newest-first and none of it
+/// competes with the answer below.
+fn fade(theme: &crate::theme::Theme, i: usize, n: usize) -> Color {
+    let (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) = (theme.faint, theme.dim) else {
+        return theme.dim;
+    };
+    if n <= 1 {
+        return theme.dim;
     }
-    let line = text.lines().rev().find(|l| !l.trim().is_empty())?.trim();
-    let mut sentence = line;
-    for (i, c) in line.char_indices() {
-        if matches!(c, '.' | '!' | '?') {
-            let rest = line[i + c.len_utf8()..].trim_start();
-            if !rest.is_empty() {
-                sentence = rest;
-            }
+    let t = i as f32 / (n - 1) as f32;
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::Rgb(mix(r0, r1), mix(g0, g1), mix(b0, b1))
+}
+
+/// Split reasoning into sentences. A newline ends one too, and a `.` only
+/// counts when whitespace follows — otherwise every `3.5` splits in two.
+fn split_sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        let end = i + c.len_utf8();
+        let breaks = match c {
+            '\n' => true,
+            '.' | '!' | '?' => text[end..].chars().next().is_none_or(char::is_whitespace),
+            _ => false,
+        };
+        if !breaks {
+            continue;
         }
+        let piece = text[start..end].trim();
+        if !piece.is_empty() {
+            out.push(piece);
+        }
+        start = end;
     }
-    let one_row = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_row.is_empty() {
-        return None;
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
     }
-    let n = one_row.chars().count();
+    out
+}
+
+/// The last `want` sentences of a live thought, oldest first, one row each.
+///
+/// The window slides as the model writes, so the block keeps its height and
+/// the transcript under it never shifts.
+fn recent_sentences(text: &str, want: usize, width: usize) -> Vec<String> {
+    if want == 0 || width == 0 {
+        return Vec::new();
+    }
+    let all = split_sentences(text);
+    let last = all.len().saturating_sub(1);
+    all.iter()
+        .enumerate()
+        .skip(all.len().saturating_sub(want))
+        .map(|(i, s)| {
+            let one_row = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            fit(&one_row, width, i == last)
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Squeeze a sentence onto one row, marking where it was cut. The newest
+/// sentence is still being written, so it follows the writing head; the ones
+/// behind it have settled and read from the start.
+fn fit(s: &str, width: usize, from_end: bool) -> String {
+    let n = s.chars().count();
     if n <= width {
-        return Some(one_row);
+        return s.to_string();
     }
-    let skip = n - (width - 1);
-    Some(
+    if from_end {
         std::iter::once('…')
-            .chain(one_row.chars().skip(skip))
-            .collect(),
-    )
+            .chain(s.chars().skip(n - (width - 1)))
+            .collect()
+    } else {
+        s.chars()
+            .take(width - 1)
+            .chain(std::iter::once('…'))
+            .collect()
+    }
 }
 
 /// Thought header: bold shimmering "Thinking" while active, then a clear
@@ -987,8 +1045,7 @@ mod tests {
         };
         let t = text(&super::lines(&mut a, 80));
         assert!(t.contains("Thinking"), "{t}");
-        assert!(t.contains("let me ponder this"), "live tail: {t}");
-        assert!(!t.contains("First I read the lexer"), "newest only: {t}");
+        assert!(t.contains("let me ponder this"), "live window: {t}");
 
         // Model moves on → thought closes with a duration; still collapsed.
         // Latest thought omits the click hint (older ones keep it).
@@ -1009,39 +1066,79 @@ mod tests {
     }
 
     #[test]
-    fn the_live_tail_is_rewritten_in_place_not_stacked() {
+    fn the_thought_window_slides_instead_of_growing() {
         use hive_core::event::AgentEvent;
 
         let mut a = app();
         a.blocks.clear();
         a.apply(AgentEvent::TurnStarted);
-        a.apply(AgentEvent::ReasoningDelta("Reading the lexer.".into()));
-        let one = super::lines(&mut a, 80).len();
-
-        // Three more sentences land; the thought is still one header + one tail.
         a.apply(AgentEvent::ReasoningDelta(
-            " Quotes break it. Switch to a scanner. Keep a quote state.".into(),
+            "Reading the lexer. Quotes break it. Switch to a scanner.".into(),
+        ));
+        let full = super::lines(&mut a, 80).len();
+        assert_eq!(full, 1 + super::THOUGHT_WINDOW, "header + a full window");
+
+        // Two more sentences land: the window slides, the block keeps its height.
+        a.apply(AgentEvent::ReasoningDelta(
+            " Keep a quote state. Then wire it through.".into(),
         ));
         let t = tool_text(&mut a, 80);
-        assert_eq!(super::lines(&mut a, 80).len(), one, "still two rows: {t}");
-        assert!(t.contains("Keep a quote state"), "newest sentence: {t}");
-        assert!(!t.contains("Quotes break it"), "older ones are gone: {t}");
+        assert_eq!(super::lines(&mut a, 80).len(), full, "same height: {t}");
+        assert!(t.contains("Then wire it through"), "newest: {t}");
+        assert!(t.contains("Switch to a scanner"), "still in frame: {t}");
+        assert!(!t.contains("Reading the lexer"), "slid off the top: {t}");
     }
 
     #[test]
-    fn a_long_sentence_keeps_its_newest_words() {
-        let long = "we should probably rewrite the whole scanner from scratch today";
-        let cut = super::newest_sentence(long, 20).expect("tail");
-        assert_eq!(cut.chars().count(), 20, "fits the row exactly");
-        assert!(cut.starts_with('…'), "the cut is marked: {cut}");
+    fn the_window_fades_from_oldest_to_newest() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.blocks.clear();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("One. Two. Three.".into()));
+
+        let lines = super::lines(&mut a, 80);
+        let level = |l: &comb::Line| match l.spans.last().and_then(|s| s.style.fg) {
+            Some(comb::Color::Rgb(v, _, _)) => v,
+            other => panic!("thought row needs a colour, got {other:?}"),
+        };
+        let rows: Vec<u8> = lines[1..=super::THOUGHT_WINDOW].iter().map(level).collect();
         assert!(
-            cut.ends_with("scratch today"),
-            "newest words survive: {cut}"
+            rows.windows(2).all(|w| w[0] < w[1]),
+            "each row brighter than the one above it: {rows:?}"
         );
+        let theme = crate::theme::Theme::gray();
+        assert_eq!(super::fade(&theme, 0, 3), theme.faint, "oldest at faint");
+        assert_eq!(super::fade(&theme, 2, 3), theme.dim, "newest at dim");
+        assert_eq!(super::fade(&theme, 0, 1), theme.dim, "a lone row is newest");
+    }
+
+    #[test]
+    fn a_long_sentence_is_cut_where_it_matters() {
+        // The newest sentence is still being written, so it follows the head.
+        let live = super::fit("rewrite the whole scanner from scratch today", 20, true);
+        assert_eq!(live.chars().count(), 20, "fits the row exactly");
+        assert!(live.starts_with('…'), "the cut is marked: {live}");
+        assert!(live.ends_with("scratch today"), "newest words: {live}");
+
+        // A settled one has stopped moving — it reads from the start.
+        let settled = super::fit("rewrite the whole scanner from scratch today", 20, false);
+        assert_eq!(settled.chars().count(), 20);
+        assert!(settled.starts_with("rewrite the whole"), "{settled}");
+        assert!(settled.ends_with('…'), "{settled}");
+
         // Short enough to fit → untouched, no ellipsis.
-        assert_eq!(super::newest_sentence("all good", 20).unwrap(), "all good");
-        assert_eq!(super::newest_sentence("   \n  ", 20), None);
-        assert_eq!(super::newest_sentence("anything", 0), None);
+        assert_eq!(super::fit("all good", 20, true), "all good");
+    }
+
+    #[test]
+    fn sentences_split_on_prose_not_on_decimals() {
+        let s = super::split_sentences("Took 3.5s to run. Now retry!\nNext line");
+        assert_eq!(s, vec!["Took 3.5s to run.", "Now retry!", "Next line"]);
+        assert!(super::split_sentences("   \n  ").is_empty());
+        assert!(super::recent_sentences("anything", 3, 0).is_empty());
+        assert!(super::recent_sentences("anything", 0, 40).is_empty());
     }
 
     #[test]
