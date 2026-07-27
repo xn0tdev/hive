@@ -294,6 +294,7 @@ impl Terminal {
         let n = platform::read_stdin(&mut tmp)?;
         if n > 0 {
             self.inbuf.extend_from_slice(&tmp[..n]);
+            clamp_inbuf(&mut self.inbuf);
         }
         if let Some((w, h)) = platform::take_resize(self.size) {
             return Ok(Some(Event::Resize(w, h)));
@@ -379,6 +380,28 @@ impl Drop for Terminal {
     }
 }
 
+/// Ceiling on buffered input.
+const MAX_INBUF: usize = 8 << 20;
+/// Bytes always preserved at the end — a split `\x1b[201~` must survive.
+const INBUF_TAIL: usize = 16;
+
+/// Keep buffered input bounded.
+///
+/// A bracketed paste accumulates until its end marker arrives, and is then held
+/// a second time as a decoded `String`. Without a ceiling a huge paste is two
+/// copies of itself in memory before anything can reject it.
+///
+/// Past the cap the *middle* is dropped: the head keeps the start marker and the
+/// text worth having, the tail keeps whatever closes the paste. So an oversized
+/// paste arrives truncated rather than wedging the process.
+fn clamp_inbuf(buf: &mut Vec<u8>) {
+    if buf.len() <= MAX_INBUF {
+        return;
+    }
+    let tail_start = buf.len() - INBUF_TAIL;
+    buf.drain(MAX_INBUF - INBUF_TAIL..tail_start);
+}
+
 /// Build the SGR (Select Graphic Rendition) escape for a style, reset-prefixed
 /// so no stale attribute leaks in from the previous cell.
 fn sgr(style: Style) -> String {
@@ -405,4 +428,61 @@ fn sgr(style: Style) -> String {
         s.push_str("\x1b[7m");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::term::event;
+
+    /// A paste smaller than the cap is left completely alone.
+    #[test]
+    fn a_normal_paste_is_not_clamped() {
+        let mut buf = b"\x1b[200~hello there\x1b[201~".to_vec();
+        let before = buf.clone();
+        clamp_inbuf(&mut buf);
+        assert_eq!(buf, before);
+    }
+
+    /// An oversized paste stays bounded instead of growing without limit.
+    #[test]
+    fn an_oversized_paste_is_capped() {
+        let mut buf = Vec::with_capacity(MAX_INBUF * 2);
+        buf.extend_from_slice(b"\x1b[200~");
+        buf.resize(MAX_INBUF * 2, b'x');
+        clamp_inbuf(&mut buf);
+        assert_eq!(buf.len(), MAX_INBUF);
+    }
+
+    /// Repeated reads must not let the buffer creep past the cap.
+    #[test]
+    fn repeated_reads_stay_bounded() {
+        let mut buf = b"\x1b[200~".to_vec();
+        for _ in 0..40 {
+            buf.extend(std::iter::repeat_n(b'y', 512 * 1024));
+            clamp_inbuf(&mut buf);
+            assert!(buf.len() <= MAX_INBUF + 512 * 1024, "len={}", buf.len());
+        }
+        assert!(buf.len() <= MAX_INBUF + 512 * 1024);
+    }
+
+    /// The point of dropping the middle: the paste still closes, so the event
+    /// arrives truncated rather than never arriving at all.
+    #[test]
+    fn a_capped_paste_still_parses_when_it_closes() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"\x1b[200~");
+        buf.resize(MAX_INBUF * 2, b'z');
+        clamp_inbuf(&mut buf);
+        buf.extend_from_slice(b"\x1b[201~");
+        clamp_inbuf(&mut buf);
+
+        match event::parse(&mut buf) {
+            Some(event::Event::Paste(text)) => {
+                assert!(!text.is_empty(), "truncated, not empty");
+                assert!(text.len() <= MAX_INBUF, "len={}", text.len());
+            }
+            other => panic!("expected a paste, got {other:?}"),
+        }
+    }
 }

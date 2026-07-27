@@ -183,10 +183,14 @@ impl Buffer {
     pub fn set(&mut self, x: u16, y: u16, ch: char, style: Style) {
         if let Some(c) = self.cell_mut(x, y) {
             c.ch = ch;
-            // Patch, don't replace: `None` colours inherit the cell underneath.
-            // Critical for panels — `set_line` clears short-line tails with
-            // `Style::new()`, which must not punch black holes through a painted bg.
+            // Colours patch: `None` inherits the cell underneath. Critical for
+            // panels — `set_line` clears short-line tails with `Style::new()`,
+            // which must not punch black holes through a painted bg.
             c.style = c.style.patch(style);
+            // Attributes replace. A glyph owns its own weight; OR-ing them would
+            // let an overlay drawn over bold transcript text inherit bold on
+            // whichever columns happened to sit under it.
+            c.style.mods = style.mods;
         }
     }
 
@@ -425,7 +429,7 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::style::{Color, Style};
+    use crate::core::style::{Color, Modifier, Style};
     use crate::core::text::Span;
 
     #[test]
@@ -502,6 +506,29 @@ mod tests {
         }
         assert_eq!(b.get(0, 0).unwrap().ch, 'S');
         assert_eq!(b.get(8, 0).unwrap().ch, ' ');
+    }
+
+    /// An overlay drawn over bold text used to inherit its weight, one column
+    /// at a time — ragged bold letters scattered through a menu description.
+    #[test]
+    fn a_glyph_written_over_bold_text_is_not_bold() {
+        let panel = Color::rgb(0x22, 0x22, 0x22);
+        let mut b = Buffer::blank(Size::new(6, 1));
+        b.set_str(0, 0, "BOLD  ", Style::new().bold());
+        b.paint(Rect::new(0, 0, 6, 1), Style::new().bg(panel));
+        b.set_line(
+            0,
+            0,
+            &Line::from(Span::styled("desc", Style::new().fg(Color::rgb(9, 9, 9)))),
+            6,
+        );
+        for x in 0..6 {
+            assert!(
+                !b.get(x, 0).unwrap().style.mods.contains(Modifier::BOLD),
+                "col {x} inherited bold from underneath"
+            );
+            assert_eq!(b.get(x, 0).unwrap().style.bg, Some(panel), "col {x} bg");
+        }
     }
 
     #[test]
