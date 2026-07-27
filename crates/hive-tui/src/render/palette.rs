@@ -291,6 +291,32 @@ pub fn list_visible(area: Rect, app: &App) -> u16 {
     geom(area, list_row_count(pal, app), pal.mode).list.height
 }
 
+/// The panel rect, for telling a click inside the overlay from one that means
+/// "dismiss this".
+pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
+    let pal = app.palette.as_ref()?;
+    Some(geom(area, list_row_count(pal, app), pal.mode).win)
+}
+
+/// Row index under the pointer, or `None` when it is not over the list.
+///
+/// The geometry is a pure function of the area and the palette state, so this
+/// re-derives it rather than having the renderer stash rects per row.
+pub fn row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let pal = app.palette.as_ref()?;
+    let g = geom(area, list_row_count(pal, app), pal.mode);
+    if !g.list.contains(col, row) {
+        return None;
+    }
+    let offset = pal.visible_offset(
+        &app.model_choices,
+        &app.connections,
+        &app.saved_sessions,
+        g.list.height as usize,
+    );
+    Some(offset + usize::from(row - g.list.y))
+}
+
 fn draw_command_list(
     buf: &mut Buffer,
     area: Rect,

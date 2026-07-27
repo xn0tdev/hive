@@ -398,6 +398,39 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         }
     }
 
+    // Tasks — agent's self-managed todo list (set_todos tool).
+    if !app.todos.is_empty() {
+        lines.push((Line::from(""), None, None));
+        let done = app.todos.iter().filter(|t| t.done).count();
+        let total = app.todos.len();
+        let label = format!("Tasks {done}/{total}");
+        lines.push((section_header(&label, true, false, theme), None, None));
+        for t in &app.todos {
+            if t.done {
+                lines.push((
+                    Line::from(vec![
+                        Span::styled("✓ ", Style::default().fg(theme.ok)),
+                        Span::styled(
+                            truncate(&t.text, w.saturating_sub(2)),
+                            Style::default().fg(theme.faint).add(Modifier::DIM),
+                        ),
+                    ]),
+                    None,
+                    None,
+                ));
+            } else {
+                lines.push((
+                    Line::from(Span::styled(
+                        truncate(&t.text, w),
+                        Style::default().fg(theme.dim),
+                    )),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+
     // Sub agents / Terminals sit above Changes so a long file list cannot push them out.
     let agents = app.sidebar_subagents();
     if !agents.is_empty() {

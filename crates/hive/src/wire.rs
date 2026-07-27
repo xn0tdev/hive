@@ -10,7 +10,10 @@ use anyhow::Result;
 use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
-use hive_core::{all_tools, new_spawner, Agent, AgentBuilder, DiskSkills, FollowUpSlot};
+use hive_core::{
+    all_tools, new_spawner, Agent, AgentBuilder, CompositeSkills, DiskSkills, FollowUpSlot,
+    InsideSkills,
+};
 use hive_llm::FireworksProvider;
 use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 
@@ -28,7 +31,10 @@ pub fn build_agent(cfg: &Arc<AppConfig>, event_tx: hive_core::EventSender) -> Ag
         cfg.provider.base_url.clone(),
         cfg.secrets.provider_api_key.clone(),
     ));
-    let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
+    let skills: Arc<dyn SkillSource> = Arc::new(CompositeSkills::new(vec![
+        Box::new(InsideSkills),
+        Box::new(DiskSkills::load(skill_dirs)),
+    ]));
     let tools = all_tools();
 
     let builder = AgentBuilder {
@@ -122,7 +128,10 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         cfg.provider.base_url.clone(),
         cfg.secrets.provider_api_key.clone(),
     ));
-    let skills: Arc<dyn SkillSource> = Arc::new(DiskSkills::load(skill_dirs));
+    let skills: Arc<dyn SkillSource> = Arc::new(CompositeSkills::new(vec![
+        Box::new(InsideSkills),
+        Box::new(DiskSkills::load(skill_dirs)),
+    ]));
     let skill_choices: Vec<SkillChoice> = skills
         .list()
         .into_iter()

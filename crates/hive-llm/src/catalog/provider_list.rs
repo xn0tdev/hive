@@ -6,10 +6,13 @@ use serde_json::Value;
 use super::{CatalogError, Result};
 
 /// One id returned by the provider (before models.dev enrichment).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RemoteModel {
     pub id: String,
     pub name: Option<String>,
+    /// Priced at zero by the provider's own listing. `None` when it quoted no
+    /// price at all — models.dev gets to answer in that case.
+    pub free: Option<bool>,
 }
 
 /// Versioned Fireworks ids that `GET /models` sometimes omits (esp. `/routers`).
@@ -22,6 +25,7 @@ const FIREWORKS_SUPPLEMENT: &[(&str, &str)] = &[
         "accounts/fireworks/routers/kimi-k2p6-fast",
         "Kimi K2.6 Fast",
     ),
+    ("accounts/fireworks/models/kimi-k3", "Kimi K3"),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -37,8 +41,7 @@ struct ModelEntry {
 pub async fn list_provider_models(base_url: &str, api_key: &str) -> Result<Vec<RemoteModel>> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/models");
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = super::http::client()
         .get(&url)
         .bearer_auth(api_key)
         .send()
@@ -90,7 +93,28 @@ pub(crate) fn parse_models_json(text: &str) -> Result<Vec<RemoteModel>> {
     Ok(out)
 }
 
+/// A price that may arrive as a number or, as OpenRouter sends it, a string.
+fn price_of(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Read `pricing` off a listing entry: zero on both sides means free.
+///
+/// OpenRouter's `:free` id suffix looks tempting but under-counts — it misses
+/// free models that don't carry it — so the quoted price is what decides.
+fn free_from_pricing(entry: &Value) -> Option<bool> {
+    let pricing = entry.get("pricing")?;
+    let input = price_of(pricing.get("prompt").or_else(|| pricing.get("input")))?;
+    let output = price_of(pricing.get("completion").or_else(|| pricing.get("output")))?;
+    Some(input == 0.0 && output == 0.0)
+}
+
 fn remote_from_value(entry: Value) -> Option<RemoteModel> {
+    let free = free_from_pricing(&entry);
     // Prefer typed decode when it looks like an object with `id`.
     if let Ok(m) = serde_json::from_value::<ModelEntry>(entry.clone()) {
         let id = m.id.trim().to_string();
@@ -102,7 +126,7 @@ fn remote_from_value(entry: Value) -> Option<RemoteModel> {
             .or(m.display_name)
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty());
-        return Some(RemoteModel { id, name });
+        return Some(RemoteModel { id, name, free });
     }
     // Bare string id.
     if let Some(id) = entry.as_str() {
@@ -112,7 +136,7 @@ fn remote_from_value(entry: Value) -> Option<RemoteModel> {
         }
         return Some(RemoteModel {
             id: id.to_string(),
-            name: None,
+            ..Default::default()
         });
     }
     // Loose object: id + optional name-like fields.
@@ -135,6 +159,7 @@ fn remote_from_value(entry: Value) -> Option<RemoteModel> {
     Some(RemoteModel {
         id: id.to_string(),
         name,
+        free,
     })
 }
 
@@ -154,6 +179,7 @@ fn merge_fireworks_supplements(base_url: &str, models: &mut Vec<RemoteModel>) {
         models.push(RemoteModel {
             id: (*id).into(),
             name: Some((*name).into()),
+            free: None,
         });
     }
     sort_dedup_models(models);
@@ -179,6 +205,50 @@ mod tests {
         assert_eq!(models[0].id, "accounts/fireworks/models/kimi");
         assert_eq!(models[0].name.as_deref(), Some("Kimi"));
         assert_eq!(models[1].id, "gpt-4o");
+    }
+
+    /// OpenRouter quotes prices as strings, and zero on both sides means free.
+    #[test]
+    fn reads_free_from_openrouter_pricing() {
+        let json = r#"{"data":[
+            {"id":"nvidia/nemotron:free","pricing":{"prompt":"0","completion":"0"}},
+            {"id":"anthropic/claude","pricing":{"prompt":"0.000003","completion":"0.000015"}},
+            {"id":"unknown/model"}
+        ]}"#;
+        let models = parse_models_json(json).unwrap();
+        let by_id = |id: &str| models.iter().find(|m| m.id == id).unwrap().free;
+        assert_eq!(by_id("nvidia/nemotron:free"), Some(true));
+        assert_eq!(by_id("anthropic/claude"), Some(false));
+        assert_eq!(
+            by_id("unknown/model"),
+            None,
+            "no price quoted is not 'paid'"
+        );
+    }
+
+    /// A free model without the `:free` suffix must still be caught — the
+    /// suffix under-counts, the price does not.
+    #[test]
+    fn free_does_not_depend_on_the_id_suffix() {
+        let json = r#"{"data":[{"id":"vendor/plain","pricing":{"prompt":0,"completion":0}}]}"#;
+        let models = parse_models_json(json).unwrap();
+        assert_eq!(models[0].free, Some(true));
+    }
+
+    /// Providers that name the fields `input`/`output` work the same.
+    #[test]
+    fn reads_free_from_input_output_pricing() {
+        let json = r#"{"data":[{"id":"a","pricing":{"input":0,"output":0}}]}"#;
+        let models = parse_models_json(json).unwrap();
+        assert_eq!(models[0].free, Some(true));
+    }
+
+    /// Half-priced is not free.
+    #[test]
+    fn output_priced_is_not_free() {
+        let json = r#"{"data":[{"id":"a","pricing":{"prompt":"0","completion":"0.5"}}]}"#;
+        let models = parse_models_json(json).unwrap();
+        assert_eq!(models[0].free, Some(false));
     }
 
     #[test]
@@ -212,6 +282,7 @@ mod tests {
         let mut models = vec![RemoteModel {
             id: "accounts/fireworks/models/kimi".into(),
             name: Some("Kimi".into()),
+            free: None,
         }];
         merge_fireworks_supplements("https://api.fireworks.ai/inference/v1", &mut models);
         let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
@@ -226,7 +297,7 @@ mod tests {
     fn fireworks_supplement_skips_non_fireworks() {
         let mut models = vec![RemoteModel {
             id: "gpt-4o".into(),
-            name: None,
+            ..Default::default()
         }];
         merge_fireworks_supplements("https://api.openai.com/v1", &mut models);
         assert_eq!(models.len(), 1);
@@ -238,6 +309,7 @@ mod tests {
         let mut models = vec![RemoteModel {
             id: "accounts/fireworks/models/glm-5p2".into(),
             name: Some("from-api".into()),
+            free: None,
         }];
         merge_fireworks_supplements("https://api.fireworks.ai/inference/v1", &mut models);
         let glm: Vec<_> = models

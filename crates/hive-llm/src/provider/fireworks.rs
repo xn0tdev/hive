@@ -19,10 +19,32 @@ pub struct FireworksProvider {
     api_key: String,
 }
 
+/// How long to wait for the response head. The body is a stream that can
+/// legitimately run for many minutes, so only the handshake is bounded here —
+/// a total timeout would kill long answers mid-sentence.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Gap between two stream chunks. A provider that stops sending without closing
+/// the connection used to hang the turn forever; this ends it instead.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl FireworksProvider {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| {
+                // Fallback: still enforce timeouts so a hanging connection
+                // can't stall the turn forever.
+                reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .read_timeout(READ_TIMEOUT)
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
+            });
         FireworksProvider {
-            client: reqwest::Client::new(),
+            client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }

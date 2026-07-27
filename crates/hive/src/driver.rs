@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -14,7 +15,7 @@ use hive_core::provider::LlmProvider;
 use hive_core::{Agent, FollowUpSlot, TerminalHandle, UserInput};
 use hive_llm::catalog::{
     enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
-    provider_label_for_base, ModelCard,
+    provider_label_for_base, warm_cache, ModelCard,
 };
 use hive_llm::FireworksProvider;
 use hive_tui::InputCommand;
@@ -38,6 +39,7 @@ pub async fn run(
     terminal: TerminalHandle,
     mut cfg: Arc<AppConfig>,
 ) {
+    tokio::spawn(warm_cache());
     let DriverShared {
         interrupt,
         follow_up,
@@ -183,6 +185,7 @@ pub async fn run(
                 }
                 // Goal continuation loop.
                 loop {
+                    drain_goal_commands(&agent, &events, &mut pending);
                     if !agent.goal_active() {
                         break;
                     }
@@ -258,6 +261,7 @@ pub async fn run(
                 }
                 // Goal continuation loop.
                 loop {
+                    drain_goal_commands(&agent, &events, &mut pending);
                     if !agent.goal_active() {
                         break;
                     }
@@ -687,8 +691,22 @@ fn resolve_model(cfg: &AppConfig, id: &str, display: &str) -> (String, String) {
     (id.to_string(), display)
 }
 
+const LISTING_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static LISTING_CACHE: Mutex<Option<(Instant, Vec<CatalogModel>)>> = Mutex::new(None);
+
 async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
-    let catalog = fetch_models_dev().await.ok();
+    if let Ok(g) = LISTING_CACHE.lock() {
+        if let Some((at, models)) = g.as_ref() {
+            if at.elapsed() < LISTING_CACHE_TTL {
+                let _ = events.send(AgentEvent::ModelsListed {
+                    models: models.clone(),
+                });
+                return;
+            }
+        }
+    }
+
     let mut models = Vec::new();
     let mut errors = Vec::new();
 
@@ -731,12 +749,22 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
         targets.push((id, label, base, key));
     }
 
-    for (conn_id, label, base, key) in targets {
-        match list_provider_models(&base, &key).await {
+    // Every listing is independent of the others and of the models.dev catalog,
+    // so the whole fan-out flies at once: one round trip instead of N + 1.
+    let listings = futures_util::future::join_all(
+        targets
+            .iter()
+            .map(|(_, _, base, key)| list_provider_models(base, key)),
+    );
+    let (listings, catalog) = tokio::join!(listings, fetch_models_dev());
+    let catalog = catalog.ok();
+
+    for ((conn_id, label, base, _), listed) in targets.iter().zip(listings) {
+        match listed {
             Ok(remote) => {
-                let hint = models_dev_hint_for_base(&base);
+                let hint = models_dev_hint_for_base(base);
                 let cards = enrich_models(&remote, catalog.as_ref(), hint);
-                models.extend(catalog_rows(&label, &conn_id, &cards));
+                models.extend(catalog_rows(label, conn_id, &cards));
             }
             Err(e) => errors.push(format!("{label}: {e}")),
         }
@@ -758,6 +786,9 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.id.cmp(&b.id))
     });
+    if let Ok(mut g) = LISTING_CACHE.lock() {
+        *g = Some((Instant::now(), models.clone()));
+    }
     let _ = events.send(AgentEvent::ModelsListed { models });
 }
 
@@ -770,6 +801,38 @@ fn active_provider_label(cfg: &AppConfig, base_url: &str) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| provider_label_for_base(base_url).to_string())
+}
+
+/// Apply any goal commands (pause/stop/resume) that queued up during a turn,
+/// so the continuation loop sees the updated state before deciding to go again.
+fn drain_goal_commands(agent: &Agent, events: &EventSender, pending: &mut VecDeque<InputCommand>) {
+    let mut i = 0;
+    while i < pending.len() {
+        let is_goal_cmd = matches!(
+            pending[i],
+            InputCommand::StopGoal | InputCommand::PauseGoal | InputCommand::ResumeGoal
+        );
+        if !is_goal_cmd {
+            i += 1;
+            continue;
+        }
+        let cmd = pending.remove(i).unwrap();
+        match cmd {
+            InputCommand::StopGoal => {
+                agent.stop_goal();
+                let _ = events.send(AgentEvent::GoalStopped);
+            }
+            InputCommand::PauseGoal => {
+                agent.pause_goal();
+                let _ = events.send(AgentEvent::GoalPaused);
+            }
+            InputCommand::ResumeGoal => {
+                agent.resume_goal();
+                let _ = events.send(AgentEvent::GoalResumed);
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Build the continuation prompt for the goal loop.

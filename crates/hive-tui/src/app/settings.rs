@@ -33,7 +33,7 @@ impl SettingsState {
             SettingsPage::Root => 3,
             SettingsPage::Chat => 2,
             SettingsPage::Sidebar => 3,
-            SettingsPage::Tools => 1,
+            SettingsPage::Tools => 2,
         }
     }
 
@@ -120,6 +120,10 @@ pub fn activate(app: &mut App) -> bool {
         },
         SettingsPage::Tools => match sel {
             0 => {
+                app.ui.show_tool_cards = !app.ui.show_tool_cards;
+                true
+            }
+            1 => {
                 app.ui.tool_revert = !app.ui.tool_revert;
                 true
             }

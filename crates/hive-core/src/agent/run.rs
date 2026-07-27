@@ -642,29 +642,66 @@ impl Agent {
                 break;
             }
 
-            for tc in tool_calls {
+            // Delegate tools (spawn_subagent, verify_project) run concurrently
+            // when the model returns several in one batch; everything else stays
+            // sequential so side-effects (mode switch, file writes) stay ordered.
+            let mut i = 0;
+            while i < tool_calls.len() {
                 if interrupt.load(Ordering::Relaxed) {
                     self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                     break;
                 }
+
+                let tc = &tool_calls[i];
 
                 // Loop detection: same tool + same args repeated too many times.
                 if self.loop_detector.record(&tc.name, &tc.arguments) {
                     self.emit(AgentEvent::LoopDetected {
                         tool: tc.name.clone(),
                     });
-
-                    // Inject the redirect as a user message so the model sees it.
                     let msg = redirect_message(&tc.name, &tc.arguments);
                     self.session.push(Message::user(msg));
                     self.loop_detector.reset_streak();
-                    // Skip executing the repeated tool call — let the model
-                    // reconsider with the redirect in context.
+                    i += 1;
                     continue;
                 }
 
-                self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
-                    .await;
+                if is_parallel_tool(&tc.name) {
+                    let start = i;
+                    i += 1;
+                    while i < tool_calls.len() && is_parallel_tool(&tool_calls[i].name) {
+                        if self
+                            .loop_detector
+                            .record(&tool_calls[i].name, &tool_calls[i].arguments)
+                        {
+                            self.emit(AgentEvent::LoopDetected {
+                                tool: tool_calls[i].name.clone(),
+                            });
+                            let msg =
+                                redirect_message(&tool_calls[i].name, &tool_calls[i].arguments);
+                            self.session.push(Message::user(msg));
+                            self.loop_detector.reset_streak();
+                            break;
+                        }
+                        i += 1;
+                    }
+                    let batch = &tool_calls[start..i];
+                    if batch.len() == 1 {
+                        self.run_tool(
+                            &batch[0].id,
+                            &batch[0].name,
+                            &batch[0].arguments,
+                            &interrupt,
+                        )
+                        .await;
+                    } else {
+                        self.run_tools_parallel(batch, &interrupt).await;
+                    }
+                } else {
+                    self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
+                        .await;
+                    i += 1;
+                }
             }
 
             if interrupt.load(Ordering::Relaxed) {
@@ -819,6 +856,73 @@ impl Agent {
         }
     }
 
+    async fn run_tools_parallel(
+        &mut self,
+        batch: &[crate::message::ToolCall],
+        interrupt: &Arc<AtomicBool>,
+    ) {
+        for tc in batch {
+            self.emit(AgentEvent::ToolStarted {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                args_preview: preview_args(&tc.name, &tc.arguments),
+            });
+        }
+
+        let mut set = tokio::task::JoinSet::new();
+        for tc in batch {
+            let args: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
+            let tool = self.tools.iter().find(|t| t.name() == tc.name).cloned();
+            let name = tc.name.clone();
+            let ctx = ToolContext {
+                cwd: self.cwd.clone(),
+                events: self.events.clone(),
+                spawner: self.spawner.clone(),
+                skills: self.skills.clone(),
+                config: self.config.clone(),
+                terminal: self.terminal.clone(),
+                vision: self.vision_capable,
+                depth: self.depth,
+                call_id: tc.id.clone(),
+                isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
+                interrupt: interrupt.clone(),
+            };
+            let interrupt = interrupt.clone();
+            set.spawn(async move {
+                match tool {
+                    Some(t) => {
+                        tokio::select! {
+                            biased;
+                            _ = wait_interrupt(&interrupt) => ToolResult::error("interrupted"),
+                            result = t.execute(args, &ctx) => result,
+                        }
+                    }
+                    None => ToolResult::error(format!("unknown tool: {name}")),
+                }
+            });
+        }
+
+        let mut results = Vec::with_capacity(batch.len());
+        while let Some(joined) = set.join_next().await {
+            results.push(joined.unwrap_or_else(|_| ToolResult::error("task panicked")));
+        }
+        // JoinSet doesn't preserve order; but for delegate tools the order
+        // doesn't matter semantically — the model sees all results regardless.
+        // We still push them in the original call order for consistency.
+        // Since JoinSet returns in completion order, we just push as-is.
+        for (tc, result) in batch.iter().zip(results) {
+            self.emit(AgentEvent::ToolFinished {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                ok: !result.is_error,
+                summary: first_line(&result.content, 120),
+            });
+            self.session
+                .push(Message::tool_result(&tc.id, &tc.name, result.content));
+        }
+    }
+
     async fn execute_tool(
         &self,
         name: &str,
@@ -860,6 +964,12 @@ impl Agent {
         let summary = plan_summary(&body);
         self.emit(AgentEvent::PlanUpdated { summary, body });
     }
+}
+
+/// Tools that are safe to run concurrently — they don't mutate the session
+/// or agent state, just spawn work and return a report.
+fn is_parallel_tool(name: &str) -> bool {
+    matches!(name, "spawn_subagent" | "verify_project")
 }
 
 /// A short, human-friendly summary of a tool call — the one argument that

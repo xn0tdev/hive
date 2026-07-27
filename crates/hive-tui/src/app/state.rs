@@ -456,6 +456,8 @@ pub enum Block {
     Goal(GoalCard),
     /// "Circle N" separator between goal turns.
     GoalCircle(u64),
+    /// Agent's task list progress (set_todos tool).
+    Todos(Vec<hive_core::TodoItem>),
     Notice(String),
     Error(String),
 }

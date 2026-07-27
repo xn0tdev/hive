@@ -34,13 +34,15 @@ async fn terminate(child: &mut Child) -> io::Result<()> {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {
-            // The child is its process-group leader, so a negative PID kills
-            // the shell and every process it started.
-            let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            if rc != 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
+            if pid > 0 {
+                // The child is its process-group leader, so a negative PID kills
+                // the shell and every process it started.
+                let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                if rc != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -60,8 +62,10 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.0.id() {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+            if pid > 0 {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
             }
         }
         let _ = self.0.start_kill();

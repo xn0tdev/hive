@@ -12,8 +12,8 @@ use crate::app::state::{
 use crate::app::{App, MdRows};
 use crate::render::tools::{
     compacted_card_lines, format_tool_secs, goal_card_lines, loop_detected_card_lines,
-    mode_switch_card_lines, plan_card_lines, subagent_card_lines, terminal_card_lines, tool_lines,
-    work_summary_card_lines,
+    mode_switch_card_lines, plan_card_lines, subagent_card_lines, terminal_card_lines,
+    todo_card_lines, tool_lines, work_summary_card_lines,
 };
 use crate::render::{markdown, wrap};
 
@@ -362,6 +362,9 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 }
             }
             UiBlock::Tool(card) => {
+                if !app.ui.show_tool_cards {
+                    continue;
+                }
                 // tool_lines only needs a few fields; clone the small card.
                 let card = ToolCard {
                     id: card.id.clone(),
@@ -413,6 +416,10 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     Span::styled(text, Style::default().fg(app.theme.dim)),
                     Span::styled("─".repeat(right), Style::default().fg(line_color)),
                 ]));
+            }
+            UiBlock::Todos(items) => {
+                let items = items.clone();
+                out.extend(todo_card_lines(&items, app, width));
             }
             UiBlock::Notice(s) => {
                 let s = s.clone();

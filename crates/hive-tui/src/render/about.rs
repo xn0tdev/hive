@@ -39,6 +39,11 @@ fn geom(area: Rect) -> AboutGeom {
     AboutGeom { win, content }
 }
 
+/// The card rect, so a click off it can dismiss the overlay.
+pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
+    app.about_open().then(|| geom(area).win)
+}
+
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     if !app.about_open() {
         return;

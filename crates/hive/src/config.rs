@@ -867,6 +867,7 @@ mod tests {
             sidebar_width: 40,
             show_work_summary: false,
             tool_revert: false,
+            show_tool_cards: false,
         };
 
         let mut table = toml::map::Map::new();

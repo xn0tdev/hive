@@ -17,15 +17,15 @@ pub mod tools;
 pub mod wordmark;
 pub mod wrap;
 
-mod about;
+pub(crate) mod about;
 mod context_menu;
 mod footer;
-mod goal;
+pub(crate) mod goal;
 mod input_bars;
 mod jump_bottom;
 mod menu;
-mod palette;
-mod settings;
+pub(crate) mod palette;
+pub(crate) mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;
 mod terminal_view;
@@ -47,6 +47,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Only the chat layout re-arms this; landing and the special views have no
     // scrollback of their own to jump to.
     app.scroll_bottom_hit = None;
+    // Re-armed by `menu::draw` when a composer menu is actually on screen.
+    app.menu_hit = None;
+    // Every centered overlay lays out against the whole frame.
+    app.overlay_area = area;
     if app.is_empty_chat() {
         app.click_hits.clear();
         // Landing has no scrollable transcript — keep scroll state honest so
@@ -212,10 +216,13 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         input_bars::draw(f, band(input_y, input_h), app);
         // Full band width: text flush left with strip, chip flush right.
         footer::draw_with_mode(f, band(footer_y, 2), app);
-        // Jump-to-bottom sits on the gap row the layout leaves above the
-        // composer, so it never pushes the transcript around.
+        // Gap row above the composer: todo progress bar or jump-to-bottom.
         let gap_y = follow_y.saturating_sub(1);
-        jump_bottom::draw(f.buffer(), band(gap_y, 1), app);
+        if !app.todos.is_empty() {
+            draw_todo_bar(f.buffer(), band(gap_y, 1), app);
+        } else {
+            jump_bottom::draw(f.buffer(), band(gap_y, 1), app);
+        }
     }
 
     if plan || terminal {
@@ -298,6 +305,40 @@ fn draw_context_menu(f: &mut Frame, area: Rect, app: &mut App) {
     if app.context_menu_open() {
         context_menu::draw(f.buffer(), area, app);
     }
+}
+
+fn draw_todo_bar(buf: &mut comb::Buffer, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let theme = &app.theme;
+    let done = app.todos.iter().filter(|t| t.done).count();
+    let total = app.todos.len();
+    let current = app.todos.iter().find(|t| !t.done);
+
+    let mut spans = vec![Span::styled(
+        format!("→ Tasks {done}/{total}"),
+        Style::default().fg(if done == total {
+            theme.ok
+        } else {
+            theme.accent
+        }),
+    )];
+    if let Some(cur) = current {
+        let used = spans[0].content.chars().count();
+        let max = (area.width as usize).saturating_sub(used + 4);
+        let label = if cur.text.chars().count() > max && max > 4 {
+            let mut s: String = cur.text.chars().take(max - 1).collect();
+            s.push('…');
+            s
+        } else {
+            cur.text.clone()
+        };
+        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
+        spans.push(Span::styled(label, Style::default().fg(theme.dim)));
+    }
+    buf.paint(area, Style::default());
+    buf.set_line(area.x, area.y, &Line::from(spans), area.width);
 }
 
 fn input_height(app: &mut App, band_width: u16) -> u16 {

@@ -40,14 +40,9 @@ pub fn create(repo: &Path, id: &str) -> Result<(PathBuf, String), String> {
         let _ = remove(repo, id);
     }
     let out = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            path.to_str().unwrap_or(""),
-            "HEAD",
-        ])
+        .args(["worktree", "add", "-b", &branch])
+        .arg(&path)
+        .arg("HEAD")
         .current_dir(repo)
         .output()
         .map_err(|e| format!("git worktree add: {e}"))?;
@@ -176,7 +171,8 @@ pub fn remove(repo: &Path, id: &str) -> Result<(), String> {
     let branch = branch_name(id);
     if path.exists() {
         let out = Command::new("git")
-            .args(["worktree", "remove", "--force", path.to_str().unwrap_or("")])
+            .args(["worktree", "remove", "--force"])
+            .arg(&path)
             .current_dir(repo)
             .output()
             .map_err(|e| format!("git worktree remove: {e}"))?;

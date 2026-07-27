@@ -18,32 +18,23 @@ pub struct ModelCard {
     pub cost_input: f64,
     /// USD per 1M output tokens (0 if unknown).
     pub cost_output: f64,
+    /// Costs nothing to call.
+    pub free: bool,
 }
 
 impl ModelCard {
-    /// Compact badge line for the picker, e.g. `128k · vision · tools`.
+    /// Compact badge line for the picker: `128k`, or `128k · FREE`.
+    ///
+    /// Context and price are the only two things worth scanning a list for.
+    /// The capability flags stay on the struct — `suggest` still picks by them
+    /// — they just don't earn a column in the picker.
     pub fn badges(&self) -> String {
         let mut parts = Vec::new();
         if self.context > 0 {
             parts.push(format_context(self.context));
         }
-        if self.vision {
-            parts.push("vision".into());
-        }
-        if self.video {
-            parts.push("video".into());
-        }
-        if self.audio {
-            parts.push("audio".into());
-        }
-        if self.reasoning {
-            parts.push("reason".into());
-        }
-        if self.tools {
-            parts.push("tools".into());
-        }
-        if !self.enriched && parts.is_empty() {
-            parts.push("listed".into());
+        if self.free {
+            parts.push("FREE".into());
         }
         parts.join(" · ")
     }
@@ -86,6 +77,9 @@ pub fn enrich_models(
                     enriched: true,
                     cost_input: m.cost_input,
                     cost_output: m.cost_output,
+                    // What the provider quotes today beats what the catalog
+                    // recorded whenever it was last built.
+                    free: r.free.unwrap_or(m.free),
                 },
                 None => ModelCard {
                     id: r.id.clone(),
@@ -99,6 +93,7 @@ pub fn enrich_models(
                     enriched: false,
                     cost_input: 0.0,
                     cost_output: 0.0,
+                    free: r.free.unwrap_or(false),
                 },
             }
         })
@@ -137,13 +132,113 @@ mod tests {
         let cards = enrich_models(
             &[RemoteModel {
                 id: "foo".into(),
-                name: None,
+                ..Default::default()
             }],
             Some(&cat),
             Some("fireworks-ai"),
         );
+        // Capabilities are still enriched — they just no longer show as badges.
         assert!(cards[0].vision);
-        assert!(cards[0].badges().contains("vision"));
-        assert!(cards[0].badges().contains("200k"));
+        assert!(cards[0].tools);
+        assert_eq!(cards[0].badges(), "200k");
+    }
+
+    /// The picker column stays down to context and price, whatever the model
+    /// can do.
+    #[test]
+    fn badges_are_only_context_and_price() {
+        let mut c = card(None, r#","cost":{"input":2.1,"output":6.6}"#);
+        c.vision = true;
+        c.video = true;
+        c.audio = true;
+        c.reasoning = true;
+        c.tools = true;
+        assert_eq!(c.badges(), "128k");
+
+        c.free = true;
+        assert_eq!(c.badges(), "128k · FREE");
+    }
+
+    /// Nothing known about it — show nothing rather than a filler word.
+    #[test]
+    fn an_unknown_model_gets_an_empty_badge_line() {
+        let cards = enrich_models(
+            &[RemoteModel {
+                id: "brand/new".into(),
+                ..Default::default()
+            }],
+            None,
+            None,
+        );
+        assert_eq!(cards[0].badges(), "");
+    }
+
+    fn catalog_with_cost(cost: &str) -> super::super::models_dev::ModelsDevCatalog {
+        parse_models_dev_json(&format!(
+            r#"{{"p":{{"id":"p","models":{{"m":{{"id":"m","name":"M",
+               "limit":{{"context":128000}}{cost}}}}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn card(free: Option<bool>, cost: &str) -> ModelCard {
+        let cat = catalog_with_cost(cost);
+        enrich_models(
+            &[RemoteModel {
+                id: "m".into(),
+                name: None,
+                free,
+            }],
+            Some(&cat),
+            Some("p"),
+        )
+        .remove(0)
+    }
+
+    #[test]
+    fn a_zero_priced_model_is_badged_free() {
+        let c = card(None, r#","cost":{"input":0,"output":0}"#);
+        assert!(c.free);
+        assert!(c.badges().ends_with("FREE"), "{}", c.badges());
+    }
+
+    /// No `cost` block means the price is unknown — that is not free.
+    #[test]
+    fn a_model_without_a_price_is_not_free() {
+        let c = card(None, "");
+        assert!(!c.free);
+        assert!(!c.badges().contains("FREE"), "{}", c.badges());
+    }
+
+    #[test]
+    fn a_priced_model_is_not_free() {
+        let c = card(None, r#","cost":{"input":2.1,"output":6.6}"#);
+        assert!(!c.free);
+    }
+
+    /// The provider's live quote wins over whatever the catalog was built with.
+    #[test]
+    fn the_provider_price_overrides_the_catalog() {
+        let now_free = card(Some(true), r#","cost":{"input":2.1,"output":6.6}"#);
+        assert!(now_free.free, "catalog says paid, provider says free");
+
+        let now_paid = card(Some(false), r#","cost":{"input":0,"output":0}"#);
+        assert!(!now_paid.free, "catalog says free, provider says paid");
+    }
+
+    /// A model the catalog has never heard of can still be marked free.
+    #[test]
+    fn an_unenriched_model_can_still_be_free() {
+        let cards = enrich_models(
+            &[RemoteModel {
+                id: "brand/new".into(),
+                name: None,
+                free: Some(true),
+            }],
+            None,
+            None,
+        );
+        assert!(cards[0].free);
+        assert!(cards[0].badges().contains("FREE"), "{}", cards[0].badges());
     }
 }

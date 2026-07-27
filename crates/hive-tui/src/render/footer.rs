@@ -54,6 +54,16 @@ pub fn model_line(app: &crate::app::App) -> Line {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
         spans.push(Span::styled(label, Style::default().fg(color)));
     }
+    // Todo progress (compact: ✓ 3/7).
+    if !app.todos.is_empty() {
+        let done = app.todos.iter().filter(|t| t.done).count();
+        let total = app.todos.len();
+        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
+        spans.push(Span::styled(
+            format!("✓ {done}/{total}"),
+            Style::default().fg(if done == total { theme.ok } else { theme.dim }),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -187,6 +197,9 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 }
 
 /// `used / window` for the context meter in the footer.
+/// A goal loop keeps one conversation across circles, so there is only ever one
+/// context to report — the running total the model is actually being sent, and
+/// the one auto-compact fires on.
 fn format_context(used: u64, window: u64) -> String {
     let window = window.max(1);
     format!("{} / {}", short_tokens(used), short_tokens(window))

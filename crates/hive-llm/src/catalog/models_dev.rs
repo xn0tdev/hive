@@ -1,12 +1,23 @@
 //! Fetch + index https://models.dev/api.json
+//!
+//! `api.json` is ~3 MB and changes rarely, so it is cached on disk and only
+//! re-fetched once a day. A stale cache still beats a failed request, so it is
+//! kept as the fallback when the network is down.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
 use super::{CatalogError, Result};
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+const CACHE_FILE: &str = "models-dev.json";
+const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+static MEMORY_CACHE: OnceLock<ModelsDevCatalog> = OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelsDevCatalog {
@@ -31,6 +42,9 @@ pub struct ModelMeta {
     pub cost_input: f64,
     /// USD per 1M output tokens (0 if unknown).
     pub cost_output: f64,
+    /// Priced at zero. Only true when the catalog actually carried a price —
+    /// a missing `cost` block means unknown, which is not the same as free.
+    pub free: bool,
 }
 
 impl ModelMeta {
@@ -98,9 +112,89 @@ struct RawCost {
     output: f64,
 }
 
+fn cache_path() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.cache_dir().join("hive").join(CACHE_FILE))
+}
+
+/// Cached body, plus whether it is still inside the TTL.
+fn read_cache() -> Option<(String, bool)> {
+    let path = cache_path()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .unwrap_or(CACHE_TTL);
+    let body = std::fs::read_to_string(&path).ok()?;
+    if body.is_empty() {
+        return None;
+    }
+    Some((body, age < CACHE_TTL))
+}
+
+fn write_cache(body: &str) {
+    let Some(path) = cache_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    // Write-then-rename so a killed process can't leave a truncated catalog
+    // that would poison every later start.
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 pub async fn fetch_models_dev() -> Result<ModelsDevCatalog> {
-    let client = reqwest::Client::new();
-    let resp = client
+    if let Some(catalog) = MEMORY_CACHE.get() {
+        return Ok(catalog.clone());
+    }
+
+    let cached = read_cache();
+    if let Some((body, fresh)) = &cached {
+        if *fresh {
+            if let Ok(catalog) = parse_models_dev_json(body) {
+                let _ = MEMORY_CACHE.set(catalog.clone());
+                return Ok(catalog);
+            }
+        }
+    }
+
+    let fetched = fetch_models_dev_body().await;
+    match fetched {
+        Ok(body) => {
+            let catalog = parse_models_dev_json(&body)?;
+            write_cache(&body);
+            let _ = MEMORY_CACHE.set(catalog.clone());
+            Ok(catalog)
+        }
+        // Offline or models.dev down: a stale catalog is far better than none.
+        Err(e) => match cached {
+            Some((body, _)) => {
+                let catalog = parse_models_dev_json(&body).map_err(|_| e)?;
+                let _ = MEMORY_CACHE.set(catalog.clone());
+                Ok(catalog)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Pre-fetch the models.dev catalog so the first `/model` open skips the
+/// network + parse. Spawn the returned future once at startup.
+pub async fn warm_cache() {
+    if MEMORY_CACHE.get().is_some() {
+        return;
+    }
+    let _ = fetch_models_dev().await;
+}
+
+async fn fetch_models_dev_body() -> Result<String> {
+    let resp = super::http::client()
         .get(MODELS_DEV_URL)
         .send()
         .await
@@ -116,7 +210,7 @@ pub async fn fetch_models_dev() -> Result<ModelsDevCatalog> {
             text.chars().take(200).collect::<String>()
         )));
     }
-    parse_models_dev_json(&text)
+    Ok(text)
 }
 
 pub(crate) fn parse_models_dev_json(text: &str) -> Result<ModelsDevCatalog> {
@@ -143,6 +237,10 @@ pub(crate) fn parse_models_dev_json(text: &str) -> Result<ModelsDevCatalog> {
                 max_output: raw.limit.as_ref().map(|l| l.output).unwrap_or(0),
                 cost_input: raw.cost.as_ref().map(|c| c.input).unwrap_or(0.0),
                 cost_output: raw.cost.as_ref().map(|c| c.output).unwrap_or(0.0),
+                free: raw
+                    .cost
+                    .as_ref()
+                    .is_some_and(|c| c.input == 0.0 && c.output == 0.0),
             };
             catalog.by_id.insert(id.clone(), meta.clone());
             map.insert(id, meta);

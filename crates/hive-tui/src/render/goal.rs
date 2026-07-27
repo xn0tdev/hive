@@ -109,6 +109,21 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     );
 }
 
+/// Which field sits under the pointer. Same two rows `draw` writes: objective
+/// two lines below the title, time limit under it.
+pub fn field_at(area: Rect, app: &App, col: u16, row: u16) -> Option<GoalField> {
+    app.goal_overlay.as_ref()?;
+    let g = geom(area);
+    if col < g.content.x || col >= g.content.right() {
+        return None;
+    }
+    match row.checked_sub(g.content.y + 2)? {
+        0 => Some(GoalField::Objective),
+        1 => Some(GoalField::TimeLimit),
+        _ => None,
+    }
+}
+
 struct Geom {
     win: Rect,
     content: Rect,

@@ -359,9 +359,14 @@ not delete broad trees unless the user explicitly named them."
 
 /// Block deletes that would wipe the workspace root or a parent of it.
 fn refuse_dangerous_delete(cwd: &Path, target: &Path) -> Option<String> {
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let target_disp = target.to_path_buf();
-    let target = target.canonicalize().unwrap_or(target_disp);
+    let cwd = match cwd.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return Some("cannot verify working directory — delete refused".into()),
+    };
+    let target = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return Some("cannot verify target path — delete refused".into()),
+    };
     if target == cwd {
         return Some("refusing to delete the working directory".into());
     }

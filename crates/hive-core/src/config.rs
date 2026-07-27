@@ -177,7 +177,7 @@ pub struct SwarmConfig {
 impl Default for SwarmConfig {
     fn default() -> Self {
         SwarmConfig {
-            max_concurrent: 200,
+            max_concurrent: 8,
             max_depth: 2,
         }
     }
@@ -248,6 +248,9 @@ pub struct UiConfig {
     /// click can't roll a file back.
     #[serde(default = "default_true")]
     pub tool_revert: bool,
+    /// Show tool-call cards in the transcript. Off hides them for a cleaner chat.
+    #[serde(default = "default_true")]
+    pub show_tool_cards: bool,
 }
 
 fn default_true() -> bool {
@@ -269,6 +272,7 @@ impl Default for UiConfig {
             sidebar_width: default_sidebar_width(),
             show_work_summary: true,
             tool_revert: true,
+            show_tool_cards: true,
         }
     }
 }

@@ -124,8 +124,9 @@ impl TerminalBuffer {
         }
 
         let excess = self.journal_bytes - self.journal_cap;
-        chunk.bytes.drain(..excess);
-        self.journal_bytes = self.journal_cap;
+        let drain_len = excess.min(chunk.bytes.len());
+        chunk.bytes.drain(..drain_len);
+        self.journal_bytes = self.journal_bytes.saturating_sub(drain_len);
         self.dropped_through_revision = self.dropped_through_revision.max(chunk.revision);
     }
 }

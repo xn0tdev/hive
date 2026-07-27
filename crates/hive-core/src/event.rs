@@ -201,8 +201,19 @@ pub enum AgentEvent {
         messages: Vec<crate::message::Message>,
         usage: crate::provider::Usage,
     },
+    /// The agent updated its task list (todo progress).
+    TodosUpdated {
+        items: Vec<TodoItem>,
+    },
     Error(String),
     TurnFinished,
+}
+
+/// One task in the agent's todo list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
 }
 
 /// One row in the live model catalog (grouped under `group`).

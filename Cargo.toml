@@ -18,7 +18,7 @@ thiserror = "2"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
 futures-util = "0.3"
 eventsource-stream = "0.2"
 inventory = "0.3"

@@ -173,12 +173,42 @@ impl PaletteState {
         let sel = self.selected.min(len - 1);
         let max_off = len.saturating_sub(vis);
         let mut off = self.list_offset.min(max_off);
-        if sel < off {
-            off = sel;
+        let anchor = self.scroll_anchor(choices, sel, vis);
+        if anchor < off {
+            off = anchor;
         } else if sel >= off + vis {
             off = sel + 1 - vis;
         }
         self.list_offset = off.min(max_off);
+    }
+
+    /// The topmost row that scrolling up to `sel` must reveal.
+    ///
+    /// Headers and spacers can never be selected, so stopping at the selection
+    /// leaves the group header above it permanently off-screen — the first
+    /// provider's name was unreachable no matter how far up you scrolled. They
+    /// belong to the row beneath them, so they come along.
+    fn scroll_anchor(&self, choices: &[ModelChoice], sel: usize, vis: usize) -> usize {
+        let mut anchor = sel;
+        match self.mode {
+            PaletteMode::Commands => {
+                let rows = self.command_rows();
+                while anchor > 0 && !rows[anchor - 1].is_selectable() {
+                    anchor -= 1;
+                }
+            }
+            PaletteMode::Models => {
+                let rows = self.model_rows(choices);
+                while anchor > 0 && !rows[anchor - 1].is_selectable() {
+                    anchor -= 1;
+                }
+            }
+            // Every row picks something — nothing to drag into view.
+            _ => {}
+        }
+        // A tall header block must never push the selection itself out the
+        // bottom of the viewport.
+        anchor.max(sel.saturating_sub(vis.saturating_sub(1)))
     }
 
     fn scroll_metrics(
@@ -397,6 +427,68 @@ impl PaletteState {
                 }
             }
         }
+    }
+
+    /// Whether `row` picks something (headers and spacers do not).
+    pub fn row_is_selectable(
+        &self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+        row: usize,
+    ) -> bool {
+        match self.mode {
+            PaletteMode::Commands => self
+                .command_rows()
+                .get(row)
+                .is_some_and(|r| r.is_selectable()),
+            PaletteMode::Models => self
+                .model_rows(choices)
+                .get(row)
+                .is_some_and(|r| r.is_selectable()),
+            PaletteMode::Connect => row < self.connect_rows(connections).len(),
+            PaletteMode::Sessions => row < self.session_rows(sessions).len(),
+            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => false,
+        }
+    }
+
+    /// Point the palette at `row` (mouse hover / click). Returns whether the
+    /// highlight moved; a header or an out-of-range row is left alone.
+    pub fn select_row(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+        row: usize,
+    ) -> bool {
+        if self.selected == row || !self.row_is_selectable(choices, connections, sessions, row) {
+            return false;
+        }
+        self.selected = row;
+        true
+    }
+
+    /// Scroll the viewport by `delta` rows without moving the highlight — the
+    /// wheel looks around, the keyboard picks.
+    pub fn scroll_list(
+        &mut self,
+        choices: &[ModelChoice],
+        connections: &[ConnectionInfo],
+        sessions: &[SessionMeta],
+        visible: usize,
+        delta: isize,
+    ) -> bool {
+        let (len, vis) = self.scroll_metrics(choices, connections, sessions, visible);
+        if len == 0 || vis == 0 {
+            return false;
+        }
+        let max_off = len.saturating_sub(vis);
+        let next = (self.list_offset as isize + delta).clamp(0, max_off as isize) as usize;
+        if next == self.list_offset {
+            return false;
+        }
+        self.list_offset = next;
+        true
     }
 
     pub fn move_up_visible(
@@ -721,5 +813,81 @@ mod tests {
             .collect();
         assert_eq!(headers, vec!["Fireworks", "Groq"]);
         assert_eq!(rows.iter().filter(|r| r.is_selectable()).count(), 3);
+    }
+
+    /// Scrolling back up used to stop at the first *model*, leaving the first
+    /// provider's header (`Fireworks`) permanently above the viewport.
+    #[test]
+    fn scrolling_up_reaches_the_first_group_header() {
+        let model = |key: &str, group: &str| ModelChoice {
+            key: key.into(),
+            display: key.into(),
+            detail: String::new(),
+            group: group.into(),
+            connection_id: group.to_ascii_lowercase(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        };
+        let mut choices = Vec::new();
+        for i in 0..6 {
+            choices.push(model(&format!("fw/{i}"), "Fireworks"));
+        }
+        for i in 0..6 {
+            choices.push(model(&format!("gq/{i}"), "Groq"));
+        }
+
+        let mut pal = PaletteState::models();
+        let vis = 5;
+        let rows = pal.model_rows(&choices);
+        assert!(matches!(rows[0], ModelRow::Header("Fireworks")));
+        let first = rows.iter().position(|r| r.is_selectable()).unwrap();
+
+        // Walk down past the viewport…
+        for _ in 0..8 {
+            pal.move_down_visible(&choices, &[], &[], vis);
+        }
+        assert!(
+            pal.visible_offset(&choices, &[], &[], vis) > 0,
+            "the list should have scrolled"
+        );
+
+        // …then back up to the very first model.
+        for _ in 0..40 {
+            if pal.selected == first {
+                break;
+            }
+            pal.move_up_visible(&choices, &[], &[], vis);
+        }
+        assert_eq!(pal.selected, first);
+        assert_eq!(
+            pal.visible_offset(&choices, &[], &[], vis),
+            0,
+            "the first header never scrolled into view"
+        );
+    }
+
+    /// The same trap in the command palette: the `Suggested` header sits above
+    /// the first command, so it has to come along too.
+    #[test]
+    fn scrolling_up_reaches_the_first_command_header() {
+        let mut pal = PaletteState::commands();
+        let vis = 4;
+        let first = commands::first_selectable(&pal.command_rows());
+
+        for _ in 0..8 {
+            pal.move_down_visible(&[], &[], &[], vis);
+        }
+        assert!(pal.visible_offset(&[], &[], &[], vis) > 0);
+
+        for _ in 0..40 {
+            if pal.selected == first {
+                break;
+            }
+            pal.move_up_visible(&[], &[], &[], vis);
+        }
+        assert_eq!(pal.selected, first);
+        assert_eq!(pal.visible_offset(&[], &[], &[], vis), 0);
     }
 }

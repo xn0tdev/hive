@@ -98,6 +98,30 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
+/// The panel rect, for telling a click on the overlay from one that dismisses it.
+pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
+    let st = app.settings.as_ref()?;
+    Some(geom(area, st).win)
+}
+
+/// Which settings row sits under the pointer.
+///
+/// Rows start two lines below the content top (title, then a blank), one per
+/// line — the same walk `draw` does, so the two can't disagree.
+pub fn row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let st = app.settings.as_ref()?;
+    let g = geom(area, st);
+    if col < g.content.x || col >= g.content.right() {
+        return None;
+    }
+    let first = g.content.y + 2;
+    if row < first || row >= g.content.bottom() {
+        return None;
+    }
+    let idx = usize::from(row - first);
+    (idx < st.len()).then_some(idx)
+}
+
 fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
     match st.page {
         // Root: label only — selection › is drawn on the left.
@@ -121,7 +145,10 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
             ),
             ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
         ],
-        SettingsPage::Tools => vec![("Revert file".into(), on_off(app.ui.tool_revert))],
+        SettingsPage::Tools => vec![
+            ("Show tool cards".into(), on_off(app.ui.show_tool_cards)),
+            ("Revert file".into(), on_off(app.ui.tool_revert)),
+        ],
     }
 }
 
@@ -143,7 +170,7 @@ fn geom(area: Rect, st: &SettingsState) -> Geom {
         SettingsPage::Root => 3,
         SettingsPage::Chat => 2,
         SettingsPage::Sidebar => 3,
-        SettingsPage::Tools => 1,
+        SettingsPage::Tools => 2,
     };
     let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);
     let h = (PAD_Y * 2 + 1 + 1 + rows as u16 + 1)
@@ -244,6 +271,10 @@ mod tests {
         assert!(shown.contains("Revert file"), "{shown}");
         assert!(shown.contains("on"), "starts enabled: {shown}");
 
+        // Row 1 is "Revert file" (row 0 is "Show tool cards").
+        if let Some(st) = a.settings.as_mut() {
+            st.selected = 1;
+        }
         assert!(activate(&mut a), "a toggle must be persisted");
         assert!(!a.ui.tool_revert);
         assert!(text(&mut a).contains("off"));

@@ -3,6 +3,8 @@
 //! instructions (the whole file) are returned by `read` when the agent pulls
 //! the skill in.
 
+pub mod inside;
+
 use std::path::PathBuf;
 
 use crate::skill::{SkillMeta, SkillSource};

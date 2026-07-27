@@ -3,13 +3,14 @@
 //! Chat streaming stays in `provider/`; discovery and capabilities live here.
 
 mod enrich;
+mod http;
 mod models_dev;
 mod provider_list;
 mod provider_meta;
 mod suggest;
 
 pub use enrich::{enrich_models, ModelCard};
-pub use models_dev::{fetch_models_dev, ModelsDevCatalog};
+pub use models_dev::{fetch_models_dev, warm_cache, ModelsDevCatalog};
 pub use provider_list::{list_provider_models, RemoteModel};
 pub use provider_meta::{models_dev_hint_for_base, provider_label_for_base};
 pub use suggest::{suggest_model, suggest_roles, RolePicks};

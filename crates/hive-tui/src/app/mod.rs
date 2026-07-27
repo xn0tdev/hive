@@ -152,6 +152,8 @@ pub struct PendingAttach {
     pub path: String,
     /// Set for image attachments (vision path unchanged).
     pub image: Option<ImageSource>,
+    /// UTF-8 content for text files (read at attach time).
+    pub content: Option<String>,
 }
 
 /// Follow-up typed while a turn is running — sent after `TurnFinished`.
@@ -262,12 +264,20 @@ pub struct App {
     pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
     /// Active goal state for the autonomous loop (footer + transcript card).
     pub(crate) goal: Option<goal::GoalStatus>,
+    /// Agent's self-managed task list (set_todos tool).
+    pub(crate) todos: Vec<hive_core::TodoItem>,
     /// Saved sessions for the `/resume` picker.
     pub(crate) saved_sessions: Vec<hive_core::SessionMeta>,
     /// Persisted UI prefs (`[ui]` in config.toml).
     pub(crate) ui: UiConfig,
     /// Selected row in the slash / `@file` menu.
     pub(crate) menu_index: usize,
+    /// Where the composer menu was last drawn, plus the item its first visible
+    /// row shows. `None` when no menu is on screen.
+    pub(crate) menu_hit: Option<(Rect, usize)>,
+    /// A mouse click asked to quit (clicking `/quit` in the slash menu). The
+    /// mouse handler reports redraws, not exits, so it parks the request here.
+    pub(crate) quit_requested: bool,
     /// Cached relative file paths for `@` mentions (lazy).
     pub(crate) file_index: Option<Vec<String>>,
     /// Short-lived status message shown in the footer (not the chat).
@@ -362,6 +372,10 @@ pub struct App {
     pub(crate) context_files: Vec<hive_core::ContextFile>,
     /// Visible list rows in the palette (last draw) — keeps keyboard selection in view.
     pub(crate) palette_list_visible: u16,
+    /// Frame rect the centered overlays were last laid out against. Their
+    /// geometry is a pure function of it, so mouse hit-testing re-derives
+    /// rather than caching a rect per row.
+    pub(crate) overlay_area: Rect,
     /// Centered context menu for the clicked transcript block.
     pub(crate) context_menu: Option<ContextMenu>,
     /// When the current turn started (for the "Worked for Nm" summary).
@@ -418,9 +432,12 @@ impl App {
             settings: None,
             goal_overlay: None,
             goal: None,
+            todos: Vec::new(),
             saved_sessions: Vec::new(),
             ui: init.ui.clone(),
             menu_index: 0,
+            menu_hit: None,
+            quit_requested: false,
             file_index: None,
             flash_msg: None,
             ctrl_c_armed: None,
@@ -466,6 +483,7 @@ impl App {
             sidebar_item_hits: Vec::new(),
             context_files: Vec::new(),
             palette_list_visible: 0,
+            overlay_area: Rect::new(0, 0, 0, 0),
             context_menu: None,
             turn_started_at: None,
         };
@@ -1649,6 +1667,49 @@ Keep everything else unless a note says otherwise.\n",
         self.menu_index = 0;
     }
 
+    /// How many rows the composer menu currently offers.
+    fn menu_len(&mut self) -> usize {
+        let slash = self.slash_items().len();
+        if slash > 0 {
+            slash
+        } else {
+            self.file_menu_items().len()
+        }
+    }
+
+    pub fn menu_contains(&self, col: u16, row: u16) -> bool {
+        self.menu_hit
+            .is_some_and(|(rect, _)| rect.contains(col, row))
+    }
+
+    /// Which menu item sits under the pointer, if any. The `↓ N more` footer
+    /// row is inside the panel but picks nothing, so it answers `None`.
+    pub fn menu_item_at(&mut self, col: u16, row: u16) -> Option<usize> {
+        let (rect, window) = self.menu_hit?;
+        if !rect.contains(col, row) {
+            return None;
+        }
+        let idx = window + usize::from(row - rect.y);
+        (idx < self.menu_len() && idx < window + crate::app::files::MAX_MENU_ROWS).then_some(idx)
+    }
+
+    /// Point the menu at `idx`. Returns whether anything moved.
+    pub fn set_menu_index(&mut self, idx: usize) -> bool {
+        if idx >= self.menu_len() || self.menu_index == idx {
+            return false;
+        }
+        self.menu_index = idx;
+        true
+    }
+
+    pub fn request_quit(&mut self) {
+        self.quit_requested = true;
+    }
+
+    pub fn take_quit_request(&mut self) -> bool {
+        std::mem::take(&mut self.quit_requested)
+    }
+
     pub fn scroll_up(&mut self, n: usize) {
         let next = self.scroll_from_bottom.saturating_add(n);
         self.scroll_from_bottom = next.min(self.transcript_max_scroll);
@@ -1961,6 +2022,7 @@ Keep everything else unless a note says otherwise.\n",
                 media_type: "image/png".into(),
                 data: base64_encode(&png),
             }),
+            content: None,
         });
         Ok(tag)
     }
@@ -1989,6 +2051,11 @@ Keep everything else unless a note says otherwise.\n",
         } else {
             None
         };
+        let content = if !is_image {
+            String::from_utf8(bytes).ok()
+        } else {
+            None
+        };
         let label = label.trim().trim_start_matches("./").to_string();
         let path = label.clone();
         let tag = format!("@{label}");
@@ -1997,8 +2064,12 @@ Keep everything else unless a note says otherwise.\n",
             return Ok(tag);
         }
         self.attach_selected = None;
-        self.pending_attaches
-            .push(PendingAttach { label, path, image });
+        self.pending_attaches.push(PendingAttach {
+            label,
+            path,
+            image,
+            content,
+        });
         Ok(tag)
     }
 
@@ -2661,7 +2732,8 @@ Keep everything else unless a note says otherwise.\n",
                 if let Some(g) = self.goal.as_mut() {
                     g.paused = true;
                 }
-                self.flash("Goal paused");
+                // Pausing on its own looks like a dead end — say what stops it.
+                self.flash("Goal paused — esc again to stop");
                 true
             }
             AgentEvent::GoalResumed => {
@@ -2766,6 +2838,21 @@ Keep everything else unless a note says otherwise.\n",
                 // total — the driver sends it right after this event.
                 self.scroll_from_bottom = 0;
                 self.flash(format!("Resumed: {title} ({msg_count} msgs)"));
+                true
+            }
+            AgentEvent::TodosUpdated { items } => {
+                if let Some(Block::Todos(existing)) = self
+                    .blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|b| matches!(b, Block::Todos(_)))
+                {
+                    *existing = items.clone();
+                } else {
+                    self.blocks.push(Block::Todos(items.clone()));
+                }
+                self.todos = items;
+                self.scroll_from_bottom = 0;
                 true
             }
             AgentEvent::Error(s) => {

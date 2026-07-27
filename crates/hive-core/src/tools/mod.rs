@@ -16,6 +16,7 @@ mod plan;
 mod shell;
 mod skill;
 mod terminal;
+mod todo;
 mod web;
 
 /// Build fresh instances of every registered tool, sorted by name.
@@ -33,7 +34,13 @@ pub fn all_tools() -> Vec<Arc<dyn Tool>> {
 /// A process-wide reqwest client shared by the networked tools (Exa, etc.).
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// Resolve a possibly-relative path against the agent's working directory.

@@ -193,6 +193,11 @@ Prefer doing work yourself unless an independent check clearly helps.\n\n",
         p.push_str(&format!(
             "If `{PLAN_REL_PATH}` exists, follow it unless the user asks otherwise.\n\n",
         ));
+        p.push_str("## Task tracking\n");
+        p.push_str(
+            "For multi-step work, read the `workflow` skill (`read_skill`) and follow it. \
+It describes how to plan, track tasks with `set_todos`, execute, and wrap up.\n\n",
+        );
         p.push_str("## Command access\n");
         p.push_str(
             "- You have workspace and computer access through the available file, search, and shell tools; \

@@ -325,15 +325,18 @@ impl IntroState {
         let (tx, rx) = oneshot::channel();
         self.fetch_rx = Some(rx);
         tokio::spawn(async move {
-            let listed = match list_provider_models(&base, &key).await {
+            // Independent requests — the models.dev catalog does not depend on
+            // the provider listing, so they fly together instead of back to back.
+            let (listed, catalog) =
+                tokio::join!(list_provider_models(&base, &key), fetch_models_dev());
+            let listed = match listed {
                 Ok(m) => m,
                 Err(e) => {
                     let _ = tx.send(Err(e.to_string()));
                     return;
                 }
             };
-            let catalog = fetch_models_dev().await.ok();
-            let cards = enrich_models(&listed, catalog.as_ref(), hint.as_deref());
+            let cards = enrich_models(&listed, catalog.ok().as_ref(), hint.as_deref());
             let _ = tx.send(Ok(cards));
         });
     }
@@ -1066,6 +1069,7 @@ mod step_tests {
             enriched: true,
             cost_input: 0.0,
             cost_output: 0.0,
+            free: false,
         }
     }
 

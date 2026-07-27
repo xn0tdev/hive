@@ -30,7 +30,7 @@ pub use config::{
 pub use error::{CoreError, Result};
 pub use event::{
     AgentEvent, CatalogModel, ConnectionInfo, EventReceiver, EventSender, Renderer, SubagentLine,
-    SubagentStatus,
+    SubagentStatus, TodoItem,
 };
 pub use message::{ContentPart, ImageSource, Message, Role, ToolCall};
 pub use provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
@@ -49,6 +49,7 @@ pub use agent::{
     AgentMode, ContextFile, FollowUpSlot, GoalState, Session, SessionMeta, SessionSnapshot,
     UserInput, PLAN_REL_PATH,
 };
+pub use skills::inside::{CompositeSkills, InsideSkills};
 pub use skills::DiskSkills;
 pub use swarm::new_spawner;
 pub use tools::all_tools;

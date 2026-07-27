@@ -41,18 +41,19 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
 }
 
-fn draw_slash(buf: &mut Buffer, area: Rect, app: &App) {
-    let theme = &app.theme;
+fn draw_slash(buf: &mut Buffer, area: Rect, app: &mut App) {
     let items = app.slash_items();
     if items.is_empty() {
         return;
     }
+    let theme = app.theme.clone();
     let selected = app.menu_index.min(items.len() - 1);
     let panel_bg = theme.strip;
     let w = area.width as usize;
     buf.paint(area, Style::default().bg(panel_bg));
 
     let window = window_start(selected, items.len(), MAX_MENU_ROWS);
+    app.menu_hit = Some((area, window));
     let visible = &items[window.min(items.len())..items.len().min(window + MAX_MENU_ROWS)];
 
     let name_w = visible
@@ -133,6 +134,7 @@ fn draw_files(buf: &mut Buffer, area: Rect, app: &mut App) {
 
     let selected = selected.min(items.len() - 1);
     let window = window_start(selected, items.len(), MAX_MENU_ROWS);
+    app.menu_hit = Some((area, window));
     let visible = &items[window.min(items.len())..items.len().min(window + MAX_MENU_ROWS)];
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len() + 1);
@@ -212,7 +214,7 @@ impl AddIf for Style {
 mod tests {
     use crate::app::App;
     use crate::TuiInit;
-    use comb::{render, Size};
+    use comb::{render, Modifier, Size};
 
     fn app() -> App {
         App::new(TuiInit {
@@ -249,6 +251,56 @@ mod tests {
         assert!(text.contains("/resume"), "{text}");
         assert!(text.contains("Browse and resume saved chats"), "{text}");
         assert!(!text.contains("[id]"), "argument hint must be gone: {text}");
+    }
+
+    /// The menu floats over the transcript. Bold markdown underneath used to
+    /// bleed through column by column, sprinkling bold letters across the
+    /// descriptions.
+    #[test]
+    fn descriptions_do_not_inherit_bold_from_the_transcript() {
+        let mut a = app();
+        for _ in 0..40 {
+            a.blocks.push(crate::app::state::Block::Assistant {
+                text: "**bold** words **everywhere** across **every** single row".into(),
+                streaming: false,
+            });
+        }
+        a.input.value = "/".into();
+        a.input.cursor = 1;
+        let descs: Vec<String> = a
+            .slash_items()
+            .iter()
+            .map(|it| it.desc().to_string())
+            .collect();
+        assert!(!descs.is_empty(), "menu should be open");
+
+        let buf = render(Size::new(90, 24), |f| crate::render::draw(f, &mut a));
+        let mut checked = 0;
+        for desc in &descs {
+            let n = desc.chars().count() as u16;
+            for y in 0..buf.height {
+                for x in 0..buf.width.saturating_sub(n) {
+                    let run: String = (0..n)
+                        .filter_map(|i| buf.get(x + i, y).map(|c| c.ch))
+                        .collect();
+                    if run != *desc {
+                        continue;
+                    }
+                    checked += 1;
+                    for i in 0..n {
+                        let cell = buf.get(x + i, y).unwrap();
+                        assert!(
+                            !cell.style.mods.contains(Modifier::BOLD),
+                            "'{}' of {desc:?} at ({}, {y}) came out bold",
+                            cell.ch,
+                            x + i
+                        );
+                    }
+                }
+            }
+        }
+        // Every visible row is worth checking — only some sit over bold text.
+        assert!(checked >= 8, "only {checked} descriptions rendered");
     }
 
     #[test]

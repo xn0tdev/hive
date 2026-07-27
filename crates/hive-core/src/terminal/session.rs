@@ -800,6 +800,9 @@ fn writer_loop(
 ) {
     while let Ok(command) = commands.recv() {
         let Some(session) = session.upgrade() else {
+            // Session dropped; the queued_writes counter leaks by the
+            // number of in-flight commands, but that is bounded by the
+            // channel capacity and will not grow unboundedly.
             break;
         };
         match command {

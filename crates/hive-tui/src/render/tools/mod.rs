@@ -11,6 +11,7 @@ mod plan_layout;
 mod strip;
 mod subagent_card;
 mod terminal_card;
+mod todo_card;
 pub(crate) mod tool_card;
 mod work_summary_card;
 
@@ -24,5 +25,6 @@ pub(crate) use plan_layout::{
 };
 pub(crate) use subagent_card::subagent_card_lines;
 pub(crate) use terminal_card::terminal_card_lines;
+pub(crate) use todo_card::todo_card_lines;
 pub(crate) use tool_card::{format_tool_secs, tool_lines};
 pub(crate) use work_summary_card::work_summary_card_lines;

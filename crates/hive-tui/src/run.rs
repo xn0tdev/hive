@@ -112,6 +112,11 @@ fn run_loop(
                     if handle_mouse(app, m, input_tx) {
                         dirty = true;
                     }
+                    // Clicking `/quit` in a menu exits; the mouse handler only
+                    // reports redraws, so the request is parked on the app.
+                    if app.take_quit_request() {
+                        break;
+                    }
                 }
                 Event::Resize(_, _) => {
                     // Size is applied inside `Terminal::draw` (clear + full
@@ -596,23 +601,11 @@ fn handle_key(
         KeyCode::Tab if !menu_open => {
             app.toggle_agent_mode();
         }
-        KeyCode::Enter if file_menu => {
-            complete_selected(app);
-            composer_activity = true;
-        }
-        KeyCode::Enter if slash_menu => {
-            // Commands with an argument get completed; the rest run at once.
-            if let Some(item) = app.menu_selected() {
-                if item.takes_arg() {
-                    complete_selected(app);
-                    composer_activity = true;
-                } else {
-                    app.input.take();
-                    app.reset_menu();
-                    return handle_slash(app, item.name(), input_tx);
-                }
-            }
-        }
+        KeyCode::Enter if file_menu || slash_menu => match activate_menu_selection(app, input_tx) {
+            MenuPick::Ran { quit } => return quit,
+            MenuPick::Completed => composer_activity = true,
+            MenuPick::Empty => {}
+        },
         KeyCode::Enter => {
             // Enter sends; Shift/Alt/Ctrl+Enter insert a newline.
             // (`\n` parses as Enter+SHIFT; kitty/xterm send CSI with mods.)
@@ -712,9 +705,18 @@ fn handle_key(
             } else if app.clear_follow_up() {
                 composer_activity = true;
             } else if app.running {
+                // Interrupting only ends the current turn — an active goal would
+                // start the next one right back up, so pause it on the way out.
+                if app.goal_active() && !app.goal_paused() {
+                    let _ = input_tx.send(InputCommand::PauseGoal);
+                }
                 // Stop the turn. The agent reports "Interrupted." in the chat
                 // only once it has actually stopped.
                 interrupt.store(true, Ordering::Relaxed);
+            } else if app.goal_active() && !app.goal_paused() {
+                let _ = input_tx.send(InputCommand::PauseGoal);
+            } else if app.goal_paused() {
+                let _ = input_tx.send(InputCommand::StopGoal);
             } else {
                 app.blur_input();
             }
@@ -756,8 +758,32 @@ fn handle_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand
             _ => false,
         };
     }
-    if app.about_open() || app.palette_open() || app.settings_open() {
+    if app.palette_open() {
+        return handle_palette_mouse(app, m, input_tx);
+    }
+    if app.settings_open() {
+        return handle_settings_mouse(app, m, input_tx);
+    }
+    if app.goal_overlay_open() {
+        return handle_goal_mouse(app, m);
+    }
+    if app.about_open() {
+        // Nothing to pick on the card — clicking off it is the only gesture.
+        if !matches!(m.kind, MouseKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let inside = render::about::window_rect(app.overlay_area, app)
+            .is_some_and(|win| win.contains(m.col, m.row));
+        if !inside && overlay_is_painted(app) {
+            app.close_about();
+            return true;
+        }
         return false;
+    }
+    // The composer menu is on top of the transcript, so it gets first refusal
+    // on anything inside its panel.
+    if app.menu_contains(m.col, m.row) {
+        return handle_menu_mouse(app, m, input_tx);
     }
     match m.kind {
         MouseKind::ScrollUp => {
@@ -1289,7 +1315,14 @@ fn prepare_user_message(app: &mut App, text: String, trimmed: String) -> Option<
     let file_notes: Vec<String> = attaches
         .iter()
         .filter(|a| a.image.is_none())
-        .map(|a| format!("[Attached file: {}]", a.path))
+        .map(|a| match &a.content {
+            Some(content) => format!(
+                "[Attached file: {}]\n```\n{}\n```",
+                a.path,
+                truncate_attach(content)
+            ),
+            None => format!("[Attached file: {}]", a.path),
+        })
         .collect();
 
     let display = match (tags.is_empty(), trimmed.is_empty()) {
@@ -1315,6 +1348,20 @@ fn prepare_user_message(app: &mut App, text: String, trimmed: String) -> Option<
         attaches,
         mode: app.agent_mode,
     })
+}
+
+/// Cap attached file content so a huge file can't blow up the context.
+const ATTACH_MAX_CHARS: usize = 100_000;
+
+fn truncate_attach(content: &str) -> &str {
+    if content.len() <= ATTACH_MAX_CHARS {
+        return content;
+    }
+    let mut end = ATTACH_MAX_CHARS;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
 }
 
 /// Deferred dispatch: push the user block now but hold the driver send for a
@@ -1775,6 +1822,220 @@ fn handle_palette_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputC
         _ => {}
     }
     false
+}
+
+/// Mouse inside the `/` or `@` composer menu: hover highlights, click picks,
+/// wheel walks the list. Everything else in the panel is swallowed so a stray
+/// click can't reach the transcript underneath.
+fn handle_menu_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    match m.kind {
+        MouseKind::Moved => app
+            .menu_item_at(m.col, m.row)
+            .is_some_and(|idx| app.set_menu_index(idx)),
+        MouseKind::ScrollUp => {
+            app.menu_up();
+            true
+        }
+        MouseKind::ScrollDown => {
+            app.menu_down();
+            true
+        }
+        MouseKind::Down(MouseButton::Left) => {
+            let Some(idx) = app.menu_item_at(m.col, m.row) else {
+                // The `↓ N more` footer — a click there shouldn't run anything.
+                return false;
+            };
+            app.set_menu_index(idx);
+            if let MenuPick::Ran { quit: true } = activate_menu_selection(app, input_tx) {
+                app.request_quit();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// What accepting the composer menu's highlighted row did.
+enum MenuPick {
+    /// Nothing was highlighted.
+    Empty,
+    /// The row was completed into the composer.
+    Completed,
+    /// A command ran; `quit` says whether it asked to exit.
+    Ran { quit: bool },
+}
+
+/// Accept whatever the composer menu is pointing at. Shared by Enter and the
+/// mouse so the two can't drift.
+fn activate_menu_selection(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> MenuPick {
+    if app.slash_items().is_empty() {
+        complete_selected(app);
+        return MenuPick::Completed;
+    }
+    let Some(item) = app.menu_selected() else {
+        return MenuPick::Empty;
+    };
+    // Commands with an argument get completed; the rest run at once.
+    if item.takes_arg() {
+        complete_selected(app);
+        return MenuPick::Completed;
+    }
+    app.input.take();
+    app.reset_menu();
+    MenuPick::Ran {
+        quit: handle_slash(app, item.name(), input_tx),
+    }
+}
+
+/// Whether a frame has been painted, so the centered overlays have geometry to
+/// hit-test against. Guessing before that would dismiss them on a stray event.
+fn overlay_is_painted(app: &App) -> bool {
+    app.overlay_area.width > 0 && app.overlay_area.height > 0
+}
+
+/// Mouse over the Settings overlay: hover highlights, click opens a page or
+/// flips a toggle, wheel walks the rows, and a click off the panel closes it.
+fn handle_settings_mouse(
+    app: &mut App,
+    m: Mouse,
+    input_tx: &UnboundedSender<InputCommand>,
+) -> bool {
+    if !overlay_is_painted(app) {
+        return false;
+    }
+    let area = app.overlay_area;
+    let row = render::settings::row_at(area, app, m.col, m.row);
+
+    match m.kind {
+        MouseKind::Moved => {
+            let Some(row) = row else { return false };
+            let Some(st) = app.settings.as_mut() else {
+                return false;
+            };
+            if st.selected == row {
+                return false;
+            }
+            st.selected = row;
+            true
+        }
+        MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            let Some(st) = app.settings.as_mut() else {
+                return false;
+            };
+            if matches!(m.kind, MouseKind::ScrollUp) {
+                st.move_up();
+            } else {
+                st.move_down();
+            }
+            true
+        }
+        MouseKind::Down(MouseButton::Left) => {
+            if let Some(row) = row {
+                if let Some(st) = app.settings.as_mut() {
+                    st.selected = row;
+                }
+                // Drilling into a page changes nothing to save; a toggle does.
+                if crate::app::settings::activate(app) {
+                    let _ = input_tx.send(InputCommand::SaveUi(app.ui.clone()));
+                }
+                return true;
+            }
+            let inside = render::settings::window_rect(area, app)
+                .is_some_and(|win| win.contains(m.col, m.row));
+            if !inside {
+                app.close_settings();
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Mouse over the `/goal` form: click a field to put the caret in it. The
+/// overlay holds typed text, so a click off it is swallowed rather than
+/// throwing that away.
+fn handle_goal_mouse(app: &mut App, m: Mouse) -> bool {
+    if !overlay_is_painted(app) {
+        return false;
+    }
+    if !matches!(m.kind, MouseKind::Down(MouseButton::Left)) {
+        return false;
+    }
+    let Some(field) = render::goal::field_at(app.overlay_area, app, m.col, m.row) else {
+        return false;
+    };
+    let Some(st) = app.goal_overlay.as_mut() else {
+        return false;
+    };
+    if st.focus == field {
+        return false;
+    }
+    st.focus = field;
+    true
+}
+
+/// Mouse over the palette overlay: hover highlights, click picks, wheel scrolls,
+/// and a click outside the panel dismisses it.
+fn handle_palette_mouse(app: &mut App, m: Mouse, input_tx: &UnboundedSender<InputCommand>) -> bool {
+    let area = app.overlay_area;
+    // Opened but not painted yet — there is no geometry to hit-test against,
+    // and guessing would dismiss the overlay on the first stray event.
+    if area.width == 0 || area.height == 0 {
+        return false;
+    }
+    let choices = app.model_choices.clone();
+    let connections = app.connections.clone();
+    let sessions = app.saved_sessions.clone();
+    let visible = app.palette_list_visible as usize;
+    let row = render::palette::row_at(area, app, m.col, m.row);
+
+    match m.kind {
+        MouseKind::Moved => {
+            let Some(row) = row else { return false };
+            app.palette
+                .as_mut()
+                .is_some_and(|pal| pal.select_row(&choices, &connections, &sessions, row))
+        }
+        MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            let delta = if matches!(m.kind, MouseKind::ScrollUp) {
+                -3
+            } else {
+                3
+            };
+            app.palette.as_mut().is_some_and(|pal| {
+                pal.scroll_list(&choices, &connections, &sessions, visible, delta)
+            })
+        }
+        MouseKind::Down(MouseButton::Left) => {
+            if let Some(row) = row {
+                let picked = app
+                    .palette
+                    .as_mut()
+                    .map(|pal| {
+                        pal.select_row(&choices, &connections, &sessions, row);
+                        pal.row_is_selectable(&choices, &connections, &sessions, row)
+                    })
+                    .unwrap_or(false);
+                if picked {
+                    if activate_palette(app, input_tx) {
+                        app.request_quit();
+                    }
+                    return true;
+                }
+                // A group header — highlight nothing, swallow the click.
+                return true;
+            }
+            let inside = render::palette::window_rect(area, app)
+                .is_some_and(|win| win.contains(m.col, m.row));
+            if !inside {
+                app.close_palette();
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
@@ -2816,6 +3077,93 @@ mod tests {
         }
     }
 
+    fn with_goal(app: &mut App) {
+        app.goal = Some(crate::app::goal::GoalStatus {
+            objective: "keep going".into(),
+            deadline: None,
+            paused: false,
+            circle: 0,
+        });
+        app.focus_input();
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputCommand>) -> Vec<InputCommand> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// Esc from the composer — the normal place to press it — never reached the
+    /// goal, so the loop just started the next turn again.
+    #[test]
+    fn esc_pauses_then_stops_the_goal() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        with_goal(&mut app);
+
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|c| matches!(c, InputCommand::PauseGoal)),
+            "first esc pauses"
+        );
+
+        // The driver answers by flipping the flag; mirror that here.
+        if let Some(g) = app.goal.as_mut() {
+            g.paused = true;
+        }
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|c| matches!(c, InputCommand::StopGoal)),
+            "second esc stops"
+        );
+    }
+
+    /// Mid-turn, Esc has to do both: end the turn and stop the loop from
+    /// starting another one.
+    #[test]
+    fn esc_during_a_goal_turn_interrupts_and_pauses() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        with_goal(&mut app);
+        app.running = true;
+
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert!(
+            interrupt.load(Ordering::Relaxed),
+            "the turn was interrupted"
+        );
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|c| matches!(c, InputCommand::PauseGoal)),
+            "and the goal was paused"
+        );
+    }
+
+    /// Typed text still wins the first Esc — the ladder is unchanged.
+    #[test]
+    fn esc_clears_the_composer_before_touching_the_goal() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        with_goal(&mut app);
+        app.input.value = "half-typed".into();
+        app.input.cursor = 10;
+
+        assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
+        assert_eq!(app.input.value, "");
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|c| matches!(c, InputCommand::PauseGoal)),
+            "the goal is not touched while there is text to clear"
+        );
+    }
+
     #[test]
     fn palette_esc_closes() {
         let mut app = test_app();
@@ -2847,22 +3195,359 @@ mod tests {
         assert!(!app.palette_open());
     }
 
+    fn click(col: u16, row: u16) -> Mouse {
+        Mouse {
+            kind: MouseKind::Down(MouseButton::Left),
+            col,
+            row,
+        }
+    }
+
+    fn moved(col: u16, row: u16) -> Mouse {
+        Mouse {
+            kind: MouseKind::Moved,
+            col,
+            row,
+        }
+    }
+
+    /// Paint a frame so the overlays have real geometry to hit-test against.
+    fn lay_out(app: &mut App) -> comb::Rect {
+        let size = comb::Size::new(90, 30);
+        let _ = comb::render(size, |f| render::draw(f, app));
+        comb::Rect::new(0, 0, size.width, size.height)
+    }
+
+    /// Before the first paint there is no geometry, so the mouse must not guess.
     #[test]
-    fn overlay_mouse_is_ignored() {
+    fn palette_mouse_waits_for_a_frame() {
         let mut app = test_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.open_palette();
-        assert!(!handle_mouse(
+        assert!(!handle_mouse(&mut app, click(0, 0), &tx));
+        assert!(
+            app.palette_open(),
+            "an unpainted palette can't be dismissed"
+        );
+    }
+
+    #[test]
+    fn clicking_away_from_the_palette_closes_it() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        let area = lay_out(&mut app);
+        let win = render::palette::window_rect(area, &app).expect("panel");
+        assert!(!win.contains(0, 0), "probe must be outside the panel");
+
+        assert!(handle_mouse(&mut app, click(0, 0), &tx));
+        assert!(!app.palette_open());
+    }
+
+    #[test]
+    fn hovering_the_palette_moves_the_highlight() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        let area = lay_out(&mut app);
+
+        // Find a row the pointer can actually land on.
+        let win = render::palette::window_rect(area, &app).expect("panel");
+        let before = app.palette.as_ref().unwrap().selected;
+        let mut moved_to = None;
+        for row in win.y..win.bottom() {
+            let Some(idx) = render::palette::row_at(area, &app, win.x + 2, row) else {
+                continue;
+            };
+            let selectable = app.palette.as_ref().unwrap().row_is_selectable(
+                &app.model_choices,
+                &app.connections,
+                &app.saved_sessions,
+                idx,
+            );
+            if selectable && idx != before {
+                handle_mouse(&mut app, moved(win.x + 2, row), &tx);
+                moved_to = Some(idx);
+                break;
+            }
+        }
+        let moved_to = moved_to.expect("a selectable row under the pointer");
+        assert_eq!(app.palette.as_ref().unwrap().selected, moved_to);
+        assert!(app.palette_open(), "hover must not activate anything");
+    }
+
+    /// Hovering a provider header should do nothing — it picks nothing.
+    #[test]
+    fn palette_headers_do_not_take_the_highlight() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_palette();
+        let area = lay_out(&mut app);
+        let win = render::palette::window_rect(area, &app).expect("panel");
+
+        for row in win.y..win.bottom() {
+            let Some(idx) = render::palette::row_at(area, &app, win.x + 2, row) else {
+                continue;
+            };
+            let selectable = app.palette.as_ref().unwrap().row_is_selectable(
+                &app.model_choices,
+                &app.connections,
+                &app.saved_sessions,
+                idx,
+            );
+            if selectable {
+                continue;
+            }
+            let before = app.palette.as_ref().unwrap().selected;
+            handle_mouse(&mut app, moved(win.x + 2, row), &tx);
+            assert_eq!(
+                app.palette.as_ref().unwrap().selected,
+                before,
+                "header row {idx} stole the highlight"
+            );
+            return;
+        }
+    }
+
+    /// Open the `/` menu and paint it, returning its panel rect and the item
+    /// its first row shows.
+    fn open_slash_menu(app: &mut App, typed: &str) -> (comb::Rect, usize) {
+        app.input.value = typed.to_string();
+        app.input.cursor = typed.chars().count();
+        assert!(!app.slash_items().is_empty(), "menu should be open");
+        lay_out(app);
+        app.menu_hit.expect("menu was drawn")
+    }
+
+    #[test]
+    fn hovering_the_slash_menu_moves_the_highlight() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rect, window) = open_slash_menu(&mut app, "/");
+
+        assert!(handle_mouse(&mut app, moved(rect.x + 2, rect.y + 2), &tx));
+        assert_eq!(app.menu_index, window + 2);
+    }
+
+    /// A command that takes an argument is completed into the composer, exactly
+    /// as Enter would.
+    #[test]
+    fn clicking_a_slash_row_with_an_argument_completes_it() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rect, window) = open_slash_menu(&mut app, "/goal");
+        let item = app.slash_items()[window].clone();
+        assert_eq!(item.name(), "goal");
+        assert!(item.takes_arg());
+
+        assert!(handle_mouse(&mut app, click(rect.x + 2, rect.y), &tx));
+        assert_eq!(app.input.value, "/goal ");
+    }
+
+    /// A command that takes none runs on the click.
+    #[test]
+    fn clicking_a_slash_row_runs_it() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rect, window) = open_slash_menu(&mut app, "/resume");
+        assert_eq!(app.slash_items()[window].name(), "resume");
+
+        assert!(handle_mouse(&mut app, click(rect.x + 2, rect.y), &tx));
+        assert_eq!(app.input.value, "", "the composer is consumed");
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::Sessions),
+            "the command actually ran"
+        );
+    }
+
+    /// The `↓ N more` footer sits inside the panel but picks nothing.
+    #[test]
+    fn clicking_the_more_row_does_nothing() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rect, _) = open_slash_menu(&mut app, "/");
+        assert!(
+            app.slash_items().len() > crate::app::files::MAX_MENU_ROWS,
+            "need an overflowing menu for this test"
+        );
+
+        let footer = rect.y + crate::app::files::MAX_MENU_ROWS as u16;
+        let before = app.input.value.clone();
+        assert!(!handle_mouse(&mut app, click(rect.x + 2, footer), &tx));
+        assert_eq!(app.input.value, before);
+    }
+
+    /// A click on the menu must not fall through to the transcript underneath.
+    #[test]
+    fn the_slash_menu_swallows_clicks() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rect, _) = open_slash_menu(&mut app, "/");
+        app.focus_input();
+
+        handle_mouse(&mut app, click(rect.x + 2, rect.y), &tx);
+        assert!(
+            app.menu_hit.is_some() || !app.input.value.is_empty() || !app.input_focused,
+            "click reached the chat underneath"
+        );
+    }
+
+    /// Row rect for a settings row, so tests click where `draw` actually paints.
+    fn settings_row_xy(app: &App, idx: usize) -> (u16, u16) {
+        let area = app.overlay_area;
+        let win = render::settings::window_rect(area, app).expect("panel");
+        for row in win.y..win.bottom() {
+            if render::settings::row_at(area, app, win.x + 2, row) == Some(idx) {
+                return (win.x + 2, row);
+            }
+        }
+        panic!("row {idx} is not on screen");
+    }
+
+    #[test]
+    fn clicking_a_settings_row_opens_its_page() {
+        use crate::app::settings::SettingsPage;
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_settings();
+        lay_out(&mut app);
+
+        // Root row 2 is Tools.
+        let (col, row) = settings_row_xy(&app, 2);
+        assert!(handle_mouse(&mut app, click(col, row), &tx));
+        assert_eq!(
+            app.settings.as_ref().map(|s| s.page),
+            Some(SettingsPage::Tools)
+        );
+    }
+
+    /// The pages behind the root menu are where the mouse was dead.
+    #[test]
+    fn clicking_a_row_on_a_nested_page_toggles_it() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_settings();
+        if let Some(st) = app.settings.as_mut() {
+            st.enter_tools();
+        }
+        lay_out(&mut app);
+        let before = app.ui.tool_revert;
+
+        // Row 1 is "Revert file" (row 0 is "Show tool cards").
+        let (col, row) = settings_row_xy(&app, 1);
+        assert!(handle_mouse(&mut app, click(col, row), &tx));
+        assert_eq!(app.ui.tool_revert, !before, "the toggle flipped");
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, InputCommand::SaveUi(_))),
+            "a changed setting must be persisted"
+        );
+    }
+
+    #[test]
+    fn hovering_settings_moves_the_highlight() {
+        use crate::app::settings::SettingsPage;
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_settings();
+        lay_out(&mut app);
+        assert_eq!(app.settings.as_ref().unwrap().selected, 0);
+
+        let (col, row) = settings_row_xy(&app, 1);
+        assert!(handle_mouse(&mut app, moved(col, row), &tx));
+        assert_eq!(app.settings.as_ref().unwrap().selected, 1);
+        assert_eq!(
+            app.settings.as_ref().map(|s| s.page),
+            Some(SettingsPage::Root),
+            "hover must not open anything"
+        );
+    }
+
+    #[test]
+    fn clicking_away_from_settings_closes_it() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_settings();
+        let area = lay_out(&mut app);
+        let win = render::settings::window_rect(area, &app).expect("panel");
+        assert!(!win.contains(0, 0));
+
+        assert!(handle_mouse(&mut app, click(0, 0), &tx));
+        assert!(!app.settings_open());
+    }
+
+    #[test]
+    fn clicking_a_goal_field_focuses_it() {
+        use crate::app::goal::GoalField;
+
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_goal_overlay();
+        let area = lay_out(&mut app);
+        assert_eq!(
+            app.goal_overlay.as_ref().unwrap().focus,
+            GoalField::Objective
+        );
+
+        // Find the time-limit row and click it.
+        let mut hit = None;
+        for row in area.y..area.bottom() {
+            if render::goal::field_at(area, &app, area.x + area.width / 2, row)
+                == Some(GoalField::TimeLimit)
+            {
+                hit = Some(row);
+                break;
+            }
+        }
+        let row = hit.expect("time limit row");
+        assert!(handle_mouse(
             &mut app,
-            Mouse {
-                kind: MouseKind::Down(MouseButton::Left),
-                col: 0,
-                row: 0,
-            },
+            click(area.x + area.width / 2, row),
             &tx
         ));
-        assert!(app.palette_open());
-        app.close_palette();
+        assert_eq!(
+            app.goal_overlay.as_ref().unwrap().focus,
+            GoalField::TimeLimit
+        );
+    }
+
+    /// Typed text must survive a stray click off the goal panel.
+    #[test]
+    fn clicking_away_from_the_goal_form_keeps_it_open() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_goal_overlay();
+        lay_out(&mut app);
+        if let Some(st) = app.goal_overlay.as_mut() {
+            st.objective = "ship the thing".into();
+        }
+
+        assert!(!handle_mouse(&mut app, click(0, 0), &tx));
+        assert!(app.goal_overlay_open());
+        assert_eq!(
+            app.goal_overlay.as_ref().unwrap().objective,
+            "ship the thing"
+        );
+    }
+
+    #[test]
+    fn clicking_away_from_about_closes_it() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_about();
+        let area = lay_out(&mut app);
+        let win = render::about::window_rect(area, &app).expect("card");
+        assert!(!win.contains(0, 0));
+
+        assert!(handle_mouse(&mut app, click(0, 0), &tx));
+        assert!(!app.about_open());
+    }
+
+    #[test]
+    fn about_overlay_still_ignores_the_mouse() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.open_about();
         assert!(!handle_mouse(
             &mut app,
