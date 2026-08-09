@@ -33,8 +33,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         app.set_transcript_max_scroll(0);
         return;
     }
-    // Clear the whole transcript band so scroll / shorter lines never leave
-    // stale glyphs in vacated cells.
+    // Clear the whole transcript band, including the single top inset, so
+    // scroll / shorter lines never leave stale glyphs in vacated cells.
     buf.paint(area, Style::default());
 
     let width = area.width.max(1) as usize;
@@ -45,8 +45,14 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     app.assistant_selection_width = content_width;
     let (all, heads, assistant_rows) = build(app, width);
     let total = all.len();
-    // Flush with the top edge — the first message shouldn't sit under a gap.
-    let target = area;
+    // One intentional row of breathing room above the conversation. Block
+    // separators are handled independently, so Welcome cannot turn this into
+    // two rows.
+    let target = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
     let viewport = target.height as usize;
     let max_scroll = total.saturating_sub(viewport);
     app.set_transcript_max_scroll(max_scroll);
@@ -1018,12 +1024,12 @@ mod tests {
     }
 
     #[test]
-    fn the_first_message_starts_at_the_top_edge() {
+    fn active_chat_has_exactly_one_top_inset() {
         use comb::{render, Size};
 
         let mut a = app();
-        // Keep the initial invisible Welcome block: it must not reserve a row
-        // once the landing screen turns into an active chat.
+        // Keep the initial invisible Welcome block: only the intentional
+        // viewport inset may reserve a row above the active chat.
         a.push_user("first message".into());
 
         let buf = render(Size::new(70, 14), |f| crate::render::draw(f, &mut a));
@@ -1032,19 +1038,25 @@ mod tests {
             .lines()
             .position(|l| l.contains("first message"))
             .expect("user message");
-        // Row 0 is the message strip's own padding, not a gap above it.
-        assert_eq!(row, 1, "no blank row above the first message");
+        // Row 0 is the one layout inset; row 1 already belongs to the user
+        // strip. An invisible Welcome must not add another row between them.
+        assert_eq!(row, 2, "exactly one row above the message band");
         // The chat column is centred, so sample inside it, not in the margin.
         let x = buf
             .text()
             .lines()
-            .nth(1)
+            .nth(2)
             .and_then(|l| l.find("first message"))
             .expect("column") as u16;
         assert_eq!(
             buf.get(x, 0).and_then(|c| c.style.bg),
+            None,
+            "the top row is the single blank layout inset"
+        );
+        assert_eq!(
+            buf.get(x, 1).and_then(|c| c.style.bg),
             Some(a.theme.user_strip),
-            "the top row belongs to the message band, not a gap"
+            "the next row already belongs to the message band"
         );
     }
 
