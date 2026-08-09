@@ -96,6 +96,7 @@ fn assistant_line_text(line: &Line) -> String {
         .collect();
     rendered
         .strip_prefix("  ")
+        .or_else(|| rendered.strip_prefix("│ "))
         .unwrap_or(rendered.as_str())
         .to_string()
 }
@@ -862,9 +863,18 @@ fn indent(lines: Vec<Line>) -> Vec<Line> {
     lines
         .into_iter()
         .map(|mut l| {
-            let pad = match indent_fill_bg(&l) {
-                Some(bg) => Span::styled("  ", Style::default().bg(bg)),
-                None => Span::raw("  "),
+            let code_marker = markdown::code_line_marker(&l);
+            if code_marker.is_some() {
+                l.spans.remove(0);
+            }
+            let pad = match code_marker {
+                Some(marker) => {
+                    Span::styled("│ ", Style::default().fg(marker.fg.unwrap_or(Color::Reset)))
+                }
+                None => match indent_fill_bg(&l) {
+                    Some(bg) => Span::styled("  ", Style::default().bg(bg)),
+                    None => Span::raw("  "),
+                },
             };
             l.spans.insert(0, pad);
             l
@@ -874,41 +884,21 @@ fn indent(lines: Vec<Line>) -> Vec<Line> {
 
 /// Background for the 2-col assistant gutter, if any.
 ///
-/// Full-line code fences / table chrome keep a continuous band into the gutter.
-/// Inline `code` chips must not — especially after a wrap, when the next row
-/// *starts* with a chip (first-span inheritance painted a gray gutter blob).
+/// Table chrome may carry its surface into the assistant gutter. Inline `code`
+/// chips must not — especially after a wrap, when the next row starts with one.
 fn indent_fill_bg(line: &Line) -> Option<Color> {
     let plain: String = line.spans.iter().map(|s| s.content.as_str()).collect();
     let table_chrome = plain.starts_with('┌')
         || plain.starts_with('└')
         || plain.starts_with('├')
         || plain.starts_with('│');
-    // Fence body: left-padded `  {tokens…}` with `code_bg` on every span
-    // (syntax highlight → many spans). Inline chips use a single pad space.
-    let fence_body = is_code_fence_body(line, &plain);
-    if !table_chrome && !fence_body {
+    if !table_chrome {
         return None;
     }
     line.spans
         .iter()
         .find(|s| !s.content.is_empty())
         .and_then(|s| s.style.bg)
-}
-
-fn is_code_fence_body(line: &Line, _plain: &str) -> bool {
-    // Code fence body: every non-empty span shares the same bg color.
-    let mut bg: Option<Color> = None;
-    for s in &line.spans {
-        if s.content.is_empty() {
-            continue;
-        }
-        match (bg, s.style.bg) {
-            (None, Some(c)) => bg = Some(c),
-            (Some(expected), Some(c)) if c == expected => {}
-            _ => return false,
-        }
-    }
-    bg.is_some()
 }
 
 fn push_caret(lines: &mut Vec<Line>, color: Color) {
@@ -1495,6 +1485,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn assistant_code_fence_is_a_clean_rail_and_copies_without_it() {
+        use crate::app::state::Block;
+        use comb::{render, Size};
+
+        let mut a = app();
+        a.blocks.clear();
+        a.blocks.push(Block::Assistant {
+            text: "```rust\nfn main() {}\n```".into(),
+            streaming: false,
+        });
+
+        let buf = render(Size::new(80, 16), |f| crate::render::draw(f, &mut a));
+        let hit = a
+            .assistant_row_hits
+            .iter()
+            .find(|hit| hit.text.contains("fn main"))
+            .cloned()
+            .expect("code row");
+
+        assert_eq!(hit.text, "fn main() {}");
+        assert_eq!(
+            buf.get(hit.x - 2, hit.screen_row).map(|cell| cell.ch),
+            Some('│')
+        );
+        assert!(
+            (hit.x..hit.x + hit.text.len() as u16).all(|x| {
+                buf.get(x, hit.screen_row)
+                    .is_some_and(|cell| cell.style.bg != Some(a.theme.code_bg))
+            }),
+            "the code body must not be painted as a rectangular slab"
+        );
+
+        assert!(a.start_assistant_selection(hit.x, hit.screen_row));
+        assert!(a.update_assistant_selection(hit.x + hit.text.len() as u16 - 1, hit.screen_row,));
+        assert_eq!(
+            a.finish_assistant_selection(hit.x + hit.text.len() as u16 - 1, hit.screen_row,)
+                .as_deref(),
+            Some("fn main() {}")
+        );
     }
 
     #[test]

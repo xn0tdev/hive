@@ -5,6 +5,8 @@
 use comb::{Line, Span, Style};
 use unicode_width::UnicodeWidthChar;
 
+use crate::render::markdown;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WrapJoin {
     Hard,
@@ -29,8 +31,8 @@ pub fn wrap_lines_with_joins(lines: Vec<Line>, width: usize) -> Vec<WrappedLine>
     let width = width.max(1);
     let mut out = Vec::new();
     for line in lines {
-        // Keep markdown tables / fenced code intact — wrapping tables leaves
-        // orphan `│` / `└` glyphs, and wrapping code breaks the solid bg band.
+        // Keep markdown tables / preformatted code intact. Wrapping tables
+        // leaves orphan chrome, while wrapping source changes its meaning.
         let plain: String = line.spans.iter().map(|s| s.content.as_str()).collect();
         let is_tableish = plain.contains('│')
             || plain.starts_with('┌')
@@ -42,7 +44,7 @@ pub fn wrap_lines_with_joins(lines: Vec<Line>, width: usize) -> Vec<WrappedLine>
                 && plain.chars().all(|c| {
                     matches!(c, '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
                 }));
-        let is_code_fence = is_code_fence_line(&line, &plain);
+        let is_code_fence = markdown::code_line_marker(&line).is_some();
         if is_tableish || is_code_fence {
             out.push(WrappedLine {
                 line: truncate_line(line, width),
@@ -55,40 +57,31 @@ pub fn wrap_lines_with_joins(lines: Vec<Line>, width: usize) -> Vec<WrappedLine>
     out
 }
 
-/// Fenced code rows are left-padded with two spaces and share one `code_bg`
-/// across every token span (see `markdown::flush_code_block`).
-fn is_code_fence_line(line: &Line, plain: &str) -> bool {
-    if !plain.starts_with("  ") {
-        return false;
-    }
-    let mut bg = None;
-    for s in &line.spans {
-        if s.content.is_empty() {
-            continue;
-        }
-        match (bg, s.style.bg) {
-            (None, Some(c)) => bg = Some(c),
-            (Some(expected), Some(c)) if c == expected => {}
-            _ => return false,
-        }
-    }
-    bg.is_some()
-}
-
 fn truncate_line(line: Line, width: usize) -> Line {
+    // Preserve zero-width semantic prefixes such as markdown's code marker.
+    let prefixes: Vec<Span> = line
+        .spans
+        .iter()
+        .take_while(|span| span.content.is_empty())
+        .cloned()
+        .collect();
     let mut cells: Vec<(char, Style)> = Vec::new();
     let mut w = 0usize;
     for span in line.spans {
         for ch in span.content.chars() {
             let cw = char_width(ch);
             if w + cw > width {
-                return to_line(&cells);
+                let mut out = to_line(&cells);
+                out.spans.splice(0..0, prefixes);
+                return out;
             }
             cells.push((ch, span.style));
             w += cw;
         }
     }
-    to_line(&cells)
+    let mut out = to_line(&cells);
+    out.spans.splice(0..0, prefixes);
+    out
 }
 
 fn char_width(ch: char) -> usize {
@@ -346,6 +339,16 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].join_before, WrapJoin::Hard);
         assert_eq!(rows[1].join_before, WrapJoin::Hard);
+    }
+
+    #[test]
+    fn preformatted_rows_truncate_without_losing_their_marker() {
+        let theme = crate::theme::Theme::gray();
+        let source = crate::render::markdown::render("```text\n123456789\n```", &theme, 80);
+        let wrapped = wrap_lines(source, 5);
+
+        assert_eq!(plain(&wrapped), vec!["12345".to_string()]);
+        assert!(crate::render::markdown::code_line_marker(&wrapped[0]).is_some());
     }
 
     #[test]

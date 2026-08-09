@@ -48,7 +48,7 @@ struct MdStyles {
     link: Style,
     blockquote: Style,
     list_marker: Style,
-    code_bg: Style,
+    code_marker: Style,
 }
 
 impl MdStyles {
@@ -67,7 +67,10 @@ impl MdStyles {
             link: Style::default().fg(theme.tool).add(Modifier::UNDERLINE),
             blockquote: Style::default().fg(theme.dim),
             list_marker: Style::default().fg(theme.accent),
-            code_bg: Style::default().bg(theme.code_bg),
+            // Zero-width marker carried through wrapping. The transcript turns
+            // it into a quiet left rail, so fenced blocks do not need a large
+            // content-sized background slab.
+            code_marker: Style::default().fg(theme.faint).bg(theme.code_bg),
         }
     }
 }
@@ -402,42 +405,18 @@ impl<'t> Writer<'t> {
     }
 
     fn end_codeblock(&mut self) {
-        if let Some(lang_str) = self.code_lang.take() {
-            let code = std::mem::take(&mut self.code_buf);
-            if !code.is_empty() {
-                let ht = self.code_highlight_theme();
-                let lang = highlight::lang_from_info(&lang_str);
-                let highlighted = highlight::highlight(&code, lang, &ht);
-                let block_w = highlighted
-                    .iter()
-                    .map(|l| l.spans.iter().map(|s| s.content.width()).sum::<usize>())
-                    .max()
-                    .unwrap_or(0)
-                    .max(8);
-                for hl in highlighted {
-                    let mut spans: Vec<Span> = Vec::new();
-                    let mut w = 0usize;
-                    for s in hl.spans {
-                        if s.content.is_empty() {
-                            continue;
-                        }
-                        w += s.content.width();
-                        spans.push(s);
-                    }
-                    let pad = (block_w + 2).saturating_sub(w);
-                    if pad > 0 {
-                        spans.push(Span::styled(" ".repeat(pad), self.styles.code_bg));
-                    }
-                    self.push_line(Line::from(spans));
-                }
-            }
-        } else {
-            // Indented code block — no highlighting.
-            let code = std::mem::take(&mut self.code_buf);
+        let lang = self
+            .code_lang
+            .take()
+            .as_deref()
+            .map(highlight::lang_from_info)
+            .unwrap_or_default();
+        let code = std::mem::take(&mut self.code_buf);
+        if !code.is_empty() {
             let ht = self.code_highlight_theme();
-            for line in code.lines() {
-                let mut spans = vec![Span::styled("    ", ht.text)];
-                spans.push(Span::styled(line.to_string(), ht.text));
+            for line in highlight::highlight(&code, lang, &ht) {
+                let mut spans = vec![Span::styled(String::new(), self.styles.code_marker)];
+                spans.extend(line.spans);
                 self.push_line(Line::from(spans));
             }
         }
@@ -461,7 +440,7 @@ impl<'t> Writer<'t> {
             return;
         }
 
-        if self.in_code_block && self.code_lang.is_some() {
+        if self.in_code_block {
             self.code_buf.push_str(&t);
             return;
         }
@@ -805,8 +784,7 @@ impl<'t> Writer<'t> {
     }
 
     fn code_highlight_theme(&self) -> highlight::HighlightTheme {
-        let bg = self.theme.code_bg;
-        let mk = |fg| Style::default().fg(fg).bg(bg);
+        let mk = |fg| Style::default().fg(fg);
         highlight::HighlightTheme {
             text: mk(self.theme.code_fg),
             keyword: mk(self.theme.accent),
@@ -819,6 +797,17 @@ impl<'t> Writer<'t> {
             line_number: mk(self.theme.faint),
         }
     }
+}
+
+/// Style carried by the zero-width prefix of a fenced/preformatted row.
+///
+/// This keeps the row semantic while it moves through the generic wrapping
+/// pipeline without leaking a private sentinel glyph into selection/copy.
+pub(crate) fn code_line_marker(line: &Line) -> Option<Style> {
+    line.spans
+        .first()
+        .filter(|span| span.content.is_empty() && span.style.bg.is_some())
+        .map(|span| span.style)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -967,6 +956,34 @@ mod tests {
         let t = text(&out);
         assert!(t.contains("fn main"));
         assert!(!t.contains('`'), "backticks must be stripped: {t}");
+    }
+
+    #[test]
+    fn fenced_code_uses_a_marker_instead_of_a_background_slab() {
+        let theme = Theme::gray();
+        let out = render("```rust\nfn main() {\n    work();\n}\n```", &theme, 80);
+
+        assert_eq!(out.len(), 3);
+        for line in &out {
+            let marker = code_line_marker(line).expect("preformatted row marker");
+            assert_eq!(marker.fg, Some(theme.faint));
+            assert!(
+                line.spans
+                    .iter()
+                    .skip(1)
+                    .all(|span| span.style.bg.is_none()),
+                "code tokens should sit on the terminal surface: {line:?}"
+            );
+        }
+        assert_eq!(text(&out), "fn main() {\n    work();\n}");
+    }
+
+    #[test]
+    fn unlabeled_fence_keeps_diagram_rows_preformatted() {
+        let out = render("```\nClient\n  │\n  ▼\nService\n```", &Theme::gray(), 80);
+
+        assert_eq!(text(&out), "Client\n  │\n  ▼\nService");
+        assert!(out.iter().all(|line| code_line_marker(line).is_some()));
     }
 
     #[test]
