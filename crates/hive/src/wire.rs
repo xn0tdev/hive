@@ -170,17 +170,48 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         terminal.clone(),
     );
 
-    let model_choices = vec![ModelChoice {
-        key: default_model.clone(),
-        display: default_display.clone(),
-        detail: String::new(),
-        group: "Configured".into(),
-        connection_id: cfg.connections.active.clone(),
-        vision: false,
-        context: 0,
-        cost_input: 0.0,
-        cost_output: 0.0,
-    }];
+    // Show the last model used with every saved provider immediately; the
+    // background catalog refresh expands each group without a blank/loading
+    // detour on startup.
+    let mut model_choices: Vec<ModelChoice> = cfg
+        .connections
+        .profiles
+        .iter()
+        .filter(|(_, profile)| !profile.model.id().trim().is_empty())
+        .map(|(connection_id, profile)| ModelChoice {
+            key: profile.model.id().to_string(),
+            display: profile.model.display_name().to_string(),
+            detail: String::new(),
+            group: if profile.label.trim().is_empty() {
+                hive_llm::catalog::provider_label_for_base(&profile.base_url).to_string()
+            } else {
+                profile.label.clone()
+            },
+            connection_id: connection_id.clone(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+        .collect();
+    if model_choices.is_empty() {
+        model_choices.push(ModelChoice {
+            key: default_model.clone(),
+            display: default_display.clone(),
+            detail: String::new(),
+            group: hive_llm::catalog::provider_label_for_base(&cfg.provider.base_url).to_string(),
+            connection_id: cfg.connections.active.clone(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        });
+    }
+    model_choices.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then_with(|| a.display.cmp(&b.display))
+    });
 
     let tui_init = TuiInit {
         model: default_model,

@@ -72,7 +72,7 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "connect",
         aliases: &["provider", "providers"],
         label: "Providers",
-        desc: "Add or switch API providers",
+        desc: "Add or manage API providers",
         takes_arg: false,
         category: Category::Session,
         shortcut: None,

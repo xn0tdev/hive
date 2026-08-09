@@ -1,7 +1,8 @@
 //! Agent driver: consumes `InputCommand`s from the TUI and runs turns.
 
-use std::collections::VecDeque;
+use std::collections::{hash_map::DefaultHasher, VecDeque};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,13 +10,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use hive_core::agent::session_store;
-use hive_core::config::{AppConfig, ModelRole};
+use hive_core::config::{AppConfig, ModelRef, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
 use hive_core::provider::LlmProvider;
 use hive_core::{Agent, FollowUpSlot, TerminalHandle, UserInput};
 use hive_llm::catalog::{
     enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
-    provider_label_for_base, warm_cache, ModelCard,
+    provider_label_for_base, ModelCard,
 };
 use hive_llm::FireworksProvider;
 use hive_tui::InputCommand;
@@ -39,7 +40,9 @@ pub async fn run(
     terminal: TerminalHandle,
     mut cfg: Arc<AppConfig>,
 ) {
-    tokio::spawn(warm_cache());
+    // Populate every configured provider before the user opens /models. The
+    // refresh is detached so startup and the command loop stay responsive.
+    spawn_model_refresh(cfg.clone(), events.clone());
     let DriverShared {
         interrupt,
         follow_up,
@@ -107,7 +110,7 @@ pub async fn run(
             } => {
                 if let Some(cid) = connection_id.as_deref().filter(|c| !c.is_empty()) {
                     if cid != cfg.connections.active {
-                        if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, cid).await {
+                        if let Err(e) = activate_provider(&mut agent, &mut cfg, &events, cid) {
                             let _ = events.send(AgentEvent::Notice(format!("connect failed: {e}")));
                             continue;
                         }
@@ -128,6 +131,16 @@ pub async fn run(
                 }
                 if let Err(e) = crate::config::patch_model(&id, &display) {
                     let _ = events.send(AgentEvent::Notice(format!("could not save model: {e}")));
+                }
+                let model_ref = ModelRef::Named {
+                    id: id.clone(),
+                    name: Some(display.clone()),
+                };
+                let cfg_mut = Arc::make_mut(&mut cfg);
+                cfg_mut.models.default = model_ref.clone();
+                let active_connection = cfg_mut.connections.active.clone();
+                if let Some(profile) = cfg_mut.connections.profiles.get_mut(&active_connection) {
+                    profile.model = model_ref;
                 }
                 let _ = events.send(AgentEvent::ModelChanged {
                     id: id.clone(),
@@ -295,12 +308,7 @@ pub async fn run(
                 }
             }
             InputCommand::FetchModels => {
-                fetch_and_emit_models(&cfg, &events).await;
-            }
-            InputCommand::SetConnection { id } => {
-                if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, &id).await {
-                    let _ = events.send(AgentEvent::Notice(format!("connect failed: {e}")));
-                }
+                spawn_model_refresh(cfg.clone(), events.clone());
             }
             InputCommand::UpsertConnection {
                 id,
@@ -308,9 +316,15 @@ pub async fn run(
                 base_url,
                 api_key_env,
                 api_key,
-                model_id,
-                model_name,
             } => {
+                let (model_id, model_name) = if cfg.connections.profiles.is_empty() {
+                    (
+                        cfg.models.default.id().to_string(),
+                        cfg.models.default.display_name().to_string(),
+                    )
+                } else {
+                    (String::new(), String::new())
+                };
                 if let Err(e) = crate::config::upsert_connection(
                     &id,
                     &label,
@@ -324,8 +338,16 @@ pub async fn run(
                         events.send(AgentEvent::Notice(format!("could not save provider: {e}")));
                     continue;
                 }
-                if let Err(e) = apply_connection(&mut agent, &mut cfg, &events, &id).await {
-                    let _ = events.send(AgentEvent::Notice(format!("connect failed: {e}")));
+                match crate::config::load() {
+                    Ok(new_cfg) => {
+                        cfg = new_cfg;
+                        emit_connections(&cfg, &events);
+                        spawn_model_refresh(cfg.clone(), events.clone());
+                        let _ = events.send(AgentEvent::Notice(format!("Provider added: {label}")));
+                    }
+                    Err(e) => {
+                        let _ = events.send(AgentEvent::Notice(format!("reload failed: {e}")));
+                    }
                 }
             }
             InputCommand::UpdateConnectionKey { id, api_key } => {
@@ -344,6 +366,7 @@ pub async fn run(
                             agent.set_provider(provider);
                         }
                         emit_connections(&cfg, &events);
+                        spawn_model_refresh(cfg.clone(), events.clone());
                         let label = cfg
                             .connections
                             .profiles
@@ -360,6 +383,7 @@ pub async fn run(
                 }
             }
             InputCommand::RemoveConnection { id } => {
+                let removed_was_active = cfg.connections.active == id;
                 if let Err(e) = crate::config::remove_connection(&id) {
                     let _ = events.send(AgentEvent::Notice(format!("could not remove: {e}")));
                     continue;
@@ -368,13 +392,10 @@ pub async fn run(
                     Ok(new_cfg) => {
                         cfg = new_cfg;
                         emit_connections(&cfg, &events);
-                        let active = cfg.connections.active.clone();
-                        if let Err(e) =
-                            apply_connection(&mut agent, &mut cfg, &events, &active).await
-                        {
-                            let _ =
-                                events.send(AgentEvent::Notice(format!("reconnect failed: {e}")));
+                        if removed_was_active {
+                            sync_agent_to_active_config(&mut agent, &cfg, &events);
                         }
+                        spawn_model_refresh(cfg.clone(), events.clone());
                     }
                     Err(e) => {
                         let _ = events.send(AgentEvent::Notice(format!("reload failed: {e}")));
@@ -410,7 +431,7 @@ pub async fn run(
                 let mut vision = snap.vision;
                 if !snap.connection_id.is_empty() && snap.connection_id != cfg.connections.active {
                     if let Err(e) =
-                        apply_connection(&mut agent, &mut cfg, &events, &snap.connection_id).await
+                        activate_provider(&mut agent, &mut cfg, &events, &snap.connection_id)
                     {
                         // Restoring the transcript is still useful; keep the
                         // live model rather than firing a foreign id at it.
@@ -627,7 +648,10 @@ where
     }
 }
 
-async fn apply_connection(
+/// Activate the provider behind a model choice without temporarily applying
+/// that profile's previous model. The caller sets the final model immediately
+/// afterwards, so emitting an intermediate model change only causes flicker.
+fn activate_provider(
     agent: &mut Agent,
     cfg: &mut Arc<AppConfig>,
     events: &EventSender,
@@ -637,36 +661,35 @@ async fn apply_connection(
     let new_cfg = crate::config::load()?;
     *cfg = new_cfg;
 
+    install_provider(agent, cfg);
+    emit_connections(cfg, events);
+    Ok(())
+}
+
+fn install_provider(agent: &mut Agent, cfg: &AppConfig) {
     let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
         cfg.provider.base_url.clone(),
         cfg.secrets.provider_api_key.clone(),
     ));
+    agent.set_provider(provider);
+}
+
+/// Removing the provider used by the current model is the one management
+/// action that needs a runtime fallback. Inactive removals leave the agent
+/// untouched.
+fn sync_agent_to_active_config(agent: &mut Agent, cfg: &AppConfig, events: &EventSender) {
+    install_provider(agent, cfg);
     let model_id = cfg.models.default.id().to_string();
     let model_display = cfg.models.default.display_name().to_string();
-
-    agent.set_provider(provider);
     agent.set_model(model_id.clone());
-    // Vision flag comes from the live catalog on the next /model pick.
     agent.set_vision_capable(false);
-
-    emit_connections(cfg, events);
     let _ = events.send(AgentEvent::ModelChanged {
         id: model_id,
-        display: model_display.clone(),
+        display: model_display,
         context: 0,
         cost_input: 0.0,
         cost_output: 0.0,
     });
-    let label = cfg
-        .connections
-        .profiles
-        .get(id)
-        .map(|p| p.label.as_str())
-        .unwrap_or(id);
-    let _ = events.send(AgentEvent::Notice(format!(
-        "Connected: {label} · {model_display}"
-    )));
-    Ok(())
 }
 
 fn emit_connections(cfg: &AppConfig, events: &EventSender) {
@@ -691,26 +714,42 @@ fn resolve_model(cfg: &AppConfig, id: &str, display: &str) -> (String, String) {
     (id.to_string(), display)
 }
 
-const LISTING_CACHE_TTL: Duration = Duration::from_secs(60);
+const LISTING_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-static LISTING_CACHE: Mutex<Option<(Instant, Vec<CatalogModel>)>> = Mutex::new(None);
+#[derive(Clone)]
+struct ListingTarget {
+    connection_id: String,
+    label: String,
+    base_url: String,
+    api_key: String,
+}
 
-async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
-    if let Ok(g) = LISTING_CACHE.lock() {
-        if let Some((at, models)) = g.as_ref() {
-            if at.elapsed() < LISTING_CACHE_TTL {
-                let _ = events.send(AgentEvent::ModelsListed {
-                    models: models.clone(),
-                });
-                return;
-            }
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListingSource {
+    connection_id: String,
+    label: String,
+    base_url: String,
+    key_fingerprint: u64,
+}
 
-    let mut models = Vec::new();
-    let mut errors = Vec::new();
+#[derive(Debug, Clone)]
+struct ListingCacheEntry {
+    sources: Vec<ListingSource>,
+    fetched_at: Instant,
+    models: Vec<CatalogModel>,
+}
 
-    let mut targets: Vec<(String, String, String, String)> = cfg
+static LISTING_CACHE: Mutex<Option<ListingCacheEntry>> = Mutex::new(None);
+static LISTING_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn spawn_model_refresh(cfg: Arc<AppConfig>, events: EventSender) {
+    tokio::spawn(async move {
+        fetch_and_emit_models(&cfg, &events).await;
+    });
+}
+
+fn listing_targets(cfg: &AppConfig) -> Result<Vec<ListingTarget>, String> {
+    let mut targets: Vec<ListingTarget> = cfg
         .connections
         .profiles
         .iter()
@@ -726,7 +765,12 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
             } else {
                 p.label.clone()
             };
-            Some((id.clone(), label, p.base_url.clone(), key))
+            Some(ListingTarget {
+                connection_id: id.clone(),
+                label,
+                base_url: p.base_url.clone(),
+                api_key: key,
+            })
         })
         .collect();
 
@@ -734,10 +778,7 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
     if targets.is_empty() {
         let key = cfg.secrets.provider_api_key.clone();
         if key.is_empty() {
-            let _ = events.send(AgentEvent::ModelsListFailed(
-                "no provider API key — set one in config or env".into(),
-            ));
-            return;
+            return Err("no provider API key — add one with /connect".into());
         }
         let base = cfg.provider.base_url.clone();
         let label = active_provider_label(cfg, &base);
@@ -746,27 +787,86 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
         } else {
             cfg.connections.active.clone()
         };
-        targets.push((id, label, base, key));
+        targets.push(ListingTarget {
+            connection_id: id,
+            label,
+            base_url: base,
+            api_key: key,
+        });
     }
+    Ok(targets)
+}
+
+fn listing_sources(targets: &[ListingTarget]) -> Vec<ListingSource> {
+    targets
+        .iter()
+        .map(|target| {
+            let mut hasher = DefaultHasher::new();
+            target.api_key.hash(&mut hasher);
+            ListingSource {
+                connection_id: target.connection_id.clone(),
+                label: target.label.clone(),
+                base_url: target.base_url.clone(),
+                key_fingerprint: hasher.finish(),
+            }
+        })
+        .collect()
+}
+
+fn cached_listing(sources: &[ListingSource]) -> Option<Vec<CatalogModel>> {
+    let cache = LISTING_CACHE.lock().ok()?;
+    let entry = cache.as_ref()?;
+    (entry.sources == sources && entry.fetched_at.elapsed() < LISTING_CACHE_TTL)
+        .then(|| entry.models.clone())
+}
+
+fn emit_models(events: &EventSender, models: Vec<CatalogModel>) {
+    let _ = events.send(AgentEvent::ModelsListed { models });
+}
+
+async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
+    let targets = match listing_targets(cfg) {
+        Ok(targets) => targets,
+        Err(message) => {
+            let _ = events.send(AgentEvent::ModelsListFailed(message));
+            return;
+        }
+    };
+    let sources = listing_sources(&targets);
+    if let Some(models) = cached_listing(&sources) {
+        emit_models(events, models);
+        return;
+    }
+
+    // Startup prefetch and an immediate /models open can race. One network
+    // fan-out does the work; the follower reuses the populated cache.
+    let _fetch_guard = LISTING_FETCH_LOCK.lock().await;
+    if let Some(models) = cached_listing(&sources) {
+        emit_models(events, models);
+        return;
+    }
+
+    let mut models = Vec::new();
+    let mut errors = Vec::new();
 
     // Every listing is independent of the others and of the models.dev catalog,
     // so the whole fan-out flies at once: one round trip instead of N + 1.
     let listings = futures_util::future::join_all(
         targets
             .iter()
-            .map(|(_, _, base, key)| list_provider_models(base, key)),
+            .map(|target| list_provider_models(&target.base_url, &target.api_key)),
     );
     let (listings, catalog) = tokio::join!(listings, fetch_models_dev());
     let catalog = catalog.ok();
 
-    for ((conn_id, label, base, _), listed) in targets.iter().zip(listings) {
+    for (target, listed) in targets.iter().zip(listings) {
         match listed {
             Ok(remote) => {
-                let hint = models_dev_hint_for_base(base);
+                let hint = models_dev_hint_for_base(&target.base_url);
                 let cards = enrich_models(&remote, catalog.as_ref(), hint);
-                models.extend(catalog_rows(label, conn_id, &cards));
+                models.extend(catalog_rows(&target.label, &target.connection_id, &cards));
             }
-            Err(e) => errors.push(format!("{label}: {e}")),
+            Err(e) => errors.push(format!("{}: {e}", target.label)),
         }
     }
 
@@ -786,10 +886,18 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.id.cmp(&b.id))
     });
-    if let Ok(mut g) = LISTING_CACHE.lock() {
-        *g = Some((Instant::now(), models.clone()));
+    // A partial list is still useful now, but must not hide a temporarily
+    // failing provider for the full cache TTL.
+    if errors.is_empty() {
+        if let Ok(mut g) = LISTING_CACHE.lock() {
+            *g = Some(ListingCacheEntry {
+                sources,
+                fetched_at: Instant::now(),
+                models: models.clone(),
+            });
+        }
     }
-    let _ = events.send(AgentEvent::ModelsListed { models });
+    emit_models(events, models);
 }
 
 /// One section header for `/model`: active connection label, else host → known name.
@@ -874,8 +982,63 @@ fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<Ca
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
+
+    fn multi_provider_config() -> AppConfig {
+        use hive_core::config::{ConnectionProfile, ModelRef};
+
+        let mut cfg = AppConfig::default();
+        cfg.connections.active = "groq".into();
+        cfg.connections.profiles.clear();
+        cfg.connections.profiles.insert(
+            "groq".into(),
+            ConnectionProfile {
+                label: "Groq".into(),
+                base_url: "https://api.groq.com/openai/v1".into(),
+                api_key_env: "GROQ_API_KEY".into(),
+                api_key: None,
+                model: ModelRef::Id("llama".into()),
+            },
+        );
+        cfg.connections.profiles.insert(
+            "openai".into(),
+            ConnectionProfile {
+                label: "OpenAI".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                api_key: None,
+                model: ModelRef::Id("gpt-5".into()),
+            },
+        );
+        cfg.secrets
+            .connection_keys
+            .insert("groq".into(), "gsk-one".into());
+        cfg.secrets
+            .connection_keys
+            .insert("openai".into(), "sk-one".into());
+        cfg
+    }
+
+    #[test]
+    fn model_listing_targets_every_configured_provider() {
+        let targets = listing_targets(&multi_provider_config()).unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].connection_id, "groq");
+        assert_eq!(targets[0].label, "Groq");
+        assert_eq!(targets[1].connection_id, "openai");
+        assert_eq!(targets[1].label, "OpenAI");
+    }
+
+    #[test]
+    fn listing_cache_identity_changes_with_credentials() {
+        let mut cfg = multi_provider_config();
+        let before = listing_sources(&listing_targets(&cfg).unwrap());
+        cfg.secrets
+            .connection_keys
+            .insert("openai".into(), "sk-two".into());
+        let after = listing_sources(&listing_targets(&cfg).unwrap());
+        assert_ne!(before, after);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

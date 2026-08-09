@@ -37,7 +37,7 @@ api_key_env = "FIREWORKS_API_KEY"
 # Or table: id for the API, name for the TUI footer.
 default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast" }
 
-# Future: multiple saved providers. Today only [provider] is active.
+# Saved connections are managed in /connect; choosing a model activates its provider.
 # [connections]
 # active = "default"
 
@@ -156,7 +156,7 @@ pub fn try_load() -> Result<Arc<AppConfig>> {
     let needs_seed = cfg.connections.profiles.is_empty();
     ensure_connections(&mut cfg);
     if needs_seed {
-        // Persist the seeded profile so /connect can switch later.
+        // Persist the seeded profile so /connect can manage it later.
         let _ = persist_connections_from_cfg(&cfg);
     }
     fill_secrets(&mut cfg);
@@ -390,7 +390,7 @@ api_key_env = "{api_key_env}"
 [models]
 default = {{ id = "{def_id}", name = "{def_name}" }}
 
-# Future: multiple saved providers. Today only [provider] is active.
+# Saved connections are managed in /connect; choosing a model activates its provider.
 # [connections]
 # active = "default"
 
@@ -610,7 +610,8 @@ pub fn activate_connection(id: &str) -> Result<()> {
     write_toml_root(&value)
 }
 
-/// Add or update a connection profile, make it active, mirror to `[provider]`.
+/// Add or update a connection profile without switching away from the active
+/// provider. The first profile becomes active so bootstrapping still works.
 pub fn upsert_connection(
     id: &str,
     label: &str,
@@ -625,50 +626,103 @@ pub fn upsert_connection(
         .as_table_mut()
         .ok_or_else(|| anyhow!("config root must be a table"))?;
 
-    let connections = root
-        .entry("connections")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let connections = connections
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("[connections] must be a table"))?;
-    let profiles = connections
-        .entry("profiles")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let profiles = profiles
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("[connections.profiles] must be a table"))?;
-
-    let existing_key = profiles
-        .get(id)
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("api_key"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let mut profile = toml::map::Map::new();
-    profile.insert("label".into(), toml::Value::String(label.to_string()));
-    profile.insert("base_url".into(), toml::Value::String(base_url.to_string()));
-    profile.insert(
-        "api_key_env".into(),
-        toml::Value::String(api_key_env.to_string()),
-    );
-    let key = api_key
-        .filter(|k| !k.is_empty())
-        .map(str::to_string)
-        .or(existing_key);
-    if let Some(key) = key {
-        profile.insert("api_key".into(), toml::Value::String(key));
-    }
-    let mut model = toml::map::Map::new();
-    model.insert("id".into(), toml::Value::String(model_id.to_string()));
-    model.insert("name".into(), toml::Value::String(model_name.to_string()));
-    profile.insert("model".into(), toml::Value::Table(model));
-
-    profiles.insert(id.to_string(), toml::Value::Table(profile.clone()));
-    connections.insert("active".into(), toml::Value::String(id.to_string()));
-    mirror_profile_to_provider(root, &profile)?;
+    upsert_connection_in_root(
+        root,
+        id,
+        label,
+        base_url,
+        api_key_env,
+        api_key,
+        model_id,
+        model_name,
+    )?;
     write_toml_root(&value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_connection_in_root(
+    root: &mut toml::map::Map<String, toml::Value>,
+    id: &str,
+    label: &str,
+    base_url: &str,
+    api_key_env: &str,
+    api_key: Option<&str>,
+    model_id: &str,
+    model_name: &str,
+) -> Result<()> {
+    let (profile, mirror_profile) = {
+        let connections = root
+            .entry("connections")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let connections = connections
+            .as_table_mut()
+            .ok_or_else(|| anyhow!("[connections] must be a table"))?;
+        let active_id = connections
+            .get("active")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let active_exists = active_id.as_deref().is_some_and(|active| {
+            connections
+                .get("profiles")
+                .and_then(|value| value.as_table())
+                .is_some_and(|profiles| profiles.contains_key(active))
+        });
+
+        let profiles = connections
+            .entry("profiles")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let profiles = profiles
+            .as_table_mut()
+            .ok_or_else(|| anyhow!("[connections.profiles] must be a table"))?;
+
+        let existing_key = profiles
+            .get(id)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("api_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let existing_model = profiles
+            .get(id)
+            .and_then(|value| value.as_table())
+            .and_then(|profile| profile.get("model"))
+            .cloned();
+
+        let mut profile = toml::map::Map::new();
+        profile.insert("label".into(), toml::Value::String(label.to_string()));
+        profile.insert("base_url".into(), toml::Value::String(base_url.to_string()));
+        profile.insert(
+            "api_key_env".into(),
+            toml::Value::String(api_key_env.to_string()),
+        );
+        let key = api_key
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .or(existing_key);
+        if let Some(key) = key {
+            profile.insert("api_key".into(), toml::Value::String(key));
+        }
+        if !model_id.trim().is_empty() {
+            let mut model = toml::map::Map::new();
+            model.insert("id".into(), toml::Value::String(model_id.to_string()));
+            model.insert("name".into(), toml::Value::String(model_name.to_string()));
+            profile.insert("model".into(), toml::Value::Table(model));
+        } else if let Some(model) = existing_model {
+            profile.insert("model".into(), model);
+        }
+
+        profiles.insert(id.to_string(), toml::Value::Table(profile.clone()));
+        let make_active = !active_exists;
+        if make_active {
+            connections.insert("active".into(), toml::Value::String(id.to_string()));
+        }
+        let mirrors_active = make_active || active_id.as_deref() == Some(id);
+        (profile, mirrors_active)
+    };
+    if mirror_profile {
+        mirror_profile_to_provider(root, &profile)?;
+    }
+    Ok(())
 }
 
 /// Replace one saved provider's API key without activating that provider.
@@ -723,6 +777,35 @@ pub fn remove_connection(id: &str) -> Result<()> {
         .unwrap_or("")
         .to_string();
     let was_active = active == id;
+    let fallback = if was_active {
+        let profiles = root
+            .get("connections")
+            .and_then(|value| value.get("profiles"))
+            .and_then(|value| value.as_table())
+            .ok_or_else(|| anyhow!("no profiles"))?;
+        if profiles.len() <= 1 {
+            return Err(anyhow!("cannot remove the last provider"));
+        }
+        Some(
+            profiles
+                .iter()
+                .filter(|(candidate, _)| candidate.as_str() != id)
+                .find_map(|(candidate, value)| {
+                    let profile = value.as_table()?;
+                    let has_model = profile
+                        .get("model")
+                        .and_then(|model| model.get("id"))
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|model| !model.trim().is_empty());
+                    has_model.then(|| (candidate.clone(), profile.clone()))
+                })
+                .ok_or_else(|| {
+                    anyhow!("choose a model from another provider before removing the active one")
+                })?,
+        )
+    } else {
+        None
+    };
 
     {
         let connections = root
@@ -741,25 +824,7 @@ pub fn remove_connection(id: &str) -> Result<()> {
         }
     }
 
-    if was_active {
-        let (next_id, next_profile) = {
-            let profiles = root
-                .get("connections")
-                .and_then(|v| v.get("profiles"))
-                .and_then(|v| v.as_table())
-                .ok_or_else(|| anyhow!("no profiles"))?;
-            let next_id = profiles
-                .keys()
-                .next()
-                .cloned()
-                .ok_or_else(|| anyhow!("no providers left"))?;
-            let next_profile = profiles
-                .get(&next_id)
-                .and_then(|v| v.as_table())
-                .cloned()
-                .ok_or_else(|| anyhow!("missing next profile"))?;
-            (next_id, next_profile)
-        };
+    if let Some((next_id, next_profile)) = fallback {
         if let Some(connections) = root.get_mut("connections").and_then(|v| v.as_table_mut()) {
             connections.insert("active".into(), toml::Value::String(next_id));
         }
@@ -941,6 +1006,80 @@ mod tests {
         assert!(!text
             .lines()
             .any(|line| line.trim_start().starts_with("api_key =")));
+    }
+
+    #[test]
+    fn adding_a_connection_preserves_the_active_provider() {
+        let value: toml::Value = toml::from_str(
+            r#"
+[provider]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[models]
+default = { id = "gpt-5", name = "GPT-5" }
+
+[connections]
+active = "openai"
+
+[connections.profiles.openai]
+label = "OpenAI"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = { id = "gpt-5", name = "GPT-5" }
+"#,
+        )
+        .unwrap();
+        let mut root = value.as_table().unwrap().clone();
+
+        upsert_connection_in_root(
+            &mut root,
+            "groq",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            "GROQ_API_KEY",
+            Some("gsk-test"),
+            "",
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(
+            root["connections"]["active"].as_str(),
+            Some("openai"),
+            "adding credentials must not switch the runtime provider"
+        );
+        assert_eq!(
+            root["provider"]["base_url"].as_str(),
+            Some("https://api.openai.com/v1")
+        );
+        assert!(root["connections"]["profiles"]["groq"].is_table());
+        assert!(root["connections"]["profiles"]["groq"]
+            .get("model")
+            .is_none());
+    }
+
+    #[test]
+    fn first_connection_still_bootstraps_the_active_provider() {
+        let mut root = toml::map::Map::new();
+        upsert_connection_in_root(
+            &mut root,
+            "groq",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            "GROQ_API_KEY",
+            Some("gsk-test"),
+            "llama",
+            "Llama",
+        )
+        .unwrap();
+
+        assert_eq!(root["connections"]["active"].as_str(), Some("groq"));
+        assert_eq!(
+            root["provider"]["base_url"].as_str(),
+            Some("https://api.groq.com/openai/v1")
+        );
+        assert_eq!(root["models"]["default"]["id"].as_str(), Some("llama"));
     }
 
     #[cfg(unix)]

@@ -36,11 +36,11 @@ impl ModelRow<'_> {
     }
 }
 
-/// One row in the `/connect` list. Configured providers and ones you could
-/// configure live in the same list — picking either does the obvious thing.
+/// One row in the `/connect` list. Configured providers are managed in place;
+/// selecting an unconfigured preset starts the add flow.
 #[derive(Debug, Clone, Copy)]
 pub enum ConnectRow<'a> {
-    /// A saved profile: selecting it switches to that provider.
+    /// A saved profile: Ctrl+E edits its key and Ctrl+R removes it.
     Profile(&'a ConnectionInfo),
     /// A known provider with no key yet: selecting it asks for one.
     Preset(usize),

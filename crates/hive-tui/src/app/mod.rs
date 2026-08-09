@@ -2176,7 +2176,11 @@ Keep everything else unless a note says otherwise.\n",
     ) {
         self.about_open = false;
         self.palette = Some(PaletteState::models());
-        self.models_catalog = ModelsCatalogState::Loading;
+        // Keep a ready catalog visible while it refreshes. Reopening /models
+        // should feel instant instead of flashing back to a loading row.
+        if self.models_catalog != ModelsCatalogState::Ready {
+            self.models_catalog = ModelsCatalogState::Loading;
+        }
         let _ = input_tx.send(crate::InputCommand::FetchModels);
     }
 
@@ -2185,12 +2189,6 @@ Keep everything else unless a note says otherwise.\n",
         self.close_settings();
         let mut pal = PaletteState::connect();
         pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
-        // Prefer selecting the active profile.
-        if let Some(i) = pal.connect_rows(&self.connections).iter().position(
-            |r| matches!(r, palette::ConnectRow::Profile(c) if c.id == self.active_connection),
-        ) {
-            pal.selected = i;
-        }
         self.palette = Some(pal);
     }
 
@@ -2656,6 +2654,10 @@ Keep everything else unless a note says otherwise.\n",
                 true
             }
             AgentEvent::ModelsListed { models } => {
+                let selected_model = self.palette.as_ref().and_then(|pal| {
+                    pal.selected_model(&self.model_choices)
+                        .map(|choice| (choice.connection_id.clone(), choice.key.clone()))
+                });
                 self.model_choices = models
                     .into_iter()
                     .map(|m| ModelChoice {
@@ -2674,7 +2676,10 @@ Keep everything else unless a note says otherwise.\n",
                 // Apply context window / cost for the active model from the
                 // freshly loaded catalog (so the footer shows the right value
                 // without requiring a manual /model re-pick).
-                if let Some(m) = self.model_choices.iter().find(|m| m.key == self.model) {
+                if let Some(m) = self.model_choices.iter().find(|m| {
+                    m.key == self.model
+                        && (m.connection_id.is_empty() || m.connection_id == self.active_connection)
+                }) {
                     if m.context > 0 {
                         self.context_window = m.context;
                         self.pending_context_update = Some(m.context);
@@ -2684,17 +2689,46 @@ Keep everything else unless a note says otherwise.\n",
                 }
                 if let Some(pal) = self.palette.as_mut() {
                     if pal.mode == palette::PaletteMode::Models {
-                        pal.clamp_selection(
-                            &self.model_choices,
-                            &self.connections,
-                            &self.saved_sessions,
-                        );
+                        let restored = selected_model.as_ref().and_then(|(connection, key)| {
+                            pal.model_rows(&self.model_choices).iter().position(|row| {
+                                matches!(
+                                    row,
+                                    palette::ModelRow::Model(choice)
+                                        if choice.connection_id == connection.as_str()
+                                            && choice.key == key.as_str()
+                                )
+                            })
+                        });
+                        if let Some(selected) = restored {
+                            pal.selected = selected;
+                        } else {
+                            pal.clamp_selection(
+                                &self.model_choices,
+                                &self.connections,
+                                &self.saved_sessions,
+                            );
+                        }
                     }
                 }
                 true
             }
             AgentEvent::ModelsListFailed(err) => {
-                self.models_catalog = ModelsCatalogState::Failed(err);
+                // A refresh failure must not hide either the last live catalog
+                // or the per-provider models seeded from config at startup.
+                if self.models_catalog == ModelsCatalogState::Ready
+                    || !self.model_choices.is_empty()
+                {
+                    self.models_catalog = ModelsCatalogState::Ready;
+                    if self
+                        .palette
+                        .as_ref()
+                        .is_some_and(|pal| pal.mode == palette::PaletteMode::Models)
+                    {
+                        self.flash(format!("Couldn't refresh models: {err}"));
+                    }
+                } else {
+                    self.models_catalog = ModelsCatalogState::Failed(err);
+                }
                 true
             }
             AgentEvent::ConnectionsUpdated { active, profiles } => {
@@ -3671,6 +3705,89 @@ mod tests {
             cost_input: 0.0,
             cost_output: 0.0,
         })
+    }
+
+    #[test]
+    fn reopening_models_keeps_a_ready_catalog_visible_while_refreshing() {
+        let mut a = app();
+        a.models_catalog = ModelsCatalogState::Ready;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        a.open_model_picker(&tx);
+
+        assert_eq!(a.models_catalog, ModelsCatalogState::Ready);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::InputCommand::FetchModels)
+        ));
+    }
+
+    #[test]
+    fn failed_background_refresh_keeps_the_last_catalog() {
+        let mut a = app();
+        a.models_catalog = ModelsCatalogState::Ready;
+        a.palette = Some(PaletteState::models());
+
+        a.apply(AgentEvent::ModelsListFailed("offline".into()));
+
+        assert_eq!(a.models_catalog, ModelsCatalogState::Ready);
+        assert!(a
+            .flash_text()
+            .is_some_and(|text| text.contains("Couldn't refresh models")));
+    }
+
+    #[test]
+    fn catalog_refresh_keeps_the_same_provider_model_selected() {
+        let mut a = app();
+        a.model_choices = vec![ModelChoice {
+            key: "llama".into(),
+            display: "Llama".into(),
+            detail: String::new(),
+            group: "Groq".into(),
+            connection_id: "groq".into(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        }];
+        let mut palette = PaletteState::models();
+        palette.clamp_selection(&a.model_choices, &[], &[]);
+        a.palette = Some(palette);
+
+        a.apply(AgentEvent::ModelsListed {
+            models: vec![
+                hive_core::event::CatalogModel {
+                    id: "claude".into(),
+                    name: "Claude".into(),
+                    detail: String::new(),
+                    group: "Anthropic".into(),
+                    connection_id: "anthropic".into(),
+                    vision: false,
+                    context: 0,
+                    cost_input: 0.0,
+                    cost_output: 0.0,
+                },
+                hive_core::event::CatalogModel {
+                    id: "llama".into(),
+                    name: "Llama".into(),
+                    detail: String::new(),
+                    group: "Groq".into(),
+                    connection_id: "groq".into(),
+                    vision: false,
+                    context: 0,
+                    cost_input: 0.0,
+                    cost_output: 0.0,
+                },
+            ],
+        });
+
+        let selected = a
+            .palette
+            .as_ref()
+            .and_then(|palette| palette.selected_model(&a.model_choices))
+            .expect("selected model");
+        assert_eq!(selected.connection_id, "groq");
+        assert_eq!(selected.key, "llama");
     }
 
     #[test]

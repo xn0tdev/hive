@@ -96,9 +96,9 @@ fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
     match pal.mode {
         PaletteMode::Commands => pal.command_rows().len() as u16,
         PaletteMode::Models => match &app.models_catalog {
-            ModelsCatalogState::Loading => 1,
+            ModelsCatalogState::Loading if app.model_choices.is_empty() => 1,
             ModelsCatalogState::Failed(_) => 1,
-            ModelsCatalogState::Ready | ModelsCatalogState::Idle => {
+            ModelsCatalogState::Loading | ModelsCatalogState::Ready | ModelsCatalogState::Idle => {
                 pal.model_rows(&app.model_choices).len().max(1) as u16
             }
         },
@@ -353,7 +353,7 @@ fn draw_model_list(
     let panel_style = Style::default().bg(panel);
 
     match &app.models_catalog {
-        ModelsCatalogState::Loading | ModelsCatalogState::Idle => {
+        ModelsCatalogState::Loading | ModelsCatalogState::Idle if app.model_choices.is_empty() => {
             let line = Line::from(Span::styled(
                 "Loading models…",
                 Style::default().fg(theme.faint).bg(panel),
@@ -363,6 +363,7 @@ fn draw_model_list(
             );
             return;
         }
+        ModelsCatalogState::Loading | ModelsCatalogState::Idle => {}
         ModelsCatalogState::Failed(err) => {
             let msg = crate::render::two_col::ellipsize(err, area.width as usize);
             let line = Line::from(Span::styled(msg, Style::default().fg(theme.err).bg(panel)));
@@ -418,7 +419,9 @@ fn draw_model_list(
                 let base = Style::default().bg(bg);
                 let name_fg = if is_sel { theme.sel_fg } else { theme.fg };
                 let detail_fg = if is_sel { theme.sel_fg } else { theme.faint };
-                let current = choice.key == app.model || choice.display == app.model_display;
+                let current = (choice.key == app.model || choice.display == app.model_display)
+                    && (choice.connection_id.is_empty()
+                        || choice.connection_id == app.active_connection);
 
                 let mark = if current { "›" } else { " " };
                 let left = format!("{mark} {}", choice.display);
@@ -814,7 +817,7 @@ mod tests {
         assert!(text.contains("Providers"), "{text}");
         assert!(
             text.contains("\u{2713} Groq"),
-            "active provider is shown as authorized: {text}"
+            "configured provider is shown as authorized: {text}"
         );
         assert!(
             text.contains("\u{2713} Fireworks"),
@@ -829,6 +832,47 @@ mod tests {
         assert!(text.contains("OpenRouter"), "{text}");
         assert!(text.contains("openrouter.ai"), "host shown: {text}");
         assert!(!text.contains("Add provider"), "no add step left: {text}");
+    }
+
+    #[test]
+    fn current_model_marker_belongs_to_the_active_provider_group() {
+        let mut a = app();
+        a.model = "shared-model".into();
+        a.model_display = "Shared".into();
+        a.active_connection = "groq".into();
+        a.model_choices = ["fireworks", "groq"]
+            .into_iter()
+            .map(|connection| crate::ModelChoice {
+                key: "shared-model".into(),
+                display: "Shared".into(),
+                detail: String::new(),
+                group: if connection == "groq" {
+                    "Groq".into()
+                } else {
+                    "Fireworks".into()
+                },
+                connection_id: connection.into(),
+                vision: false,
+                context: 0,
+                cost_input: 0.0,
+                cost_output: 0.0,
+            })
+            .collect();
+        a.models_catalog = ModelsCatalogState::Loading;
+        a.palette = Some(PaletteState::models());
+        a.palette.as_mut().unwrap().clamp_selection(
+            &a.model_choices,
+            &a.connections,
+            &a.saved_sessions,
+        );
+
+        let text = render(Size::new(90, 30), |f| crate::render::draw(f, &mut a)).text();
+        assert_eq!(text.matches("› Shared").count(), 1, "{text}");
+        assert!(
+            text.contains("Fireworks") && text.contains("Groq"),
+            "{text}"
+        );
+        assert!(!text.contains("Loading models"), "{text}");
     }
 
     #[test]

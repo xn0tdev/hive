@@ -156,19 +156,13 @@ pub enum InputCommand {
     ResumeGoal,
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,
-    /// Activate a saved `/connect` profile.
-    SetConnection {
-        id: String,
-    },
-    /// Add/update a provider profile and activate it.
+    /// Add a provider profile without changing the active model/provider.
     UpsertConnection {
         id: String,
         label: String,
         base_url: String,
         api_key_env: String,
         api_key: String,
-        model_id: String,
-        model_name: String,
     },
     /// Replace the stored API key without changing the active provider.
     UpdateConnectionKey {

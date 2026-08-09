@@ -2092,18 +2092,15 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
             let row = app
                 .palette
                 .as_ref()
-                .and_then(|p| p.selected_connect(&app.connections))
-                .map(|r| match r {
-                    ConnectRow::Profile(c) => ConnectPick::Profile(c.id.clone()),
-                    ConnectRow::Preset(i) => ConnectPick::Preset(i),
-                });
+                .and_then(|p| p.selected_connect(&app.connections));
             match row {
-                Some(ConnectPick::Profile(id)) => {
-                    app.close_palette();
-                    let _ = input_tx.send(InputCommand::SetConnection { id });
-                    app.flash("Switching provider…");
+                Some(ConnectRow::Profile(connection)) => {
+                    app.flash(format!(
+                        "{} is already added · ctrl+e edits its key",
+                        connection.label
+                    ));
                 }
-                Some(ConnectPick::Preset(idx)) => {
+                Some(ConnectRow::Preset(idx)) => {
                     app.palette = Some(crate::app::palette::PaletteState::connect_key(idx));
                 }
                 None => {}
@@ -2125,8 +2122,6 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 return false;
             };
             let id = unique_connection_id(preset.label, &app.connections);
-            let model_id = app.model.clone();
-            let model_name = app.model_display.clone();
             app.close_palette();
             let _ = input_tx.send(InputCommand::UpsertConnection {
                 id,
@@ -2134,10 +2129,8 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
                 base_url: preset.base_url.to_string(),
                 api_key_env: preset.api_key_env.to_string(),
                 api_key: key,
-                model_id,
-                model_name,
             });
-            app.flash(format!("Connecting {}…", preset.label));
+            app.flash(format!("Adding {}…", preset.label));
             false
         }
         Some(PaletteMode::EditConnectionKey) => {
@@ -2218,14 +2211,6 @@ fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> 
         }
         None => false,
     }
-}
-
-/// What the highlighted `/connect` row does when you press Enter.
-enum ConnectPick {
-    /// Switch to a provider that's already set up.
-    Profile(String),
-    /// Ask for a key for a provider that isn't.
-    Preset(usize),
 }
 
 fn unique_connection_id(label: &str, existing: &[hive_core::event::ConnectionInfo]) -> String {
@@ -2360,7 +2345,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_an_unconfigured_provider_asks_for_the_key() {
+    fn connect_only_adds_new_providers_and_never_switches_existing_ones() {
         use crate::app::palette::{ConnectRow, PaletteState};
 
         let mut app = test_app();
@@ -2373,7 +2358,8 @@ mod tests {
         app.active_connection = "fireworks".into();
         app.palette = Some(PaletteState::connect());
 
-        // Row 0 is the configured provider: Enter switches to it.
+        // Row 0 is already configured: Enter leaves the runtime alone and
+        // points at the dedicated key-edit shortcut.
         assert!(matches!(
             app.palette
                 .as_ref()
@@ -2381,10 +2367,17 @@ mod tests {
             Some(ConnectRow::Profile(_))
         ));
         assert!(!activate_palette(&mut app, &tx));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(InputCommand::SetConnection { id }) if id == "fireworks"
-        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "an existing row must not switch provider"
+        );
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.mode),
+            Some(PaletteMode::Connect)
+        );
+        assert!(app
+            .flash_text()
+            .is_some_and(|text| text.contains("ctrl+e edits its key")));
 
         // Row 1 is a provider with no key: Enter goes straight to the key
         // prompt, with no "Add provider" detour in between.
@@ -2912,6 +2905,36 @@ mod tests {
             }
             other => panic!("expected SetModel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn choosing_a_model_is_the_only_provider_switch_path() {
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.model_choices = vec![crate::ModelChoice {
+            key: "llama".into(),
+            display: "Llama".into(),
+            detail: String::new(),
+            group: "Groq".into(),
+            connection_id: "groq".into(),
+            vision: false,
+            context: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        }];
+        let mut palette = crate::app::palette::PaletteState::models();
+        palette.clamp_selection(&app.model_choices, &app.connections, &app.saved_sessions);
+        app.palette = Some(palette);
+
+        assert!(!activate_palette(&mut app, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InputCommand::SetModel {
+                id,
+                connection_id: Some(connection_id),
+                ..
+            }) if id == "llama" && connection_id == "groq"
+        ));
     }
 
     #[test]
