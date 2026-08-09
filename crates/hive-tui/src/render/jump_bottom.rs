@@ -1,8 +1,8 @@
 //! A small "back to the newest message" chip.
 //!
-//! Lives on the blank row between the transcript and the composer, right-
-//! aligned like the mode chip below it, and only exists while the transcript
-//! is scrolled up. Hover lightens it so it reads as clickable.
+//! Lives centered on the blank row between the transcript and the composer,
+//! and only exists while the transcript is scrolled up. Hover lightens it so
+//! it reads as clickable.
 
 use comb::{Buffer, Line, Rect, Span, Style};
 
@@ -16,7 +16,7 @@ pub fn width() -> u16 {
     LABEL.chars().count() as u16
 }
 
-/// Draw the chip right-aligned in `row` and record its hit target. Clears the
+/// Draw the chip centered in `row` and record its hit target. Clears the
 /// hit target when there's nothing to scroll back to.
 pub fn draw(buf: &mut Buffer, row: Rect, app: &mut App) {
     let w = width();
@@ -32,7 +32,7 @@ pub fn draw(buf: &mut Buffer, row: Rect, app: &mut App) {
         (theme.dim, theme.strip)
     };
 
-    let rect = Rect::new(row.x + row.width - w, row.y, w, 1);
+    let rect = Rect::new(row.x + row.width.saturating_sub(w) / 2, row.y, w, 1);
     let line = Line::from(Span::styled(LABEL, Style::default().fg(fg).bg(bg)));
     buf.set_line(rect.x, rect.y, &line, w);
     app.scroll_bottom_hit = Some(rect);
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn appears_right_aligned_once_scrolled_up() {
+    fn appears_centered_once_scrolled_up() {
         let mut a = app();
         a.set_transcript_max_scroll(20);
         a.scroll_up(5);
@@ -87,9 +87,22 @@ mod tests {
 
         let hit = a.scroll_bottom_hit.expect("chip");
         assert_eq!(hit.width, width());
-        assert_eq!(hit.x + hit.width, 40, "flush with the right edge");
+        assert_eq!(hit.x, (40 - width()) / 2);
         assert_eq!(hit.y, 4);
         assert!(buf.text().contains('↓'));
+    }
+
+    #[test]
+    fn centering_respects_the_chat_row_origin() {
+        let mut a = app();
+        a.set_transcript_max_scroll(20);
+        a.scroll_up(5);
+        let mut buf = Buffer::blank(Size::new(40, 6));
+
+        draw(&mut buf, Rect::new(7, 4, 20, 1), &mut a);
+
+        let hit = a.scroll_bottom_hit.expect("chip");
+        assert_eq!(hit.x, 7 + (20 - width()) / 2);
     }
 
     #[test]
@@ -100,11 +113,12 @@ mod tests {
         let mut buf = Buffer::blank(Size::new(40, 6));
 
         draw(&mut buf, row(), &mut a);
-        let idle = buf.get(38, 4).expect("cell").style.bg;
+        let x = a.scroll_bottom_hit.expect("chip").x + width() / 2;
+        let idle = buf.get(x, 4).expect("cell").style.bg;
 
         assert!(a.set_hover_scroll_bottom(true));
         draw(&mut buf, row(), &mut a);
-        let hovered = buf.get(38, 4).expect("cell").style.bg;
+        let hovered = buf.get(x, 4).expect("cell").style.bg;
 
         assert_ne!(idle, hovered);
     }
