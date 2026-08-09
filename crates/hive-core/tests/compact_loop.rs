@@ -59,6 +59,7 @@ impl LlmProvider for CompactAwareProvider {
                     }],
                     tool_call_id: None,
                     name: None,
+                    provider_items: Vec::new(),
                 },
                 usage: Usage {
                     prompt_tokens,

@@ -57,6 +57,13 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     /// Tool name, for `Role::Tool` messages.
     pub name: Option<String>,
+    /// Provider-native output items needed to continue a stateless turn.
+    ///
+    /// OpenAI's Responses API, for example, requires reasoning and function
+    /// call items to be replayed verbatim with the next request. Other
+    /// providers leave this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_items: Vec<serde_json::Value>,
 }
 
 impl Message {
@@ -67,6 +74,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            provider_items: Vec::new(),
         }
     }
 

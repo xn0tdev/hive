@@ -4,6 +4,8 @@
 
 pub mod request;
 pub mod response;
+pub mod responses;
 
 pub use request::build_request;
 pub use response::ChatChunk;
+pub use responses::{build_responses_request, ResponseEvent};

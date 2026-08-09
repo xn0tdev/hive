@@ -1,5 +1,6 @@
-//! `hive-llm`: OpenAI-compatible chat provider (default target: Fireworks).
-//! Implements `hive_core::LlmProvider` with streaming and tool calling.
+//! `hive-llm`: OpenAI Responses + compatible Chat Completions provider
+//! (default target: Fireworks). Implements `hive_core::LlmProvider` with
+//! streaming and tool calling.
 //!
 //! Organized by responsibility:
 //! - `wire/` — request/response JSON shapes and conversions.

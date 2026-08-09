@@ -150,6 +150,7 @@ Act as if you already had the full history and keep working."
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            provider_items: Vec::new(),
         },
     ]
 }

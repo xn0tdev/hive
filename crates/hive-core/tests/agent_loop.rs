@@ -38,6 +38,7 @@ impl LlmProvider for MockProvider {
                 }],
                 tool_call_id: None,
                 name: None,
+                provider_items: Vec::new(),
             };
             Ok(ChatOutcome {
                 message: msg,
