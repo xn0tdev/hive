@@ -33,8 +33,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         app.set_transcript_max_scroll(0);
         return;
     }
-    // Clear the whole transcript band (including the top spacer row) so
-    // scroll / shorter lines never leave stale glyphs in vacated cells.
+    // Clear the whole transcript band so scroll / shorter lines never leave
+    // stale glyphs in vacated cells.
     buf.paint(area, Style::default());
 
     let width = area.width.max(1) as usize;
@@ -197,11 +197,23 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
         }
     }
 
+    let mut previous_visible = None;
     for i in 0..n {
-        // Spacing between blocks: blank line, except consecutive tools/notices
-        // which stay tight.
-        if i > 0 {
-            let prev = &app.blocks[i - 1];
+        // Welcome belongs only to the landing screen, and completed tools can
+        // be hidden by preference. Neither may leave a separator behind.
+        let hidden = matches!(&app.blocks[i], UiBlock::Welcome)
+            || matches!(
+                &app.blocks[i],
+                UiBlock::Tool(card) if !app.ui.show_tool_cards && card.status == ToolStatus::Ok
+            );
+        if hidden {
+            continue;
+        }
+
+        // Spacing exists only between blocks that actually rendered. This
+        // keeps the first chat row flush with the viewport's top edge.
+        let separator_added = if let Some(previous) = previous_visible {
+            let prev = &app.blocks[previous];
             let curr = &app.blocks[i];
             let tight = matches!(
                 (prev, curr),
@@ -210,7 +222,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             if !tight {
                 out.push(Line::from(""));
             }
-        }
+            !tight
+        } else {
+            false
+        };
+        let content_start = out.len();
 
         let has_later_thought = last_thought.is_some_and(|l| i < l);
         let has_later_subagent = last_subagent.is_some_and(|l| i < l);
@@ -363,11 +379,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 }
             }
             UiBlock::Tool(card) => {
-                // The preference hides completed history, never live progress
-                // or failures that still need the user's attention.
-                if !app.ui.show_tool_cards && card.status == ToolStatus::Ok {
-                    continue;
-                }
                 // tool_lines only needs a few fields; clone the small card.
                 let card = ToolCard {
                     id: card.id.clone(),
@@ -445,6 +456,14 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     width,
                 ));
             }
+        }
+
+        if out.len() == content_start {
+            if separator_added {
+                out.pop();
+            }
+        } else {
+            previous_visible = Some(i);
         }
     }
 
@@ -1003,7 +1022,8 @@ mod tests {
         use comb::{render, Size};
 
         let mut a = app();
-        a.blocks.clear();
+        // Keep the initial invisible Welcome block: it must not reserve a row
+        // once the landing screen turns into an active chat.
         a.push_user("first message".into());
 
         let buf = render(Size::new(70, 14), |f| crate::render::draw(f, &mut a));
