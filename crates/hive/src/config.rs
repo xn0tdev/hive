@@ -485,13 +485,15 @@ fn apply_ui_fields(
         "sidebar_width".into(),
         toml::Value::Integer(i64::from(ui.sidebar_width)),
     );
-    // These two were toggled in Settings but never written, so they reset on
-    // every restart.
     ui_table.insert(
         "show_work_summary".into(),
         toml::Value::Boolean(ui.show_work_summary),
     );
     ui_table.insert("tool_revert".into(), toml::Value::Boolean(ui.tool_revert));
+    ui_table.insert(
+        "show_tool_cards".into(),
+        toml::Value::Boolean(ui.show_tool_cards),
+    );
 }
 
 pub fn patch_ui(ui: &hive_core::config::UiConfig) -> Result<()> {
@@ -852,8 +854,7 @@ mod tests {
     use super::*;
     use hive_core::config::AppConfig;
 
-    /// Every toggle in Settings has to survive a restart; two of them were
-    /// silently dropped because patch_ui never wrote them.
+    /// Every toggle in Settings has to survive a restart.
     #[test]
     fn every_ui_toggle_is_written_back() {
         use hive_core::config::{SidebarMode, UiConfig};
@@ -881,6 +882,7 @@ mod tests {
         assert!(!round.sidebar_collapse_sections);
         assert!(!round.show_work_summary, "work summary must persist");
         assert!(!round.tool_revert, "revert toggle must persist");
+        assert!(!round.show_tool_cards, "completed tools must persist");
     }
 
     #[test]

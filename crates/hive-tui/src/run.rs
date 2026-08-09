@@ -1701,6 +1701,9 @@ fn activate_context_action(app: &mut App, action: ContextAction) {
             write_clipboard_text(&text);
             app.flash("Copied");
         }
+        ContextAction::ToggleToolDetails { id } => {
+            app.toggle_tool_details(&id);
+        }
         ContextAction::RevertFile { path, content } => {
             let full = std::path::Path::new(&app.cwd).join(&path);
             match std::fs::write(&full, &content) {
@@ -2699,6 +2702,7 @@ mod tests {
             status: ToolStatus::Ok,
             started: std::time::Instant::now(),
             elapsed_ms: Some(1),
+            details_open: false,
             snapshot: Some(FileSnapshot {
                 path: "src/main.rs".into(),
                 content: "old".into(),
@@ -3443,7 +3447,7 @@ mod tests {
         lay_out(&mut app);
         let before = app.ui.tool_revert;
 
-        // Row 1 is "Revert file" (row 0 is "Show tool cards").
+        // Row 1 is "Revert file" (row 0 is "Completed tools").
         let (col, row) = settings_row_xy(&app, 1);
         assert!(handle_mouse(&mut app, click(col, row), &tx));
         assert_eq!(app.ui.tool_revert, !before, "the toggle flipped");

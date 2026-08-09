@@ -19,7 +19,7 @@ impl Tool for SetTodos {
         "Set or update your task list. Pass the full list of tasks each time \
          (replaces the previous list). Each task has a short `text` and a `done` \
          flag. Use this to track multi-step work — set tasks after planning, \
-         mark them done as you finish each one."
+         mark them done as you finish each one. Pass an empty list to clear it."
     }
 
     fn parameters(&self) -> Value {
@@ -47,6 +47,12 @@ impl Tool for SetTodos {
         let Some(todos) = args.get("todos").and_then(|v| v.as_array()) else {
             return ToolResult::error("missing 'todos' array");
         };
+        if todos.is_empty() {
+            let _ = ctx
+                .events
+                .send(AgentEvent::TodosUpdated { items: Vec::new() });
+            return ToolResult::ok("task list cleared");
+        }
         let mut items = Vec::new();
         for entry in todos {
             let Some(text) = entry.get("text").and_then(|v| v.as_str()) else {
@@ -116,5 +122,32 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn empty_list_clears_todos() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolContext {
+            cwd: std::env::temp_dir(),
+            events: tx,
+            spawner: noop_spawner(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+            terminal: None,
+            vision: false,
+            depth: 0,
+            call_id: "t".into(),
+            isolate_worktrees: false,
+            interrupt: Arc::new(AtomicBool::new(false)),
+        };
+
+        let result = SetTodos.execute(json!({"todos": []}), &ctx).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("cleared"));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentEvent::TodosUpdated { items }) if items.is_empty()
+        ));
     }
 }

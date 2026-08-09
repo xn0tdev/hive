@@ -266,6 +266,8 @@ pub struct App {
     pub(crate) goal: Option<goal::GoalStatus>,
     /// Agent's self-managed task list (set_todos tool).
     pub(crate) todos: Vec<hive_core::TodoItem>,
+    /// Completed tasks stay visible briefly, then retire from the live UI.
+    pub(crate) todos_completed_at: Option<std::time::Instant>,
     /// Saved sessions for the `/resume` picker.
     pub(crate) saved_sessions: Vec<hive_core::SessionMeta>,
     /// Persisted UI prefs (`[ui]` in config.toml).
@@ -386,6 +388,9 @@ pub struct App {
 pub const FLASH_MS: u128 = 1500;
 /// Bottom toast lifetime (model/provider status, Ctrl+C, etc.).
 pub const TOAST_MS: u128 = 2_000;
+/// Keep the completed task state long enough to acknowledge it without
+/// leaving permanent progress chrome in the transcript/sidebar.
+pub const TASKS_DONE_VISIBLE_MS: u128 = 2_000;
 /// Composer auto-blur after this many ms with no typing / caret keys.
 /// Transcript scroll and global chords do not refresh the timer, so a stuck
 /// caret does not linger while the user reads. Mid-range of the 8–15s band.
@@ -433,6 +438,7 @@ impl App {
             goal_overlay: None,
             goal: None,
             todos: Vec::new(),
+            todos_completed_at: None,
             saved_sessions: Vec::new(),
             ui: init.ui.clone(),
             menu_index: 0,
@@ -1427,7 +1433,14 @@ Keep everything else unless a note says otherwise.\n",
         if self.logo_bonk.as_ref().is_some_and(|b| !b.alive()) {
             self.logo_bonk = None;
         }
-        self.maybe_idle_blur_input()
+        let tasks_retired = self
+            .todos_completed_at
+            .is_some_and(|at| at.elapsed().as_millis() >= TASKS_DONE_VISIBLE_MS);
+        if tasks_retired {
+            self.clear_todos();
+        }
+        let input_blurred = self.maybe_idle_blur_input();
+        tasks_retired || input_blurred
     }
 
     /// True when the frame should keep painting (spinner / shimmer / bonk / flash).
@@ -1440,6 +1453,9 @@ Keep everything else unless a note says otherwise.\n",
             return true;
         }
         if self.pending_dispatch.is_some() {
+            return true;
+        }
+        if self.todos_completed_at.is_some() {
             return true;
         }
         if self.running {
@@ -1752,6 +1768,13 @@ Keep everything else unless a note says otherwise.\n",
         self.blocks.push(Block::Notice(text.into()));
     }
 
+    fn clear_todos(&mut self) {
+        self.todos.clear();
+        self.todos_completed_at = None;
+        self.blocks
+            .retain(|block| !matches!(block, Block::Todos(_)));
+    }
+
     /// Start a fresh chat — back to the centered Home/landing screen.
     pub fn new_chat(&mut self) {
         self.blocks.clear();
@@ -1771,6 +1794,7 @@ Keep everything else unless a note says otherwise.\n",
         self.close_context_menu();
         self.close_goal_overlay();
         self.goal = None;
+        self.clear_todos();
         self.running = false;
         self.click_hits.clear();
         self.assistant_row_hits.clear();
@@ -2263,11 +2287,27 @@ Keep everything else unless a note says otherwise.\n",
 
     /// Build and open a context menu for a tool card block.
     pub fn open_tool_menu(&mut self, block_idx: usize) {
-        let (output, snapshot) = match self.blocks.get(block_idx) {
-            Some(Block::Tool(card)) => (card.output.clone(), card.snapshot.clone()),
+        let (id, output, status, details_open, snapshot) = match self.blocks.get(block_idx) {
+            Some(Block::Tool(card)) => (
+                card.id.clone(),
+                card.output.clone(),
+                card.status,
+                card.details_open,
+                card.snapshot.clone(),
+            ),
             _ => return,
         };
         let mut items = Vec::new();
+        if status == ToolStatus::Ok && !output.trim().is_empty() {
+            items.push(ContextMenuItem {
+                label: if details_open {
+                    "Hide details".into()
+                } else {
+                    "Show details".into()
+                },
+                action: ContextAction::ToggleToolDetails { id },
+            });
+        }
         if let Some(snap) = snapshot.filter(|_| self.ui.tool_revert).as_ref() {
             items.push(ContextMenuItem {
                 label: format!("Revert {}", snap.path),
@@ -2287,6 +2327,15 @@ Keep everything else unless a note says otherwise.\n",
             return;
         }
         self.open_context_menu(items);
+    }
+
+    pub fn toggle_tool_details(&mut self, id: &str) {
+        if let Some(card) = self.blocks.iter_mut().rev().find_map(|block| match block {
+            Block::Tool(card) if card.id == id => Some(card),
+            _ => None,
+        }) {
+            card.details_open = !card.details_open;
+        }
     }
 
     /// Take the selected action from the context menu, closing it.
@@ -2342,21 +2391,15 @@ Keep everything else unless a note says otherwise.\n",
                 args_preview,
             } => {
                 self.close_thought();
-                let plan_write = name == "write_plan"
-                    || ((name == "write_file" || name == "edit_file")
-                        && (args_preview.contains("Plan.md")
-                            || args_preview.contains(".hive/Plan")));
+                let plan_write = is_plan_write(&name, &args_preview);
                 if plan_write {
                     self.mark_plan_writing();
                 }
                 // Plan writes are card-only (no green/orange tool chrome).
                 // Subagent tools render as Subagent cards, not tool rows.
                 // `switch_mode` renders as its own "Switched to … Mode" card.
-                if !plan_write
-                    && !is_subagent_tool(&name)
-                    && name != "switch_mode"
-                    && !hive_core::terminal::is_terminal_tool(&name)
-                {
+                if shows_generic_tool_card(&name, &args_preview) {
+                    let details_open = matches!(name.as_str(), "edit_file" | "write_file");
                     self.blocks.push(Block::Tool(ToolCard {
                         id,
                         name,
@@ -2365,6 +2408,7 @@ Keep everything else unless a note says otherwise.\n",
                         status: ToolStatus::Running,
                         started: std::time::Instant::now(),
                         elapsed_ms: None,
+                        details_open,
                         snapshot: None,
                     }));
                 }
@@ -2697,6 +2741,7 @@ Keep everything else unless a note says otherwise.\n",
                 self.running = false;
                 self.close_thought();
                 self.finalize_streaming();
+                self.collapse_completed_tool_details();
                 // "Circle N" summary instead of "Worked for Nm" during a goal loop.
                 if let Some(g) = self.goal.as_ref() {
                     self.blocks.push(Block::GoalCircle(g.circle));
@@ -2711,6 +2756,7 @@ Keep everything else unless a note says otherwise.\n",
                 self.running = false;
                 self.close_thought();
                 self.finalize_streaming();
+                self.collapse_completed_tool_details();
                 self.blocks
                     .push(Block::Notice(format!("Goal time expired: {objective}")));
                 self.scroll_from_bottom = 0;
@@ -2720,6 +2766,7 @@ Keep everything else unless a note says otherwise.\n",
             }
             AgentEvent::GoalStopped => {
                 self.goal = None;
+                self.collapse_completed_tool_details();
                 self.flash("Goal stopped");
                 true
             }
@@ -2778,15 +2825,20 @@ Keep everything else unless a note says otherwise.\n",
                                 msg_count += 1;
                             }
                             for tc in &m.tool_calls {
+                                let args = hive_core::tool_args_preview(&tc.name, &tc.arguments);
+                                if !shows_generic_tool_card(&tc.name, &args) {
+                                    continue;
+                                }
                                 self.blocks.push(Block::Tool(ToolCard {
                                     id: tc.id.clone(),
                                     name: tc.name.clone(),
-                                    args: tc.arguments.clone(),
+                                    args,
                                     output: String::new(),
                                     status: ToolStatus::Ok,
                                     started: std::time::Instant::now(),
                                     // Durations aren't persisted — don't invent one.
                                     elapsed_ms: None,
+                                    details_open: false,
                                     snapshot: None,
                                 }));
                             }
@@ -2836,6 +2888,11 @@ Keep everything else unless a note says otherwise.\n",
                 true
             }
             AgentEvent::TodosUpdated { items } => {
+                if items.is_empty() {
+                    self.clear_todos();
+                    self.scroll_from_bottom = 0;
+                    return true;
+                }
                 if let Some(Block::Todos(existing)) = self
                     .blocks
                     .iter_mut()
@@ -2846,6 +2903,10 @@ Keep everything else unless a note says otherwise.\n",
                 } else {
                     self.blocks.push(Block::Todos(items.clone()));
                 }
+                self.todos_completed_at = items
+                    .iter()
+                    .all(|item| item.done)
+                    .then(std::time::Instant::now);
                 self.todos = items;
                 self.scroll_from_bottom = 0;
                 true
@@ -2858,6 +2919,7 @@ Keep everything else unless a note says otherwise.\n",
                 self.running = false;
                 self.close_thought();
                 self.finalize_streaming();
+                self.collapse_completed_tool_details();
                 // "Worked for Nm" summary line at the end of the turn.
                 if self.ui.show_work_summary {
                     if let Some(started) = self.turn_started_at.take() {
@@ -3166,6 +3228,17 @@ Keep everything else unless a note says otherwise.\n",
         }
     }
 
+    fn collapse_completed_tool_details(&mut self) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Tool(card) if card.status == ToolStatus::Ok => {
+                    card.details_open = false;
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn attach_snapshot(&mut self, id: &str, snapshot: FileSnapshot) {
         for block in self.blocks.iter_mut().rev() {
             if let Block::Tool(card) = block {
@@ -3422,6 +3495,22 @@ fn is_subagent_tool(name: &str) -> bool {
     matches!(name, "verify_project" | "spawn_subagent" | "spawn_swarm")
 }
 
+fn is_plan_write(name: &str, args_preview: &str) -> bool {
+    name == "write_plan"
+        || (matches!(name, "write_file" | "edit_file")
+            && (args_preview.contains("Plan.md") || args_preview.contains(".hive/Plan")))
+}
+
+/// Special tools already have purpose-built UI. Keeping a second generic row
+/// for them makes live and resumed transcripts noisy and inconsistent.
+fn shows_generic_tool_card(name: &str, args_preview: &str) -> bool {
+    !is_plan_write(name, args_preview)
+        && !is_subagent_tool(name)
+        && name != "switch_mode"
+        && name != "set_todos"
+        && !hive_core::terminal::is_terminal_tool(name)
+}
+
 fn short_tokens(n: u64) -> String {
     if n >= 1000 {
         format!("{:.0}k", n as f64 / 1000.0)
@@ -3628,6 +3717,53 @@ mod tests {
             detail: "done".into(),
         });
         assert!(!a.needs_animation());
+    }
+
+    #[test]
+    fn completed_todos_retire_after_a_short_acknowledgement() {
+        let mut a = app();
+        a.apply(AgentEvent::TodosUpdated {
+            items: vec![hive_core::TodoItem {
+                text: "Ship it".into(),
+                done: true,
+            }],
+        });
+
+        assert_eq!(a.todos.len(), 1);
+        assert!(a.todos_completed_at.is_some());
+        assert!(
+            a.needs_animation(),
+            "the retirement timer must keep ticking"
+        );
+        assert!(a
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Todos(_))));
+
+        a.todos_completed_at = std::time::Instant::now().checked_sub(
+            std::time::Duration::from_millis((TASKS_DONE_VISIBLE_MS + 1) as u64),
+        );
+        assert!(a.tick());
+        assert!(a.todos.is_empty());
+        assert!(a.todos_completed_at.is_none());
+        assert!(!a
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Todos(_))));
+    }
+
+    #[test]
+    fn active_todos_do_not_expire() {
+        let mut a = app();
+        a.apply(AgentEvent::TodosUpdated {
+            items: vec![hive_core::TodoItem {
+                text: "Keep working".into(),
+                done: false,
+            }],
+        });
+
+        assert!(a.todos_completed_at.is_none());
+        assert_eq!(a.todos.len(), 1);
     }
 
     #[test]
@@ -4372,6 +4508,52 @@ mod tests {
     }
 
     #[test]
+    fn turn_end_collapses_tool_details_and_menu_can_restore_them() {
+        let mut a = app();
+        a.apply(AgentEvent::ToolStarted {
+            id: "edit-1".into(),
+            name: "edit_file".into(),
+            args_preview: "src/main.rs".into(),
+        });
+        a.apply(AgentEvent::ToolOutput {
+            id: "edit-1".into(),
+            chunk: "+1\tnew line".into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "edit-1".into(),
+            name: "edit_file".into(),
+            ok: true,
+            summary: "done".into(),
+        });
+        let tool_idx = a
+            .blocks
+            .iter()
+            .position(|block| matches!(block, Block::Tool(_)))
+            .expect("tool card");
+        assert!(matches!(
+            &a.blocks[tool_idx],
+            Block::Tool(card) if card.details_open
+        ));
+
+        a.apply(AgentEvent::TurnFinished);
+        assert!(matches!(
+            &a.blocks[tool_idx],
+            Block::Tool(card) if !card.details_open
+        ));
+
+        a.open_tool_menu(tool_idx);
+        let action = a.take_context_action().expect("details action");
+        let ContextAction::ToggleToolDetails { id } = action else {
+            panic!("first action should reveal details");
+        };
+        a.toggle_tool_details(&id);
+        assert!(matches!(
+            &a.blocks[tool_idx],
+            Block::Tool(card) if card.details_open
+        ));
+    }
+
+    #[test]
     fn pending_dispatch_recall_restores_input_and_removes_block() {
         let mut a = app();
         a.blocks.clear();
@@ -4436,10 +4618,58 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].id, "call_a");
+        assert_eq!(cards[0].args, "a", "resume should not show raw JSON");
         assert_eq!(cards[0].output, "output A");
+        assert!(cards[0].elapsed_ms.is_none(), "unknown timing stays hidden");
+        assert!(!cards[0].details_open);
         assert_eq!(cards[1].id, "call_b");
         assert_eq!(cards[1].output, "output B");
         assert_eq!(a.context_window, 64_000);
+    }
+
+    #[test]
+    fn resume_skips_tools_with_dedicated_ui() {
+        use hive_core::message::{Message, ToolCall};
+
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = vec![
+            ToolCall {
+                id: "todos".into(),
+                name: "set_todos".into(),
+                arguments: r#"{"todos":[]}"#.into(),
+            },
+            ToolCall {
+                id: "terminal".into(),
+                name: "terminal_start".into(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+            },
+            ToolCall {
+                id: "read".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"README.md"}"#.into(),
+            },
+        ];
+
+        let mut a = app();
+        a.apply(AgentEvent::SessionLoaded {
+            title: "clean resume".into(),
+            model: "test".into(),
+            context_window: 0,
+            messages: vec![assistant],
+            usage: Default::default(),
+        });
+
+        let tools: Vec<&ToolCard> = a
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Tool(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].id, "read");
+        assert_eq!(tools[0].args, "README.md");
     }
 
     #[test]

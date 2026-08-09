@@ -362,7 +362,9 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 }
             }
             UiBlock::Tool(card) => {
-                if !app.ui.show_tool_cards {
+                // The preference hides completed history, never live progress
+                // or failures that still need the user's attention.
+                if !app.ui.show_tool_cards && card.status == ToolStatus::Ok {
                     continue;
                 }
                 // tool_lines only needs a few fields; clone the small card.
@@ -374,6 +376,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     status: card.status,
                     started: card.started,
                     elapsed_ms: card.elapsed_ms,
+                    details_open: card.details_open,
                     snapshot: None,
                 };
                 let hovered = app.hover_block == Some(i);
@@ -586,6 +589,7 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                     status,
                     started: std::time::Instant::now(),
                     elapsed_ms: Some(0),
+                    details_open: false,
                     snapshot: None,
                 };
                 // Read-only subagent thread: nothing here is clickable.
@@ -1562,6 +1566,41 @@ mod tests {
             !t.contains("Finished"),
             "ok shell should not dump output body: {t}"
         );
+    }
+
+    #[test]
+    fn hiding_completed_tools_keeps_progress_and_errors_visible() {
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.ui.show_tool_cards = false;
+        a.apply(AgentEvent::ToolStarted {
+            id: "tool".into(),
+            name: "run_shell".into(),
+            args_preview: "cargo test".into(),
+        });
+        assert!(tool_text(&mut a, 72).contains("cargo test"));
+
+        a.apply(AgentEvent::ToolFinished {
+            id: "tool".into(),
+            name: "run_shell".into(),
+            ok: true,
+            summary: "done".into(),
+        });
+        assert!(!tool_text(&mut a, 72).contains("cargo test"));
+
+        a.apply(AgentEvent::ToolStarted {
+            id: "failed".into(),
+            name: "run_shell".into(),
+            args_preview: "cargo broken".into(),
+        });
+        a.apply(AgentEvent::ToolFinished {
+            id: "failed".into(),
+            name: "run_shell".into(),
+            ok: false,
+            summary: "failed".into(),
+        });
+        assert!(tool_text(&mut a, 72).contains("cargo broken"));
     }
 
     #[test]

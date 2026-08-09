@@ -106,7 +106,7 @@ fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
             ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
         ],
         SettingsPage::Tools => vec![
-            ("Show tool cards".into(), on_off(app.ui.show_tool_cards)),
+            ("Completed tools".into(), on_off(app.ui.show_tool_cards)),
             ("Revert file".into(), on_off(app.ui.tool_revert)),
         ],
     }
@@ -196,7 +196,7 @@ mod tests {
         assert!(shown.contains("Revert file"), "{shown}");
         assert!(shown.contains("on"), "starts enabled: {shown}");
 
-        // Row 1 is "Revert file" (row 0 is "Show tool cards").
+        // Row 1 is "Revert file" (row 0 is "Completed tools").
         if let Some(st) = a.settings.as_mut() {
             st.selected = 1;
         }
@@ -219,6 +219,7 @@ mod tests {
             status: ToolStatus::Ok,
             started: std::time::Instant::now(),
             elapsed_ms: Some(1),
+            details_open: false,
             snapshot: Some(FileSnapshot {
                 path: "src/main.rs".into(),
                 content: "old".into(),

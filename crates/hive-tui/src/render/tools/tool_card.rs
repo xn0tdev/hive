@@ -71,13 +71,14 @@ fn tool_body_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
         card.name.as_str(),
         "read_file" | "list_dir" | "glob" | "grep" | "read_skill"
     );
-    let dur_suffix = if show_timing {
+    let dur_suffix = if show_timing && (running || card.elapsed_ms.is_some()) {
         format!("  · {}", format_tool_secs(card.secs()))
     } else {
         String::new()
     };
 
-    // Code edits render a compact green/red diff block, whatever the status.
+    // Code edits show their diff while active, then collapse to the header's
+    // +/− summary at the end of the turn. Details remain available on click.
     let is_edit = matches!(card.name.as_str(), "edit_file" | "write_file");
     // How much changed belongs next to the file name, not buried in the rows.
     let stat_suffix = if is_edit {
@@ -102,7 +103,10 @@ fn tool_body_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
         width,
     )];
 
-    if is_edit && !card.output.trim().is_empty() {
+    if is_edit
+        && !card.output.trim().is_empty()
+        && (card.status != ToolStatus::Ok || card.details_open)
+    {
         out.extend(diff_lines(&card.output, app, width));
         return out;
     }
@@ -119,10 +123,12 @@ fn tool_body_lines(card: &ToolCard, app: &App, width: usize) -> Vec<Line> {
         return out;
     }
 
-    // Done → just the header; live/error keep a short preview.
+    // Done → just the header unless the user asked for details. Live/error
+    // always keep a short preview so hiding completed tools cannot hide state.
     let preview_n = match card.status {
         ToolStatus::Running => 3,
         ToolStatus::Err => 4,
+        ToolStatus::Ok if card.details_open => 4,
         ToolStatus::Ok => 0,
     };
     if preview_n == 0 {
@@ -363,9 +369,11 @@ pub(crate) fn diff_lines(diff: &str, app: &App, width: usize) -> Vec<Line> {
 
 #[cfg(test)]
 mod diff_tests {
-    use super::{diff_counts, diff_lines};
+    use super::{diff_counts, diff_lines, tool_body_lines};
+    use crate::app::state::{ToolCard, ToolStatus};
     use crate::app::App;
     use crate::TuiInit;
+    use comb::Line;
 
     fn app() -> App {
         App::new(TuiInit {
@@ -390,6 +398,27 @@ mod diff_tests {
         diff_lines(diff, &a, width)
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_str()).collect())
+            .collect()
+    }
+
+    fn card(name: &str, output: &str) -> ToolCard {
+        ToolCard {
+            id: "tool".into(),
+            name: name.into(),
+            args: "src/main.rs".into(),
+            output: output.into(),
+            status: ToolStatus::Ok,
+            started: std::time::Instant::now(),
+            elapsed_ms: None,
+            details_open: false,
+            snapshot: None,
+        }
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_str())
             .collect()
     }
 
@@ -439,5 +468,30 @@ mod diff_tests {
             let rows = rendered(DIFF, width);
             assert_eq!(rows.len(), 3, "width {width}");
         }
+    }
+
+    #[test]
+    fn resumed_tool_does_not_invent_a_duration() {
+        let a = app();
+        let card = card("custom", "done");
+        let lines = tool_body_lines(&card, &a, 70);
+
+        assert_eq!(lines.len(), 1);
+        assert!(!line_text(&lines[0]).contains(" · "));
+    }
+
+    #[test]
+    fn completed_edit_collapses_to_its_diff_summary() {
+        let a = app();
+        let mut card = card("edit_file", "+1\tnew line\n-2\told line");
+        let collapsed = tool_body_lines(&card, &a, 70);
+        assert_eq!(collapsed.len(), 1);
+        let header = line_text(&collapsed[0]);
+        assert!(header.contains("+1"), "{header}");
+        assert!(header.contains("−1"), "{header}");
+
+        card.details_open = true;
+        let expanded = tool_body_lines(&card, &a, 70);
+        assert_eq!(expanded.len(), 3);
     }
 }

@@ -761,7 +761,7 @@ impl Agent {
         self.emit(AgentEvent::ToolStarted {
             id: id.to_string(),
             name: name.to_string(),
-            args_preview: preview_args(name, arguments),
+            args_preview: tool_args_preview(name, arguments),
         });
 
         let args: serde_json::Value = match serde_json::from_str(arguments) {
@@ -887,7 +887,7 @@ impl Agent {
             self.emit(AgentEvent::ToolStarted {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
-                args_preview: preview_args(&tc.name, &tc.arguments),
+                args_preview: tool_args_preview(&tc.name, &tc.arguments),
             });
 
             let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
@@ -1049,7 +1049,7 @@ fn is_parallel_tool(name: &str) -> bool {
 
 /// A short, human-friendly summary of a tool call — the one argument that
 /// matters, not the raw JSON. Falls back to a compact key list.
-fn preview_args(name: &str, arguments: &str) -> String {
+pub fn tool_args_preview(name: &str, arguments: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
 
@@ -1127,6 +1127,20 @@ mod tests {
             skills: no_skills(),
             config: Arc::new(AppConfig::default()),
         }
+    }
+
+    #[test]
+    fn tool_args_preview_uses_the_meaningful_value() {
+        assert_eq!(
+            tool_args_preview("read_file", r#"{"path":"src/main.rs","offset":12}"#),
+            "src/main.rs"
+        );
+        assert_eq!(
+            tool_args_preview("web_search", r#"{"query":"rust tui"}"#),
+            "rust tui"
+        );
+        assert_eq!(tool_args_preview("custom", r#"{"z":1,"a":2}"#), "a, z");
+        assert!(tool_args_preview("custom", "not json").is_empty());
     }
 
     struct DelayedParallelTool {

@@ -248,7 +248,8 @@ pub struct UiConfig {
     /// click can't roll a file back.
     #[serde(default = "default_true")]
     pub tool_revert: bool,
-    /// Show tool-call cards in the transcript. Off hides them for a cleaner chat.
+    /// Keep successful tool-call cards in the transcript. Active and failed
+    /// tools stay visible even when this is off.
     #[serde(default = "default_true")]
     pub show_tool_cards: bool,
 }

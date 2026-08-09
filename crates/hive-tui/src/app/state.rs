@@ -40,6 +40,9 @@ pub struct ToolCard {
     pub started: std::time::Instant,
     /// Set when the tool finishes; `None` while still running.
     pub elapsed_ms: Option<u128>,
+    /// Whether completed output is expanded. Running and failed tools always
+    /// keep their useful progress/error preview visible.
+    pub details_open: bool,
     /// Original file content before a write_file/edit_file/delete_path
     /// modified it — used for the "Revert" context-menu action.
     pub snapshot: Option<FileSnapshot>,
@@ -160,6 +163,9 @@ pub struct ContextMenuItem {
 #[derive(Clone)]
 pub enum ContextAction {
     Copy(String),
+    ToggleToolDetails {
+        id: String,
+    },
     /// Revert a file-writing tool by restoring the original content.
     RevertFile {
         path: String,
