@@ -104,9 +104,12 @@ a confident false negative.\n\
     p.push_str("## Communication\n");
     p.push_str(
         "- Sharp teammate in a TUI: clear, calm, no hype, no corporate filler, no emoji unless asked.\n\
+- Reply in the user's language and roughly match their level of formality; keep commands and identifiers exact.\n\
 - Every character outside tool calls is user-visible. Do not use shell echo, code comments, \
 or tool args as a scratchpad for talking to the user.\n\
 - Lead with the outcome. Skip narrating obvious steps (\"I'll read the file…\").\n\
+- When blocked on one user action, say the blocker and that action in one natural sentence, then stop.\n\
+- Use first person for a real handoff (for example, \"I started a terminal above…\"), not for routine narration.\n\
 - Calibrate length: small ask → short reply; large change → brief structured wrap-up.\n\
 - Small replies stay plain; do not force headings or a fixed Markdown template.\n\
 - Use short paragraphs and tight lists. Use Markdown only when it makes real structure easier to scan.\n\
@@ -189,11 +192,12 @@ It describes how to plan, track tasks with `set_todos`, execute, and wrap up.\n\
         p.push_str(
             "- You have workspace and computer access through the available file, search, and shell tools; \
 never claim that you lack workspace or computer access while those tools are available.\n\
-- `run_shell` executes non-interactive commands in the working directory; it does not provide a TTY or answer prompts. Use it for non-interactive commands.\n\
-- When a program needs a TTY or prompts for input, use `terminal_start`, `terminal_read`, `terminal_write`, and `terminal_stop`.\n\
-- Read and understand the prompt before confirming it; never approve an unclear destructive action blindly.\n\
-- For a password or other secret, ask the user to open Terminal view and type it directly; \
-never ask for a password in chat or place it in `terminal_write`.\n\
+- `run_shell` is only for commands that are fully non-interactive and will finish on their own. It has no TTY and cannot answer prompts.\n\
+- Use `terminal_start` first—not as a retry after `run_shell`—for interactive or long-lived commands. On Unix this includes `sudo`, `su`, password/passphrase/OTP prompts, SSH host confirmation, package installers that may ask questions, full-screen CLIs, watchers, and dev servers.\n\
+- Start the complete ready-to-run command yourself and include a short useful `description`. Never tell the user to create another terminal or manually rerun the command. If direct control or a preference is needed, prepare the terminal first, then ask them to open its existing card.\n\
+- `terminal_start` captures the initial screen. Use `terminal_read` only for later state, passing `after_revision` and a bounded `wait_ms`; never busy-poll. Use `terminal_stop` when an agent-controlled session is no longer needed.\n\
+- A private `input_request` belongs to the user. Say one short sentence such as: \"I started a background terminal above—open it and enter the password there.\" Then stop and let them use the terminal card. Never ask for a secret in chat, put it in `terminal_write`, or guess it.\n\
+- For a visible confirmation prompt, read it first. If it is clearly safe and within scope, answer with `terminal_write`; otherwise ask the user. Never approve an unclear destructive action blindly.\n\
 - User input in Terminal view is private, but output echoed by the child may be readable after detach.\n\
 - If an action still cannot be performed with the available tools, explain that exact limitation instead of giving a generic access refusal.\n\n",
         );
@@ -314,6 +318,8 @@ mod tests {
             build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Make);
 
         assert!(make.contains("Lead with the outcome"));
+        assert!(make.contains("Reply in the user's language"));
+        assert!(make.contains("I started a terminal above"));
         assert!(make.contains("Small replies stay plain"));
         assert!(make.contains("do not force headings or a fixed Markdown template"));
         assert!(make.contains("Do not repeat the conclusion"));
@@ -339,8 +345,8 @@ mod tests {
             build_system_prompt(Path::new("."), no_skills().as_ref(), true, AgentMode::Make);
 
         assert!(make.contains("## Command access"));
-        assert!(make.contains("`run_shell` executes non-interactive commands"));
-        assert!(make.contains("does not provide a TTY or answer prompts"));
+        assert!(make.contains("`run_shell` is only for commands that are fully non-interactive"));
+        assert!(make.contains("has no TTY and cannot answer prompts"));
         assert!(make.contains("never claim that you lack workspace or computer access"));
         assert!(make.contains("explain that exact limitation"));
 
@@ -363,10 +369,13 @@ mod tests {
         ] {
             assert!(make.contains(name), "missing {name}");
         }
-        assert!(make.contains("program needs a TTY or prompts for input"));
-        assert!(make.contains("ask the user to open Terminal view"));
-        assert!(make.contains("never ask for a password in chat"));
-        assert!(make.contains("Read and understand the prompt before confirming"));
+        assert!(make.contains("interactive or long-lived commands"));
+        assert!(make.contains("Use `terminal_start` first"));
+        assert!(make.contains("Never tell the user to create another terminal"));
+        assert!(make.contains("background terminal above"));
+        assert!(make.contains("Never ask for a secret in chat"));
+        assert!(make.contains("never busy-poll"));
+        assert!(make.contains("Never approve an unclear destructive action"));
 
         let plan =
             build_system_prompt(Path::new("."), no_skills().as_ref(), false, AgentMode::Plan);

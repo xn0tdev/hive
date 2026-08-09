@@ -2566,14 +2566,26 @@ Keep everything else unless a note says otherwise.\n",
                 let Some((screen, revision)) = frame.snapshot() else {
                     return false;
                 };
-                let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
-                    Block::Terminal(card) if card.id == id => Some(card),
-                    _ => None,
-                }) else {
-                    return false;
+                let new_request = {
+                    let Some(card) = self.blocks.iter_mut().find_map(|block| match block {
+                        Block::Terminal(card) if card.id == id => Some(card),
+                        _ => None,
+                    }) else {
+                        return false;
+                    };
+                    let previous = card.input_request();
+                    card.screen = screen;
+                    card.revision = card.revision.max(revision);
+                    let current = card.input_request();
+                    if current != previous {
+                        current
+                    } else {
+                        None
+                    }
                 };
-                card.screen = screen;
-                card.revision = card.revision.max(revision);
+                if new_request.is_some_and(|request| request.is_private()) {
+                    self.flash("Background terminal needs private input · click its card to open");
+                }
                 true
             }
             AgentEvent::TerminalState {
@@ -3925,6 +3937,50 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].description, "Install a color theme");
+    }
+
+    #[test]
+    fn private_terminal_prompt_gets_one_clear_handoff() {
+        let mut app = app();
+        app.apply(AgentEvent::TerminalStarted {
+            id: "term-1".into(),
+            command: "sudo apt upgrade".into(),
+            description: "Upgrade packages".into(),
+            rows: 20,
+            cols: 80,
+        });
+        app.apply(AgentEvent::TerminalOutput {
+            id: "term-1".into(),
+            frame: hive_core::TerminalOutputFrame::from_bytes(
+                20,
+                80,
+                10_000,
+                b"[sudo] password for user:",
+                1,
+            ),
+        });
+
+        assert!(app
+            .flash_text()
+            .is_some_and(|text| text.contains("private input")));
+        assert!(app
+            .terminal_card("term-1")
+            .and_then(|card| card.input_request())
+            .is_some_and(|request| request.is_private()));
+
+        // Coalesced/repeated frames for the same prompt do not nag again.
+        app.flash_msg = None;
+        app.apply(AgentEvent::TerminalOutput {
+            id: "term-1".into(),
+            frame: hive_core::TerminalOutputFrame::from_bytes(
+                20,
+                80,
+                10_000,
+                b"[sudo] password for user:",
+                2,
+            ),
+        });
+        assert!(app.flash_text().is_none());
     }
 
     #[test]

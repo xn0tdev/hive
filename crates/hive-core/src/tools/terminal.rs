@@ -3,7 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::terminal::{TerminalError, TerminalKey, TerminalWriteRequest};
+use crate::terminal::{
+    TerminalError, TerminalInputRequest, TerminalKey, TerminalReadResult, TerminalSnapshot,
+    TerminalWriteRequest,
+};
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 
 use super::{bool_arg, str_arg, u64_arg};
@@ -12,6 +15,62 @@ pub struct TerminalStart;
 pub struct TerminalRead;
 pub struct TerminalWrite;
 pub struct TerminalStop;
+
+/// Capture the first screen update in the start call. This removes the usual
+/// start → immediate read round trip without making a quiet process feel slow.
+const START_CAPTURE_MS: u64 = 250;
+
+const PRIVATE_INPUT_HINT: &str = "Tell the user now, in one short sentence, that the background terminal above needs private input and to open it and enter it there. Then stop. Never ask for or send the secret in chat or terminal_write, and do not poll.";
+const CONFIRMATION_HINT: &str = "Read the confirmation prompt. If it is clearly safe and within the user's request, answer it with terminal_write; otherwise ask the user. Never approve an unclear destructive action.";
+
+fn agent_hint(request: Option<&TerminalInputRequest>) -> Option<&'static str> {
+    request.map(|request| {
+        if request.is_private() {
+            PRIVATE_INPUT_HINT
+        } else {
+            CONFIRMATION_HINT
+        }
+    })
+}
+
+#[derive(serde::Serialize)]
+struct TerminalReadOutput<'a> {
+    #[serde(flatten)]
+    result: &'a TerminalReadResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_hint: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct TerminalStartOutput {
+    #[serde(flatten)]
+    session: TerminalSnapshot,
+    screen: Option<String>,
+    output: Option<String>,
+    output_truncated: bool,
+    input_request: Option<TerminalInputRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_hint: Option<&'static str>,
+}
+
+fn serialized_read(result: &TerminalReadResult) -> ToolResult {
+    serialized(&TerminalReadOutput {
+        result,
+        agent_hint: agent_hint(result.input_request.as_ref()),
+    })
+}
+
+fn serialized_start(result: TerminalReadResult) -> ToolResult {
+    let agent_hint = agent_hint(result.input_request.as_ref());
+    serialized(&TerminalStartOutput {
+        session: result.session,
+        screen: result.screen,
+        output: result.output,
+        output_truncated: result.output_truncated,
+        input_request: result.input_request,
+        agent_hint,
+    })
+}
 
 fn manager(ctx: &ToolContext) -> Result<&crate::TerminalHandle, TerminalError> {
     if ctx.depth > 0 {
@@ -48,8 +107,10 @@ impl Tool for TerminalStart {
     }
 
     fn description(&self) -> &str {
-        "Start one persistent interactive command in a pseudo-terminal. Use this \
-when a CLI requires prompts or terminal behavior that `run_shell` cannot provide."
+        "Start one background interactive command in a pseudo-terminal and capture \
+its initial screen. Use this first for sudo/password prompts, confirmations, full-screen \
+CLIs, installers, dev servers, watchers, and other long-lived commands that `run_shell` \
+cannot handle. Supply the ready-to-run command so the user never has to create a terminal."
     }
 
     fn parameters(&self) -> Value {
@@ -80,7 +141,17 @@ when a CLI requires prompts or terminal behavior that `run_shell` cannot provide
             Err(error) => return ToolResult::error(error.to_string()),
         };
         match manager.start(command, &description, &ctx.cwd).await {
-            Ok(snapshot) => serialized(&snapshot),
+            Ok(snapshot) => match manager
+                .read(
+                    &snapshot.id,
+                    Some(snapshot.revision),
+                    Some(START_CAPTURE_MS),
+                )
+                .await
+            {
+                Ok(result) => serialized_start(result),
+                Err(error) => ToolResult::error(error.to_string()),
+            },
             Err(error) => ToolResult::error(error.to_string()),
         }
     }
@@ -94,7 +165,8 @@ impl Tool for TerminalRead {
 
     fn description(&self) -> &str {
         "Read the current interactive terminal screen and printable output since \
-an optional revision. Can briefly wait for a newer revision."
+an optional revision. Can briefly wait for a newer revision and reports structured \
+private-input or confirmation prompts."
     }
 
     fn parameters(&self) -> Value {
@@ -138,22 +210,7 @@ an optional revision. Can briefly wait for a newer revision."
             )
             .await
         {
-            Ok(result) => {
-                // A password or confirmation prompt is the user's to answer.
-                // Say so in the result, or the model sits in a read loop (or
-                // worse, guesses) while the terminal blocks.
-                let waiting = result
-                    .screen
-                    .as_deref()
-                    .and_then(crate::terminal::awaiting_user_input);
-                match (serialized(&result), waiting) {
-                    (out, Some(prompt)) if !out.is_error => ToolResult::ok(format!(
-                        "{}\n\nThis terminal is waiting for input only the user can give:\n  {prompt}\nTell them what it is asking for and that you will wait, then stop and let them answer in the terminal view. Do not guess a password and do not keep polling — you will see the result once they have answered.",
-                        out.content
-                    )),
-                    (out, _) => out,
-                }
-            }
+            Ok(result) => serialized_read(&result),
             Err(error) => ToolResult::error(error.to_string()),
         }
     }
@@ -167,7 +224,8 @@ impl Tool for TerminalWrite {
 
     fn description(&self) -> &str {
         "Write text or a named key to an agent-controlled interactive terminal. \
-Set `submit` to append Enter after the text or key."
+Set `submit` to append Enter after the text or key. The backend refuses passwords, \
+passphrases, PINs, and verification codes; the user must enter those privately."
     }
 
     fn parameters(&self) -> Value {
@@ -318,6 +376,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value == "ctrl_c"));
+        assert!(TerminalStart.description().contains("sudo/password"));
+        assert!(TerminalStart
+            .description()
+            .contains("never has to create a terminal"));
+        assert!(TerminalWrite.description().contains("backend refuses"));
     }
 
     #[tokio::test]
@@ -350,6 +413,37 @@ mod tests {
             .await;
         assert!(!read.is_error, "{}", read.content);
         assert!(read.content.contains("hi"));
+
+        let stopped = TerminalStop.execute(json!({"session_id": id}), &ctx).await;
+        assert!(!stopped.is_error, "{}", stopped.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_captures_private_prompt_and_agent_cannot_fill_it() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let manager = TerminalManager::new(events);
+        let ctx = context(Some(manager.clone()));
+
+        let started = TerminalStart
+            .execute(json!({"command": "printf 'Password:'; read secret"}), &ctx)
+            .await;
+        assert!(!started.is_error, "{}", started.content);
+        let value: serde_json::Value = serde_json::from_str(&started.content).unwrap();
+        let id = value["id"].as_str().unwrap();
+        assert_eq!(value["input_request"]["kind"], "private");
+        assert!(value["agent_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("background terminal above")));
+
+        let write = TerminalWrite
+            .execute(
+                json!({"session_id": id, "text": "guess", "submit": true}),
+                &ctx,
+            )
+            .await;
+        assert!(write.is_error);
+        assert!(write.content.contains("private input"));
 
         let stopped = TerminalStop.execute(json!({"session_id": id}), &ctx).await;
         assert!(!stopped.is_error, "{}", stopped.content);

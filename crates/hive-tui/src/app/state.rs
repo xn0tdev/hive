@@ -2,7 +2,7 @@
 
 use hive_core::event::{SubagentLine, SubagentStatus};
 use hive_core::provider::Usage;
-use hive_core::{AgentMode, TerminalController, TerminalProcessState};
+use hive_core::{AgentMode, TerminalController, TerminalInputRequest, TerminalProcessState};
 
 /// Which conversation the transcript is showing.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -78,9 +78,8 @@ pub struct TerminalCard {
 }
 
 impl TerminalCard {
-    /// The prompt this terminal is blocked on, when it's one only the user can
-    /// answer (a password, a yes/no). `None` while it's just working.
-    pub fn awaiting_user(&self) -> Option<String> {
+    /// Structured prompt state from the current terminal screen.
+    pub fn input_request(&self) -> Option<TerminalInputRequest> {
         if !matches!(self.process, TerminalProcessState::Running) {
             return None;
         }
@@ -95,7 +94,12 @@ impl TerminalCard {
             }
             text.push('\n');
         }
-        hive_core::terminal::awaiting_user_input(&text)
+        hive_core::terminal::terminal_input_request(&text)
+    }
+
+    /// Text of the current prompt, kept for compact status/render call sites.
+    pub fn awaiting_user(&self) -> Option<String> {
+        self.input_request().map(|request| request.prompt)
     }
 
     pub fn secs(&self) -> f64 {

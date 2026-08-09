@@ -3,7 +3,7 @@
 
 use comb::{Color, Line, Modifier, Span, Style};
 
-use hive_core::TerminalProcessState;
+use hive_core::{TerminalInputKind, TerminalProcessState};
 
 use crate::app::state::TerminalCard;
 use crate::app::App;
@@ -27,6 +27,7 @@ pub(crate) fn terminal_card_lines(
         theme.strip
     };
     let running = matches!(card.process, TerminalProcessState::Running);
+    let input_request = card.input_request();
     let failed = matches!(
         &card.process,
         TerminalProcessState::Exited { code } if *code != 0
@@ -58,7 +59,7 @@ pub(crate) fn terminal_card_lines(
             Style::default().fg(theme.dim),
         ),
     ];
-    if show_hint {
+    if show_hint && input_request.is_none() {
         title_spans.push(Span::styled(
             "  click to open",
             Style::default().fg(if hovered { theme.dim } else { theme.faint }),
@@ -101,8 +102,15 @@ pub(crate) fn terminal_card_lines(
     let mut out = vec![soft_bg_pad(bg, width), title_line, detail_line];
     // A prompt only the user can answer: say so on the card, so nobody has to
     // notice a stalled spinner and go looking.
-    if let Some(prompt) = card.awaiting_user() {
-        let text = format!("    ⌨ waiting for you · {prompt}");
+    if let Some(request) = input_request {
+        let text = match request.kind {
+            TerminalInputKind::Private => {
+                "    ⌨ private input needed · click to open and enter it there".to_string()
+            }
+            TerminalInputKind::Confirmation => {
+                format!("    ⌨ confirmation needed · {}", request.prompt)
+            }
+        };
         let text = if text.chars().count() > width && width > 1 {
             let mut t: String = text.chars().take(width - 1).collect();
             t.push('…');
@@ -157,7 +165,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_str()))
             .collect();
-        assert!(text.contains("waiting for you"), "{text}");
+        assert!(text.contains("private input needed"), "{text}");
+        assert!(text.contains("enter it there"), "{text}");
 
         a.blocks.push(Block::Terminal(Box::new(card)));
         assert_eq!(a.activity_label(), "Waiting for you");

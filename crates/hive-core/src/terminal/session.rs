@@ -11,8 +11,8 @@ use crate::event::{AgentEvent, EventSender};
 
 use super::buffer::{PrintableDelta, TerminalBuffer};
 use super::{
-    TerminalController, TerminalError, TerminalProcessState, TerminalReadResult, TerminalSnapshot,
-    TerminalWriteRequest, DEFAULT_COLS, DEFAULT_ROWS,
+    terminal_input_request, TerminalController, TerminalError, TerminalProcessState,
+    TerminalReadResult, TerminalSnapshot, TerminalWriteRequest, DEFAULT_COLS, DEFAULT_ROWS,
 };
 
 const MAX_QUEUED_WRITES: usize = 64;
@@ -378,16 +378,20 @@ impl TerminalSession {
                 screen: None,
                 output: None,
                 output_truncated: false,
+                input_request: None,
             };
         }
 
         let PrintableDelta { text, truncated } =
             state.buffer.output_since(after_revision.unwrap_or(0));
+        let screen = state.buffer.screen();
+        let input_request = terminal_input_request(&screen);
         TerminalReadResult {
             session,
-            screen: Some(state.buffer.screen()),
+            screen: Some(screen),
             output: Some(text),
             output_truncated: truncated,
+            input_request,
         }
     }
 
@@ -398,6 +402,11 @@ impl TerminalSession {
         let (bytes, generation) = {
             let state = self.lock_state();
             ensure_controller(&state, TerminalController::Agent)?;
+            if terminal_input_request(&state.buffer.screen())
+                .is_some_and(|input| input.is_private())
+            {
+                return Err(TerminalError::PrivateInputRequired);
+            }
             (
                 request.bytes(state.buffer.application_cursor())?,
                 state.controller_generation,

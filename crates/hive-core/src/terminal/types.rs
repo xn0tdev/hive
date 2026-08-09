@@ -5,6 +5,22 @@ pub enum TerminalController {
     User,
 }
 
+/// What kind of input an interactive program is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalInputKind {
+    /// Password, passphrase, PIN, OTP, or another value the model must not see.
+    Private,
+    /// A visible yes/no-style decision the agent may answer when it is safe.
+    Confirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TerminalInputRequest {
+    pub kind: TerminalInputKind,
+    pub prompt: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TerminalProcessState {
@@ -30,6 +46,8 @@ pub struct TerminalReadResult {
     pub screen: Option<String>,
     pub output: Option<String>,
     pub output_truncated: bool,
+    /// Structured prompt state so callers do not need to infer it from screen text.
+    pub input_request: Option<TerminalInputRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +141,8 @@ pub enum TerminalError {
     NotRunning,
     #[error("terminal input is empty")]
     EmptyInput,
+    #[error("terminal is waiting for private input; ask the user to open the terminal card and enter it there")]
+    PrivateInputRequired,
     #[error("terminal I/O failed: {0}")]
     Io(String),
 }
@@ -166,37 +186,55 @@ mod tests {
     }
 }
 
-/// What a terminal is asking the user for, when its last line is a prompt only
-/// a human can answer. The agent must not guess at these — it hands the
-/// terminal over and waits.
-pub fn awaiting_user_input(screen: &str) -> Option<String> {
+/// Detect a prompt that needs either private user input or an explicit
+/// confirmation. Only the final non-empty screen line is considered.
+pub fn terminal_input_request(screen: &str) -> Option<TerminalInputRequest> {
     let line = screen.lines().rev().find(|l| !l.trim().is_empty())?.trim();
     let lower = line.to_ascii_lowercase();
 
-    let secret = (lower.contains("password") || lower.contains("passphrase"))
-        && (lower.ends_with(':') || lower.ends_with("? ") || lower.ends_with(':'));
-    let confirm = lower.ends_with("(yes/no)?")
-        || lower.ends_with("(yes/no)? ")
-        || lower.ends_with("[y/n]")
-        || lower.ends_with("[y/n] ")
-        || lower.ends_with("[y/n]:")
-        || lower.contains("(yes/no/[fingerprint])");
-    let code = (lower.contains("verification code")
+    let prompt_end = lower.ends_with(':') || lower.ends_with('?');
+    let private = (lower.contains("password")
+        || lower.contains("passphrase")
+        || lower.contains("verification code")
+        || lower.contains("authentication code")
         || lower.contains("one-time")
         || lower.contains("2fa")
-        || lower.contains("otp"))
-        && lower.ends_with(':');
+        || lower.contains("otp")
+        || lower.contains(" pin")
+        || lower.starts_with("pin"))
+        && prompt_end;
+    let confirm = lower.ends_with("(yes/no)?")
+        || lower.ends_with("[y/n]")
+        || lower.ends_with("[y/n]:")
+        || lower.contains("(yes/no/[fingerprint])");
 
-    if secret || confirm || code {
-        Some(line.to_string())
+    let kind = if private {
+        TerminalInputKind::Private
+    } else if confirm {
+        TerminalInputKind::Confirmation
     } else {
-        None
+        return None;
+    };
+    Some(TerminalInputRequest {
+        kind,
+        prompt: line.to_string(),
+    })
+}
+
+/// Backwards-compatible prompt text helper used by the TUI status label.
+pub fn awaiting_user_input(screen: &str) -> Option<String> {
+    terminal_input_request(screen).map(|request| request.prompt)
+}
+
+impl TerminalInputRequest {
+    pub fn is_private(&self) -> bool {
+        self.kind == TerminalInputKind::Private
     }
 }
 
 #[cfg(test)]
 mod prompt_tests {
-    use super::awaiting_user_input;
+    use super::{awaiting_user_input, terminal_input_request, TerminalInputKind};
 
     #[test]
     fn spots_the_prompts_a_human_has_to_answer() {
@@ -236,5 +274,16 @@ mod prompt_tests {
     fn reports_the_prompt_line_itself() {
         let got = awaiting_user_input("x\n[sudo] password for gotlib:").unwrap();
         assert_eq!(got, "[sudo] password for gotlib:");
+    }
+
+    #[test]
+    fn separates_private_input_from_safe_confirmation() {
+        let private = terminal_input_request("Enter verification code:").unwrap();
+        assert_eq!(private.kind, TerminalInputKind::Private);
+        assert!(private.is_private());
+
+        let confirm = terminal_input_request("Install packages? [y/N]").unwrap();
+        assert_eq!(confirm.kind, TerminalInputKind::Confirmation);
+        assert!(!confirm.is_private());
     }
 }

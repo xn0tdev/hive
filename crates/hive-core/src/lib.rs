@@ -37,9 +37,9 @@ pub use provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, ToolSpec, Usage
 pub use skill::{no_skills, NoSkills, SkillMeta, SkillSource};
 pub use spawner::{noop_spawner, NoopSpawner, SubagentOutcome, SubagentSpawner, SubagentTask};
 pub use terminal::{
-    TerminalController, TerminalError, TerminalHandle, TerminalKey, TerminalManager,
-    TerminalOutputFrame, TerminalProcessState, TerminalReadResult, TerminalSnapshot,
-    TerminalWriteRequest, DEFAULT_COLS, DEFAULT_ROWS,
+    TerminalController, TerminalError, TerminalHandle, TerminalInputKind, TerminalInputRequest,
+    TerminalKey, TerminalManager, TerminalOutputFrame, TerminalProcessState, TerminalReadResult,
+    TerminalSnapshot, TerminalWriteRequest, DEFAULT_COLS, DEFAULT_ROWS,
 };
 pub use tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 

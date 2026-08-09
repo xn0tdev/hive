@@ -68,6 +68,61 @@ async fn interactive_prompt_accepts_y_and_exits() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn private_prompt_requires_user_control_and_stays_out_of_agent_input() {
+    let (events, _) = tokio::sync::mpsc::unbounded_channel();
+    let manager = TerminalManager::new(events);
+    let started = manager
+        .start(
+            "stty -echo; printf 'Password:'; read secret; stty echo; printf '\\naccepted\\n'",
+            "test",
+            Path::new("."),
+        )
+        .await
+        .unwrap();
+
+    let waiting = read_until(&manager, &started.id, "Password:").await;
+    assert!(waiting
+        .input_request
+        .as_ref()
+        .is_some_and(|request| request.is_private()));
+    assert!(matches!(
+        manager
+            .write_agent(
+                &started.id,
+                TerminalWriteRequest {
+                    text: Some("model-guess".into()),
+                    key: None,
+                    submit: true,
+                },
+            )
+            .await,
+        Err(TerminalError::PrivateInputRequired)
+    ));
+
+    manager.attach(&started.id).unwrap();
+    manager
+        .write_user(&started.id, b"user-secret\r".to_vec())
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        let state = manager.read(&started.id, None, None).await.unwrap();
+        if !matches!(state.session.process, TerminalProcessState::Running) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    manager.detach(&started.id).unwrap();
+    let visible = manager.read(&started.id, None, None).await.unwrap();
+    let screen = visible.screen.unwrap();
+    assert!(screen.contains("accepted"), "{screen:?}");
+    assert!(
+        !screen.contains("user-secret"),
+        "secret was echoed: {screen:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn user_control_blocks_agent_reads_and_writes_until_detach() {
     let (events, _) = tokio::sync::mpsc::unbounded_channel();
     let manager = TerminalManager::new(events);
