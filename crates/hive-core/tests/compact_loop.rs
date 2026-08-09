@@ -22,7 +22,7 @@ struct CompactAwareProvider {
 impl LlmProvider for CompactAwareProvider {
     async fn chat_stream(
         &self,
-        req: ChatRequest,
+        req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
         // Summarizer calls have no tools.

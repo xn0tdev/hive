@@ -77,7 +77,7 @@ impl FireworksProvider {
 
     async fn chat_completions_stream(
         &self,
-        req: ChatRequest,
+        req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
         let body = build_request(&req);
@@ -107,7 +107,7 @@ impl FireworksProvider {
 
     async fn responses_stream(
         &self,
-        req: ChatRequest,
+        req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
         let body = build_responses_request(&req);
@@ -161,7 +161,7 @@ impl FireworksProvider {
 impl LlmProvider for FireworksProvider {
     async fn chat_stream(
         &self,
-        req: ChatRequest,
+        req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
         match self.api_flavor() {

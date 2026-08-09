@@ -4,6 +4,7 @@
 
 /// Number of identical consecutive tool calls that triggers a loop.
 pub const LOOP_THRESHOLD: usize = 10;
+const MAX_REDIRECT_ARGS_CHARS: usize = 240;
 
 /// Tracks recent tool calls to detect repetition.
 #[derive(Default)]
@@ -41,12 +42,22 @@ impl LoopDetector {
 /// The redirect message injected into the conversation when a loop is detected.
 /// Short and direct — tells the agent what happened and to try a different approach.
 pub fn redirect_message(tool: &str, args: &str) -> String {
+    let args = truncate_args(args);
     format!(
         "You are stuck: `{tool}` called {n} times with the same arguments ({args}). \
 Stop repeating it. Re-read the situation and try a different approach. \
 If you cannot proceed, explain the blocker.",
         n = LOOP_THRESHOLD,
     )
+}
+
+fn truncate_args(args: &str) -> String {
+    if args.chars().count() <= MAX_REDIRECT_ARGS_CHARS {
+        return args.to_string();
+    }
+    let mut preview: String = args.chars().take(MAX_REDIRECT_ARGS_CHARS - 1).collect();
+    preview.push('…');
+    preview
 }
 
 #[cfg(test)]
@@ -89,5 +100,12 @@ mod tests {
         assert!(msg.contains("read_file"), "{msg}");
         assert!(msg.contains("different approach"), "{msg}");
         assert!(msg.contains("10"), "{msg}");
+    }
+
+    #[test]
+    fn redirect_message_caps_large_arguments() {
+        let msg = redirect_message("write_file", &"x".repeat(10_000));
+        assert!(msg.len() < 500, "redirect should stay compact");
+        assert!(msg.contains('…'));
     }
 }

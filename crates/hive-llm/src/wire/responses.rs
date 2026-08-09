@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Serialize)]
-pub struct ResponsesRequest {
-    pub model: String,
+pub struct ResponsesRequest<'a> {
+    pub model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     pub input: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ResponsesTool>,
+    pub tools: Vec<ResponsesTool<'a>>,
     pub stream: bool,
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,12 +22,12 @@ pub struct ResponsesRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ResponsesTool {
+pub struct ResponsesTool<'a> {
     #[serde(rename = "type")]
     pub kind: &'static str,
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub parameters: &'a Value,
     pub strict: bool,
 }
 
@@ -84,12 +84,12 @@ pub struct ResponsesUsage {
     pub total_tokens: u64,
 }
 
-fn to_tool(spec: &ToolSpec) -> ResponsesTool {
+fn to_tool(spec: &ToolSpec) -> ResponsesTool<'_> {
     ResponsesTool {
         kind: "function",
-        name: spec.name.clone(),
-        description: spec.description.clone(),
-        parameters: spec.parameters.clone(),
+        name: &spec.name,
+        description: &spec.description,
+        parameters: &spec.parameters,
         // Hive's schemas are written for best-effort function calling and do
         // not universally satisfy OpenAI's strict-schema requirements.
         strict: false,
@@ -179,7 +179,7 @@ fn supports_temperature(model: &str) -> bool {
         && !model.contains("codex")
 }
 
-pub fn build_responses_request(req: &ChatRequest) -> ResponsesRequest {
+pub fn build_responses_request<'a>(req: &'a ChatRequest<'a>) -> ResponsesRequest<'a> {
     let system_parts: Vec<String> = req
         .messages
         .iter()
@@ -190,22 +190,20 @@ pub fn build_responses_request(req: &ChatRequest) -> ResponsesRequest {
     let instructions = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
 
     let mut input = Vec::new();
-    for message in &req.messages {
+    for message in req.messages {
         append_message(&mut input, message);
     }
 
     ResponsesRequest {
-        model: req.model.clone(),
+        model: req.model,
         instructions,
         input,
-        tools: req.tools.iter().map(to_tool).collect(),
+        tools: req.tools.iter().map(|spec| to_tool(spec)).collect(),
         stream: true,
         // Hive owns and trims its transcript, so it replays response items
         // locally rather than asking OpenAI to retain conversation state.
         store: false,
-        temperature: supports_temperature(&req.model)
-            .then_some(req.temperature)
-            .flatten(),
+        temperature: req.temperature.filter(|_| supports_temperature(req.model)),
         max_output_tokens: req.max_tokens,
     }
 }
@@ -250,15 +248,17 @@ mod tests {
         });
         assistant.provider_items = vec![reasoning.clone(), function_call.clone()];
 
+        let messages = vec![
+            Message::system("be useful"),
+            Message::user("inspect it"),
+            assistant,
+            Message::tool_result("call_1", "lookup", "done"),
+        ];
+        let tools = vec![std::sync::Arc::new(tool())];
         let request = ChatRequest {
-            model: "gpt-5.6-luna".into(),
-            messages: vec![
-                Message::system("be useful"),
-                Message::user("inspect it"),
-                assistant,
-                Message::tool_result("call_1", "lookup", "done"),
-            ],
-            tools: vec![tool()],
+            model: "gpt-5.6-luna",
+            messages: &messages,
+            tools: &tools,
             temperature: Some(0.3),
             max_tokens: Some(4096),
         };
@@ -285,13 +285,14 @@ mod tests {
 
     #[test]
     fn image_inputs_use_responses_content_parts() {
+        let messages = vec![Message::user_parts(vec![
+            ContentPart::Text("what is this?".into()),
+            ContentPart::Image(ImageSource::Url("https://example.com/a.png".into())),
+        ])];
         let request = ChatRequest {
-            model: "gpt-4.1".into(),
-            messages: vec![Message::user_parts(vec![
-                ContentPart::Text("what is this?".into()),
-                ContentPart::Image(ImageSource::Url("https://example.com/a.png".into())),
-            ])],
-            tools: Vec::new(),
+            model: "gpt-4.1",
+            messages: &messages,
+            tools: &[],
             temperature: Some(0.2),
             max_tokens: None,
         };

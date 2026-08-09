@@ -3,11 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::json;
-
 use crate::config::AppConfig;
 use crate::event::{AgentEvent, EventSender};
-use crate::message::{ContentPart, ImageSource, Message};
+use crate::message::{ContentPart, ImageSource, Message, ToolCall};
 use crate::provider::{ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
 use crate::skill::SkillSource;
 use crate::spawner::SubagentSpawner;
@@ -148,9 +146,21 @@ impl AgentBuilder {
     ) -> Agent {
         let mode = AgentMode::Make;
         let system = build_system_prompt(&cwd, self.skills.as_ref(), depth > 0, mode);
+        let tool_specs = self
+            .tools
+            .iter()
+            .map(|tool| {
+                Arc::new(ToolSpec {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.parameters(),
+                })
+            })
+            .collect();
         Agent {
             provider: self.provider.clone(),
             tools: self.tools.clone(),
+            tool_specs,
             skills: self.skills.clone(),
             config: self.config.clone(),
             spawner,
@@ -174,6 +184,7 @@ impl AgentBuilder {
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: Vec<Arc<dyn Tool>>,
+    tool_specs: Vec<Arc<ToolSpec>>,
     skills: Arc<dyn SkillSource>,
     config: Arc<AppConfig>,
     spawner: Arc<dyn SubagentSpawner>,
@@ -337,60 +348,44 @@ impl Agent {
         }
     }
 
-    fn active_tool_specs(&self) -> Vec<ToolSpec> {
+    fn active_tool_specs(&self) -> Vec<Arc<ToolSpec>> {
         // Subagents always get the full MAKE tool set (no swarm fan-out, and no
         // self mode-switching — only the top-level agent owns the session mode).
         if self.depth > 0 {
             return self
-                .tools
+                .tool_specs
                 .iter()
                 .filter(|t| {
-                    t.name() != "spawn_swarm"
-                        && t.name() != "integrate_worktree"
-                        && t.name() != "switch_mode"
-                        && !is_terminal_tool(t.name())
+                    t.name.as_str() != "spawn_swarm"
+                        && t.name.as_str() != "integrate_worktree"
+                        && t.name.as_str() != "switch_mode"
+                        && !is_terminal_tool(&t.name)
                 })
-                .map(|t| ToolSpec {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters(),
-                })
+                .cloned()
                 .collect();
         }
         match self.mode {
             AgentMode::Make => self
-                .tools
+                .tool_specs
                 .iter()
                 .filter(|t| {
-                    t.name() != "spawn_swarm"
-                        && t.name() != "integrate_worktree"
-                        && (self.terminal.is_some() || !is_terminal_tool(t.name()))
+                    t.name.as_str() != "spawn_swarm"
+                        && t.name.as_str() != "integrate_worktree"
+                        && (self.terminal.is_some() || !is_terminal_tool(&t.name))
                 })
-                .map(|t| ToolSpec {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters(),
-                })
+                .cloned()
                 .collect(),
             AgentMode::Plan => self
-                .tools
+                .tool_specs
                 .iter()
-                .filter(|t| plan_mode_tool_allowed(t.name()))
-                .map(|t| ToolSpec {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters(),
-                })
+                .filter(|t| plan_mode_tool_allowed(&t.name))
+                .cloned()
                 .collect(),
             AgentMode::Multitask => self
-                .tools
+                .tool_specs
                 .iter()
-                .filter(|t| multitask_mode_tool_allowed(t.name()))
-                .map(|t| ToolSpec {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters(),
-                })
+                .filter(|t| multitask_mode_tool_allowed(&t.name))
+                .cloned()
                 .collect(),
         }
     }
@@ -484,7 +479,7 @@ impl Agent {
             return Ok(());
         }
 
-        let before = estimate_tokens(&self.session.messages);
+        let before = estimated;
 
         // Spinner: compaction in progress.
         self.emit(AgentEvent::Compacted {
@@ -500,10 +495,11 @@ impl Agent {
             return Ok(());
         }
 
+        let messages = summarize_request(&transcript);
         let req = ChatRequest {
-            model: self.model.clone(),
-            messages: summarize_request(&transcript),
-            tools: Vec::new(),
+            model: &self.model,
+            messages: &messages,
+            tools: &[],
             temperature: Some(0.2),
             max_tokens: Some(2_048),
         };
@@ -572,11 +568,11 @@ impl Agent {
                 self.maybe_auto_compact().await;
             }
 
-            let messages = self.session.messages.clone();
+            let tools = self.active_tool_specs();
             let req = ChatRequest {
-                model: self.model.clone(),
-                messages,
-                tools: self.active_tool_specs(),
+                model: &self.model,
+                messages: &self.session.messages,
+                tools: &tools,
                 temperature: Some(0.3),
                 max_tokens: None,
             };
@@ -646,62 +642,58 @@ impl Agent {
             // when the model returns several in one batch; everything else stays
             // sequential so side-effects (mode switch, file writes) stay ordered.
             let mut i = 0;
+            let mut loop_redirects = Vec::new();
             while i < tool_calls.len() {
                 if interrupt.load(Ordering::Relaxed) {
                     self.emit(AgentEvent::Notice("Interrupted.".to_string()));
+                    self.finish_unrun_tool_calls(&tool_calls[i..], "turn interrupted");
                     break;
                 }
 
                 let tc = &tool_calls[i];
 
-                // Loop detection: same tool + same args repeated too many times.
-                if self.loop_detector.record(&tc.name, &tc.arguments) {
-                    self.emit(AgentEvent::LoopDetected {
-                        tool: tc.name.clone(),
-                    });
-                    let msg = redirect_message(&tc.name, &tc.arguments);
-                    self.session.push(Message::user(msg));
-                    self.loop_detector.reset_streak();
-                    i += 1;
-                    continue;
-                }
-
                 if is_parallel_tool(&tc.name) {
                     let start = i;
                     i += 1;
                     while i < tool_calls.len() && is_parallel_tool(&tool_calls[i].name) {
-                        if self
-                            .loop_detector
-                            .record(&tool_calls[i].name, &tool_calls[i].arguments)
-                        {
-                            self.emit(AgentEvent::LoopDetected {
-                                tool: tool_calls[i].name.clone(),
-                            });
-                            let msg =
-                                redirect_message(&tool_calls[i].name, &tool_calls[i].arguments);
-                            self.session.push(Message::user(msg));
-                            self.loop_detector.reset_streak();
-                            break;
-                        }
                         i += 1;
                     }
                     let batch = &tool_calls[start..i];
                     if batch.len() == 1 {
-                        self.run_tool(
-                            &batch[0].id,
-                            &batch[0].name,
-                            &batch[0].arguments,
-                            &interrupt,
-                        )
-                        .await;
+                        let call = &batch[0];
+                        if self.detect_repeated_tool_call(call, &mut loop_redirects) {
+                            self.finish_unrun_tool_calls(
+                                batch,
+                                "identical call repeated too many times",
+                            );
+                        } else {
+                            self.run_tool(&call.id, &call.name, &call.arguments, &interrupt)
+                                .await;
+                        }
                     } else {
-                        self.run_tools_parallel(batch, &interrupt).await;
+                        self.run_tools_parallel(batch, &interrupt, &mut loop_redirects)
+                            .await;
                     }
                 } else {
+                    if self.detect_repeated_tool_call(tc, &mut loop_redirects) {
+                        self.finish_unrun_tool_calls(
+                            std::slice::from_ref(tc),
+                            "identical call repeated too many times",
+                        );
+                        i += 1;
+                        continue;
+                    }
                     self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
                         .await;
                     i += 1;
                 }
+            }
+
+            // Tool results must remain adjacent to the assistant tool-call
+            // message. Inject loop guidance only after every call has a result.
+            if !loop_redirects.is_empty() {
+                self.session
+                    .push(Message::user(loop_redirects.join("\n\n")));
             }
 
             if interrupt.load(Ordering::Relaxed) {
@@ -772,7 +764,21 @@ impl Agent {
             args_preview: preview_args(name, arguments),
         });
 
-        let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+        let args: serde_json::Value = match serde_json::from_str(arguments) {
+            Ok(args) => args,
+            Err(error) => {
+                let result = ToolResult::error(format!("invalid tool arguments: {error}"));
+                self.emit(AgentEvent::ToolFinished {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    ok: false,
+                    summary: first_line(&result.content, 120),
+                });
+                self.session
+                    .push(Message::tool_result(id, name, result.content));
+                return;
+            }
+        };
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -798,20 +804,9 @@ impl Agent {
             None
         };
 
-        let result = if self.depth == 0 && self.mode == AgentMode::Plan {
-            if let Err(msg) = plan_mode_check(name, path.as_deref(), &self.cwd) {
-                ToolResult::error(msg)
-            } else {
-                self.execute_tool(name, args, id, interrupt).await
-            }
-        } else if self.depth == 0 && self.mode == AgentMode::Multitask {
-            if let Err(msg) = multitask_mode_check(name) {
-                ToolResult::error(msg)
-            } else {
-                self.execute_tool(name, args, id, interrupt).await
-            }
-        } else {
-            self.execute_tool(name, args, id, interrupt).await
+        let result = match self.validate_tool_call(name, path.as_deref()) {
+            Ok(()) => self.execute_tool(name, args, id, interrupt).await,
+            Err(message) => ToolResult::error(message),
         };
 
         self.emit(AgentEvent::ToolFinished {
@@ -858,38 +853,66 @@ impl Agent {
 
     async fn run_tools_parallel(
         &mut self,
-        batch: &[crate::message::ToolCall],
+        batch: &[ToolCall],
         interrupt: &Arc<AtomicBool>,
+        loop_redirects: &mut Vec<String>,
     ) {
+        enum PendingResult {
+            Ready {
+                result: ToolResult,
+                emit_finished: bool,
+            },
+            Running(tokio::task::JoinHandle<ToolResult>),
+        }
+
+        let mut pending = Vec::with_capacity(batch.len());
         for tc in batch {
+            if interrupt.load(Ordering::Relaxed) {
+                pending.push(PendingResult::Ready {
+                    result: ToolResult::error("turn interrupted"),
+                    emit_finished: false,
+                });
+                continue;
+            }
+            if self.detect_repeated_tool_call(tc, loop_redirects) {
+                pending.push(PendingResult::Ready {
+                    result: ToolResult::error(
+                        "tool call not run: identical call repeated too many times",
+                    ),
+                    emit_finished: false,
+                });
+                continue;
+            }
+
             self.emit(AgentEvent::ToolStarted {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
                 args_preview: preview_args(&tc.name, &tc.arguments),
             });
-        }
 
-        let mut set = tokio::task::JoinSet::new();
-        for tc in batch {
-            let args: serde_json::Value =
-                serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
+            let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
+                Ok(args) => args,
+                Err(error) => {
+                    pending.push(PendingResult::Ready {
+                        result: ToolResult::error(format!("invalid tool arguments: {error}")),
+                        emit_finished: true,
+                    });
+                    continue;
+                }
+            };
+            let path = args.get("path").and_then(serde_json::Value::as_str);
+            if let Err(message) = self.validate_tool_call(&tc.name, path) {
+                pending.push(PendingResult::Ready {
+                    result: ToolResult::error(message),
+                    emit_finished: true,
+                });
+                continue;
+            }
             let tool = self.tools.iter().find(|t| t.name() == tc.name).cloned();
             let name = tc.name.clone();
-            let ctx = ToolContext {
-                cwd: self.cwd.clone(),
-                events: self.events.clone(),
-                spawner: self.spawner.clone(),
-                skills: self.skills.clone(),
-                config: self.config.clone(),
-                terminal: self.terminal.clone(),
-                vision: self.vision_capable,
-                depth: self.depth,
-                call_id: tc.id.clone(),
-                isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
-                interrupt: interrupt.clone(),
-            };
+            let ctx = self.tool_context(&tc.id, interrupt);
             let interrupt = interrupt.clone();
-            set.spawn(async move {
+            pending.push(PendingResult::Running(tokio::spawn(async move {
                 match tool {
                     Some(t) => {
                         tokio::select! {
@@ -900,26 +923,90 @@ impl Agent {
                     }
                     None => ToolResult::error(format!("unknown tool: {name}")),
                 }
-            });
+            })));
         }
 
-        let mut results = Vec::with_capacity(batch.len());
-        while let Some(joined) = set.join_next().await {
-            results.push(joined.unwrap_or_else(|_| ToolResult::error("task panicked")));
-        }
-        // JoinSet doesn't preserve order; but for delegate tools the order
-        // doesn't matter semantically — the model sees all results regardless.
-        // We still push them in the original call order for consistency.
-        // Since JoinSet returns in completion order, we just push as-is.
-        for (tc, result) in batch.iter().zip(results) {
-            self.emit(AgentEvent::ToolFinished {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                ok: !result.is_error,
-                summary: first_line(&result.content, 120),
-            });
+        // Tasks are already running concurrently. Awaiting their handles in
+        // call order preserves the required call-id/result pairing.
+        for (tc, pending) in batch.iter().zip(pending) {
+            let (result, emit_finished) = match pending {
+                PendingResult::Ready {
+                    result,
+                    emit_finished,
+                } => (result, emit_finished),
+                PendingResult::Running(handle) => (
+                    handle
+                        .await
+                        .unwrap_or_else(|_| ToolResult::error("tool task panicked")),
+                    true,
+                ),
+            };
+            if emit_finished {
+                self.emit(AgentEvent::ToolFinished {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    ok: !result.is_error,
+                    summary: first_line(&result.content, 120),
+                });
+            }
             self.session
                 .push(Message::tool_result(&tc.id, &tc.name, result.content));
+        }
+    }
+
+    /// Record a result for calls that were requested by the model but could
+    /// not be started. Leaving them unanswered corrupts the next API request.
+    fn finish_unrun_tool_calls(&mut self, calls: &[ToolCall], reason: &str) {
+        for call in calls {
+            self.session.push(Message::tool_result(
+                &call.id,
+                &call.name,
+                format!("tool call not run: {reason}"),
+            ));
+        }
+    }
+
+    fn detect_repeated_tool_call(
+        &mut self,
+        call: &ToolCall,
+        loop_redirects: &mut Vec<String>,
+    ) -> bool {
+        if !self.loop_detector.record(&call.name, &call.arguments) {
+            return false;
+        }
+
+        self.emit(AgentEvent::LoopDetected {
+            tool: call.name.clone(),
+        });
+        loop_redirects.push(redirect_message(&call.name, &call.arguments));
+        self.loop_detector.reset_streak();
+        true
+    }
+
+    fn validate_tool_call(&self, name: &str, path: Option<&str>) -> Result<(), String> {
+        if self.depth > 0 {
+            return Ok(());
+        }
+        match self.mode {
+            AgentMode::Plan => plan_mode_check(name, path, &self.cwd),
+            AgentMode::Multitask => multitask_mode_check(name),
+            AgentMode::Make => Ok(()),
+        }
+    }
+
+    fn tool_context(&self, id: &str, interrupt: &Arc<AtomicBool>) -> ToolContext {
+        ToolContext {
+            cwd: self.cwd.clone(),
+            events: self.events.clone(),
+            spawner: self.spawner.clone(),
+            skills: self.skills.clone(),
+            config: self.config.clone(),
+            terminal: self.terminal.clone(),
+            vision: self.vision_capable,
+            depth: self.depth,
+            call_id: id.to_string(),
+            isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
+            interrupt: interrupt.clone(),
         }
     }
 
@@ -933,19 +1020,7 @@ impl Agent {
         let tool = self.tools.iter().find(|t| t.name() == name).cloned();
         match tool {
             Some(t) => {
-                let ctx = ToolContext {
-                    cwd: self.cwd.clone(),
-                    events: self.events.clone(),
-                    spawner: self.spawner.clone(),
-                    skills: self.skills.clone(),
-                    config: self.config.clone(),
-                    terminal: self.terminal.clone(),
-                    vision: self.vision_capable,
-                    depth: self.depth,
-                    call_id: id.to_string(),
-                    isolate_worktrees: self.depth == 0 && self.mode == AgentMode::Multitask,
-                    interrupt: interrupt.clone(),
-                };
+                let ctx = self.tool_context(id, interrupt);
                 // Drop the tool future on Esc so HTTP/spawn unblock; shell
                 // also kills its process group in Drop / on interrupt.
                 tokio::select! {
@@ -1030,6 +1105,7 @@ mod tests {
     use super::*;
     use crate::{all_tools, no_skills, noop_spawner, ChatOutcome, CoreError, TerminalManager};
     use async_trait::async_trait;
+    use std::sync::atomic::AtomicUsize;
 
     struct NoopProvider;
 
@@ -1037,7 +1113,7 @@ mod tests {
     impl LlmProvider for NoopProvider {
         async fn chat_stream(
             &self,
-            _req: ChatRequest,
+            _req: ChatRequest<'_>,
             _on_delta: &mut (dyn FnMut(Delta) + Send),
         ) -> Result<ChatOutcome, CoreError> {
             unreachable!("tool-spec tests do not call the provider")
@@ -1053,11 +1129,203 @@ mod tests {
         }
     }
 
+    struct DelayedParallelTool {
+        name: &'static str,
+        delay_ms: u64,
+        output: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for DelayedParallelTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            ToolResult::ok(self.output)
+        }
+    }
+
+    struct CountingTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            ToolResult::ok("unexpected")
+        }
+    }
+
+    struct SchemaCountingTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SchemaCountingTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::ok("ok")
+        }
+    }
+
+    #[test]
+    fn tool_schemas_are_built_once_per_agent() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = AgentBuilder {
+            provider: Arc::new(NoopProvider),
+            tools: vec![Arc::new(SchemaCountingTool {
+                calls: calls.clone(),
+            })],
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+        }
+        .build(events, "test".into(), 0, noop_spawner());
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let _ = agent.active_tool_specs();
+        let _ = agent.active_tool_specs();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn parallel_results_keep_their_original_call_ids() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DelayedParallelTool {
+                name: "verify_project",
+                delay_ms: 30,
+                output: "slow result",
+            }),
+            Arc::new(DelayedParallelTool {
+                name: "spawn_subagent",
+                delay_ms: 0,
+                output: "fast result",
+            }),
+        ];
+        let mut agent = AgentBuilder {
+            provider: Arc::new(NoopProvider),
+            tools,
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+        }
+        .build(events, "test".into(), 0, noop_spawner());
+        let calls = vec![
+            ToolCall {
+                id: "slow".into(),
+                name: "verify_project".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "fast".into(),
+                name: "spawn_subagent".into(),
+                arguments: "{}".into(),
+            },
+        ];
+
+        agent
+            .run_tools_parallel(&calls, &Arc::new(AtomicBool::new(false)), &mut Vec::new())
+            .await;
+
+        let results = &agent.session.messages[1..];
+        assert_eq!(results[0].tool_call_id.as_deref(), Some("slow"));
+        assert_eq!(results[0].text(), "slow result");
+        assert_eq!(results[1].tool_call_id.as_deref(), Some("fast"));
+        assert_eq!(results[1].text(), "fast result");
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_do_not_execute_the_tool() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut agent = AgentBuilder {
+            provider: Arc::new(NoopProvider),
+            tools: vec![Arc::new(CountingTool {
+                calls: calls.clone(),
+            })],
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+        }
+        .build(events, "test".into(), 0, noop_spawner());
+
+        agent
+            .run_tool("bad-call", "echo", "{", &Arc::new(AtomicBool::new(false)))
+            .await;
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let result = agent.session.messages.last().unwrap();
+        assert_eq!(result.tool_call_id.as_deref(), Some("bad-call"));
+        assert!(result.text().contains("invalid tool arguments"));
+    }
+
+    #[test]
+    fn interrupted_calls_are_closed_in_history() {
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut agent = builder().build(events, "test".into(), 0, noop_spawner());
+        let calls = vec![
+            ToolCall {
+                id: "one".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "two".into(),
+                name: "grep".into(),
+                arguments: "{}".into(),
+            },
+        ];
+
+        agent.finish_unrun_tool_calls(&calls, "turn interrupted");
+
+        let results = &agent.session.messages[1..];
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].tool_call_id.as_deref(), Some("one"));
+        assert_eq!(results[1].tool_call_id.as_deref(), Some("two"));
+        assert!(results
+            .iter()
+            .all(|message| message.text().contains("turn interrupted")));
+    }
+
     fn tool_names(agent: &Agent) -> Vec<String> {
         agent
             .active_tool_specs()
             .into_iter()
-            .map(|tool| tool.name)
+            .map(|tool| tool.name.clone())
             .collect()
     }
 

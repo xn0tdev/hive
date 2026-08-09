@@ -4,7 +4,7 @@
 //! prompt tokens reach [`COMPACT_RATIO`] of the configured context window.
 //! Safe to run mid-turn at the top of the tool loop (after tool results land).
 
-use crate::message::{ContentPart, Message, Role};
+use crate::message::{ContentPart, ImageSource, Message, Role};
 
 /// Compact when prompt tokens ≥ this fraction of the context window.
 pub const COMPACT_RATIO: f64 = 0.75;
@@ -32,11 +32,45 @@ pub fn estimate_tokens(messages: &[Message]) -> u64 {
 }
 
 fn message_chars(m: &Message) -> usize {
-    let mut n = m.text().len();
+    if !m.provider_items.is_empty() {
+        return m.provider_items.iter().map(json_chars).sum();
+    }
+
+    let mut n = m
+        .content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text(text) => text.len(),
+            ContentPart::Image(ImageSource::Url(url)) => url.len(),
+            // Image bytes are billed as image input, not tokenized base64 text.
+            ContentPart::Image(ImageSource::Base64 { media_type, .. }) => media_type.len(),
+        })
+        .sum();
     for tc in &m.tool_calls {
         n += tc.name.len() + tc.arguments.len();
     }
     n
+}
+
+/// Approximate serialized JSON size without allocating a temporary string.
+fn json_chars(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(true) => 4,
+        serde_json::Value::Bool(false) => 5,
+        serde_json::Value::Number(_) => 24,
+        serde_json::Value::String(value) => value.len() + 2,
+        serde_json::Value::Array(values) => {
+            2 + values.iter().map(json_chars).sum::<usize>() + values.len().saturating_sub(1)
+        }
+        serde_json::Value::Object(values) => {
+            2 + values
+                .iter()
+                .map(|(key, value)| key.len() + 3 + json_chars(value))
+                .sum::<usize>()
+                + values.len().saturating_sub(1)
+        }
+    }
 }
 
 /// Build a plain-text transcript for the summarizer (system message omitted).
@@ -203,5 +237,16 @@ mod tests {
         });
         let n = estimate_tokens(&[Message::system("a"), m]);
         assert!(n >= 1);
+    }
+
+    #[test]
+    fn estimate_counts_provider_native_items() {
+        let mut message = Message::assistant("short");
+        message.provider_items = vec![serde_json::json!({
+            "type": "reasoning",
+            "encrypted_content": "x".repeat(4_000),
+        })];
+
+        assert!(estimate_tokens(&[message]) >= 1_000);
     }
 }

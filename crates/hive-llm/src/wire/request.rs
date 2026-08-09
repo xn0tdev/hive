@@ -6,11 +6,11 @@ use hive_core::message::{ContentPart, Message, Role};
 use hive_core::provider::{ChatRequest, ToolSpec};
 
 #[derive(Serialize)]
-pub struct WireRequest {
-    pub model: String,
+pub struct WireRequest<'a> {
+    pub model: &'a str,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<WireTool>,
+    pub tools: Vec<WireTool<'a>>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -71,17 +71,17 @@ pub struct WireFn {
 }
 
 #[derive(Serialize)]
-pub struct WireTool {
+pub struct WireTool<'a> {
     #[serde(rename = "type")]
     pub kind: &'static str,
-    pub function: WireToolFn,
+    pub function: WireToolFn<'a>,
 }
 
 #[derive(Serialize)]
-pub struct WireToolFn {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
+pub struct WireToolFn<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub parameters: &'a serde_json::Value,
 }
 
 fn role_str(role: Role) -> &'static str {
@@ -141,22 +141,22 @@ fn to_wire_message(m: &Message) -> WireMessage {
     }
 }
 
-fn to_wire_tool(spec: &ToolSpec) -> WireTool {
+fn to_wire_tool(spec: &ToolSpec) -> WireTool<'_> {
     WireTool {
         kind: "function",
         function: WireToolFn {
-            name: spec.name.clone(),
-            description: spec.description.clone(),
-            parameters: spec.parameters.clone(),
+            name: &spec.name,
+            description: &spec.description,
+            parameters: &spec.parameters,
         },
     }
 }
 
-pub fn build_request(req: &ChatRequest) -> WireRequest {
+pub fn build_request<'a>(req: &'a ChatRequest<'a>) -> WireRequest<'a> {
     WireRequest {
-        model: req.model.clone(),
+        model: req.model,
         messages: req.messages.iter().map(to_wire_message).collect(),
-        tools: req.tools.iter().map(to_wire_tool).collect(),
+        tools: req.tools.iter().map(|spec| to_wire_tool(spec)).collect(),
         stream: true,
         temperature: req.temperature,
         max_tokens: req.max_tokens,

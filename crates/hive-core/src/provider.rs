@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,10 +17,12 @@ pub struct ToolSpec {
 
 /// One request to the chat completion endpoint.
 #[derive(Debug, Clone)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolSpec>,
+pub struct ChatRequest<'a> {
+    pub model: &'a str,
+    pub messages: &'a [Message],
+    /// Shared schemas avoid rebuilding and deep-cloning the same JSON on every
+    /// tool round.
+    pub tools: &'a [Arc<ToolSpec>],
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
 }
@@ -67,7 +70,7 @@ pub struct ChatOutcome {
 pub trait LlmProvider: Send + Sync {
     async fn chat_stream(
         &self,
-        req: ChatRequest,
+        req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome>;
 }

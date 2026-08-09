@@ -23,7 +23,7 @@ struct MockProvider {
 impl LlmProvider for MockProvider {
     async fn chat_stream(
         &self,
-        _req: ChatRequest,
+        _req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
