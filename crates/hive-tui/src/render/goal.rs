@@ -25,7 +25,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let title = "Goal";
-    let hint = "enter start · esc close";
+    let hint = "tab field · enter start · esc";
     let mut y = g.content.y;
 
     // Header line.

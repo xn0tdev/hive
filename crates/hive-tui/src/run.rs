@@ -15,7 +15,7 @@ use hive_core::message::ImageSource;
 use hive_core::AgentMode;
 
 use crate::app::palette::PaletteMode;
-use crate::app::state::{Block, ContextAction, TerminalViewPhase};
+use crate::app::state::{ContextAction, TerminalViewPhase};
 use crate::app::App;
 use crate::commands::{self, CmdId};
 use crate::render;
@@ -1613,19 +1613,36 @@ fn handle_goal_key(app: &mut App, key: Key, input_tx: &UnboundedSender<InputComm
                 st.backspace();
             }
         }
-        KeyCode::Enter => {
-            if let Some(st) = app.goal_overlay.as_ref() {
-                let objective = st.objective.trim().to_string();
-                if objective.is_empty() {
-                    app.flash("Enter an objective first");
-                    return false;
-                }
-                app.close_goal_overlay();
-                let _ = input_tx.send(InputCommand::SetGoal {
-                    objective,
-                    duration: None,
-                });
+        KeyCode::Tab => {
+            if let Some(st) = app.goal_overlay.as_mut() {
+                st.toggle_focus();
             }
+        }
+        KeyCode::Enter => {
+            let Some((objective, time_limit)) = app
+                .goal_overlay
+                .as_ref()
+                .map(|st| (st.objective.trim().to_string(), st.time_limit.clone()))
+            else {
+                return false;
+            };
+            if objective.is_empty() {
+                app.flash("Enter an objective first");
+                return false;
+            }
+            let duration = if time_limit.trim().is_empty() {
+                None
+            } else if let Some(duration) = crate::app::goal::parse_duration(&time_limit) {
+                Some(duration)
+            } else {
+                app.flash("Invalid time limit — try 30m or 2h");
+                return false;
+            };
+            app.close_goal_overlay();
+            let _ = input_tx.send(InputCommand::SetGoal {
+                objective,
+                duration,
+            });
         }
         KeyCode::Char(c) if !ctrl => {
             if let Some(st) = app.goal_overlay.as_mut() {
@@ -1680,11 +1697,9 @@ fn handle_context_menu_key(app: &mut App, key: Key) -> bool {
 
 fn activate_context_action(app: &mut App, action: ContextAction) {
     match action {
-        ContextAction::CopyPrompt => {
-            if let Some(Block::User(text)) = app.blocks.last() {
-                write_clipboard_text(text);
-                app.flash("Copied");
-            }
+        ContextAction::Copy(text) => {
+            write_clipboard_text(&text);
+            app.flash("Copied");
         }
         ContextAction::RevertFile { path, content } => {
             let full = std::path::Path::new(&app.cwd).join(&path);
@@ -1694,12 +1709,6 @@ fn activate_context_action(app: &mut App, action: ContextAction) {
             }
             app.project.invalidate();
             app.refresh_project();
-        }
-        ContextAction::CopyOutput => {
-            if let Some(Block::Tool(card)) = app.blocks.last() {
-                write_clipboard_text(&card.output);
-                app.flash("Copied output");
-            }
         }
     }
 }
@@ -3510,6 +3519,30 @@ mod tests {
             app.goal_overlay.as_ref().unwrap().focus,
             GoalField::TimeLimit
         );
+    }
+
+    #[test]
+    fn goal_time_limit_is_parsed_and_sent() {
+        use crate::app::goal::GoalField;
+
+        let mut app = test_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.open_goal_overlay();
+        assert!(!handle_goal_key(&mut app, key(KeyCode::Tab), &tx));
+        let st = app.goal_overlay.as_mut().unwrap();
+        assert_eq!(st.focus, GoalField::TimeLimit);
+        st.objective = "ship it".into();
+        st.time_limit = "1h30m".into();
+
+        assert!(!handle_goal_key(&mut app, key(KeyCode::Enter), &tx));
+        let command = rx.try_recv().expect("goal command");
+        assert!(matches!(
+            command,
+            InputCommand::SetGoal { objective, duration }
+                if objective == "ship it"
+                    && duration == Some(std::time::Duration::from_secs(5_400))
+        ));
+        assert!(!app.goal_overlay_open());
     }
 
     /// Typed text must survive a stray click off the goal panel.

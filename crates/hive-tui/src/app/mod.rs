@@ -2244,26 +2244,21 @@ Keep everything else unless a note says otherwise.\n",
         }
     }
 
-    /// Open a context menu for the given block with the provided items.
-    fn open_context_menu(&mut self, block_idx: usize, items: Vec<ContextMenuItem>) {
-        self.context_menu = Some(ContextMenu {
-            block_idx,
-            items,
-            selected: 0,
-        });
+    fn open_context_menu(&mut self, items: Vec<ContextMenuItem>) {
+        self.context_menu = Some(ContextMenu { items, selected: 0 });
     }
 
     /// Build and open a context menu for a user prompt block.
     pub fn open_prompt_menu(&mut self, block_idx: usize) {
-        match self.blocks.get(block_idx) {
-            Some(Block::User(_)) => {}
+        let text = match self.blocks.get(block_idx) {
+            Some(Block::User(text)) => text.clone(),
             _ => return,
         };
         let items = vec![ContextMenuItem {
             label: "Copy".into(),
-            action: ContextAction::CopyPrompt,
+            action: ContextAction::Copy(text),
         }];
-        self.open_context_menu(block_idx, items);
+        self.open_context_menu(items);
     }
 
     /// Build and open a context menu for a tool card block.
@@ -2285,13 +2280,13 @@ Keep everything else unless a note says otherwise.\n",
         if !output.trim().is_empty() {
             items.push(ContextMenuItem {
                 label: "Copy output".into(),
-                action: ContextAction::CopyOutput,
+                action: ContextAction::Copy(output),
             });
         }
         if items.is_empty() {
             return;
         }
-        self.open_context_menu(block_idx, items);
+        self.open_context_menu(items);
     }
 
     /// Take the selected action from the context menu, closing it.
@@ -3020,7 +3015,6 @@ Keep everything else unless a note says otherwise.\n",
                 };
                 let rewrite = card.status == PlanStatus::Ready && !card.body.is_empty();
                 card.status = PlanStatus::Writing;
-                card.elapsed_ms = None;
                 if !rewrite {
                     return;
                 }
@@ -3036,8 +3030,6 @@ Keep everything else unless a note says otherwise.\n",
             summary: String::new(),
             body: String::new(),
             status: PlanStatus::Writing,
-            started: std::time::Instant::now(),
-            elapsed_ms: None,
             revised: false,
         }));
     }
@@ -3051,8 +3043,6 @@ Keep everything else unless a note says otherwise.\n",
                     summary,
                     body,
                     status: PlanStatus::Ready,
-                    started: std::time::Instant::now(),
-                    elapsed_ms: Some(0),
                     revised: false,
                 }));
                 revised = false;
@@ -3075,9 +3065,6 @@ Keep everything else unless a note says otherwise.\n",
                     card.body = body;
                     card.status = PlanStatus::Ready;
                     card.revised = card.revised || rewrite;
-                    if card.elapsed_ms.is_none() {
-                        card.elapsed_ms = Some(card.started.elapsed().as_millis());
-                    }
                     revised = card.revised;
                 }
                 if rewrite {
@@ -4371,6 +4358,17 @@ mod tests {
         assert_eq!(a.prompt_history.entries.len(), 1);
         a.prompt_history.push("world");
         assert_eq!(a.prompt_history.entries.len(), 2);
+    }
+
+    #[test]
+    fn context_menu_copies_the_block_that_opened_it() {
+        let mut a = app();
+        a.blocks = vec![Block::User("older".into()), Block::User("newer".into())];
+
+        a.open_prompt_menu(0);
+        let action = a.take_context_action().expect("copy action");
+
+        assert!(matches!(action, ContextAction::Copy(text) if text == "older"));
     }
 
     #[test]

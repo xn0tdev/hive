@@ -148,9 +148,6 @@ impl PromptHistory {
 /// A small centered context menu shown when clicking a transcript block
 /// (user prompt or tool card). Offers actions like Copy, Recall, Revert.
 pub struct ContextMenu {
-    /// Index into `app.blocks` of the block this menu was opened for.
-    #[allow(dead_code)]
-    pub block_idx: usize,
     pub items: Vec<ContextMenuItem>,
     pub selected: usize,
 }
@@ -162,12 +159,12 @@ pub struct ContextMenuItem {
 
 #[derive(Clone)]
 pub enum ContextAction {
-    /// Copy the prompt text to the clipboard.
-    CopyPrompt,
+    Copy(String),
     /// Revert a file-writing tool by restoring the original content.
-    RevertFile { path: String, content: String },
-    /// Copy the tool output / diff to the clipboard.
-    CopyOutput,
+    RevertFile {
+        path: String,
+        content: String,
+    },
 }
 
 /// A reasoning ("thinking") segment. Collapsed by default in the UI; carries
@@ -255,21 +252,9 @@ pub struct PlanCard {
     pub summary: String,
     pub body: String,
     pub status: PlanStatus,
-    pub started: std::time::Instant,
-    pub elapsed_ms: Option<u128>,
     /// True once the plan has been rewritten over an existing body — drives the
     /// `UPDATED` corner badge on the card so a revision is visible at a glance.
     pub revised: bool,
-}
-
-impl PlanCard {
-    #[allow(dead_code)] // tracked for writing state; card UI no longer shows duration
-    pub fn secs(&self) -> f64 {
-        match self.elapsed_ms {
-            Some(ms) => ms as f64 / 1000.0,
-            None => self.started.elapsed().as_millis() as f64 / 1000.0,
-        }
-    }
 }
 
 /// How a rendered assistant row connects to the preceding row.

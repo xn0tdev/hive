@@ -47,7 +47,6 @@ impl GoalOverlayState {
     }
 
     /// Cycle focus between fields.
-    #[allow(dead_code)]
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             GoalField::Objective => GoalField::TimeLimit,
@@ -80,11 +79,6 @@ impl GoalStatus {
             .unwrap_or(0)
     }
 
-    #[allow(dead_code)]
-    pub fn expired(&self) -> bool {
-        self.deadline.is_some_and(|d| Instant::now() >= d)
-    }
-
     /// Compact display: "23m left", "no limit", "paused".
     pub fn timer_label(&self) -> String {
         if self.paused {
@@ -108,7 +102,6 @@ impl GoalStatus {
 
 /// Parse a duration string like "30m", "1h", "2h30m", "45s".
 /// Empty string → None. Returns None on unparseable input.
-#[allow(dead_code)]
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s.is_empty() {
@@ -122,18 +115,19 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         } else {
             let n: u64 = num.parse().ok()?;
             num.clear();
-            match c {
-                'h' => total_secs += n * 3600,
-                'm' => total_secs += n * 60,
-                's' => total_secs += n,
+            let multiplier = match c {
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
                 _ => return None,
-            }
+            };
+            total_secs = total_secs.checked_add(n.checked_mul(multiplier)?)?;
         }
     }
     // Trailing digits without a unit → treat as minutes.
     if !num.is_empty() {
         let n: u64 = num.parse().ok()?;
-        total_secs += n * 60;
+        total_secs = total_secs.checked_add(n.checked_mul(60)?)?;
     }
     if total_secs == 0 {
         return None;
@@ -179,6 +173,7 @@ mod tests {
     fn parse_invalid_is_none() {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration("1x"), None);
+        assert_eq!(parse_duration(&format!("{}h", u64::MAX)), None);
     }
 
     #[test]

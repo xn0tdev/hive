@@ -10,7 +10,6 @@
 //!   and the input strip is replaced by a clickable `← back` button (no caret).
 //! - Plan view → markdown preview of Plan.md; bottom bar is back/Make or amend.
 
-pub mod bee;
 pub mod markdown;
 pub mod spinner;
 pub mod tools;
@@ -154,15 +153,16 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     let chat_avail = area.width.saturating_sub(side_w).saturating_sub(gap);
     // No hard 88-col ceiling — use the band left of the sidebar (with modest pad),
     // then center the column so leftover space isn't a dead left margin.
+    let outer_pad: u16 = if area.width <= 60 { 6 } else { 2 };
     let (inner_w, ix) = if plan || terminal {
         // Same outer pad as a no-sidebar chat column (not flush to screen edges).
-        let w = area.width.saturating_sub(6).max(40).min(area.width);
+        let w = area.width.saturating_sub(outer_pad).max(40).min(area.width);
         (w, area.x + (area.width - w) / 2)
     } else if side_w > 0 {
         let w = chat_avail.saturating_sub(4).max(40).min(chat_avail);
         (w, area.x + chat_avail.saturating_sub(w) / 2)
     } else {
-        let w = area.width.saturating_sub(6).max(20).min(area.width);
+        let w = area.width.saturating_sub(outer_pad).max(20).min(area.width);
         (w, area.x + (area.width - w) / 2)
     };
     // Plan composer matches chat textarea height; chip width is reserved so

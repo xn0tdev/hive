@@ -31,7 +31,40 @@ pub(crate) fn work_summary_card_lines(
 
     vec![Line::from(vec![
         Span::styled("─".repeat(left), Style::default().fg(line_color)),
-        Span::styled(text, Style::default().fg(theme.fg)),
+        Span::styled(text, Style::default().fg(theme.dim)),
         Span::styled("─".repeat(right), Style::default().fg(line_color)),
     ])]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TuiInit;
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+    }
+
+    #[test]
+    fn worked_label_is_dim_even_at_zero_seconds() {
+        let app = app();
+        let lines = work_summary_card_lines(&WorkSummaryCard { secs: 0 }, &app, 40);
+
+        assert_eq!(lines[0].spans[1].content, " Worked for 0s ");
+        assert_eq!(lines[0].spans[1].style.fg, Some(app.theme.dim));
+    }
 }
