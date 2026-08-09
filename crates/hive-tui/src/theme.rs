@@ -65,7 +65,6 @@ pub struct Theme {
     /// Noted plan mark (after MARK) — light blue wash.
     pub mark_bg: Color,
     pub mark_fg: Color,
-    pub code_fg: Color,
     pub code_bg: Color,
     pub heading: Color,
     /// Diff line colours (fg + row background) for code edits.
@@ -105,7 +104,6 @@ impl Theme {
             mark_pending_fg: rgb(0xe0, 0xe0, 0xe0),
             mark_bg: rgb(0x3a, 0x72, 0x98),
             mark_fg: rgb(0xe8, 0xf2, 0xfa),
-            code_fg: rgb(0xbd, 0xbd, 0xbd),
             code_bg: grey(SUNKEN),
             heading: rgb(0xe6, 0xe6, 0xe6),
             add_fg: rgb(0xb8, 0xe4, 0xbc),

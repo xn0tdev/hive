@@ -1,6 +1,7 @@
 //! Syntax-highlighting palettes and language dispatch.
 
 mod helpers;
+mod javascript;
 mod json;
 mod rust;
 mod shell;
@@ -15,6 +16,8 @@ pub enum Lang {
     #[default]
     Plain,
     Rust,
+    /// JavaScript, TypeScript, JSX, and TSX.
+    JavaScript,
     Json,
     Shell,
     Toml,
@@ -59,6 +62,7 @@ pub fn highlight(source: &str, lang: Lang, theme: &HighlightTheme) -> Vec<Line> 
             .map(|l| Line::from(Span::styled(l.to_string(), theme.text)))
             .collect(),
         Lang::Rust => rust::highlight(source, theme),
+        Lang::JavaScript => javascript::highlight(source, theme),
         Lang::Json => json::highlight(source, theme),
         Lang::Shell => shell::highlight(source, theme),
         Lang::Toml => toml::highlight(source, theme),
@@ -76,6 +80,8 @@ pub fn lang_from_info(info: &str) -> Lang {
         .to_ascii_lowercase();
     match token.as_str() {
         "rs" | "rust" => Lang::Rust,
+        "js" | "mjs" | "cjs" | "javascript" | "jsx" | "ts" | "mts" | "cts" | "typescript"
+        | "tsx" => Lang::JavaScript,
         "json" | "jsonc" => Lang::Json,
         "sh" | "bash" | "shell" | "zsh" | "fish" => Lang::Shell,
         "toml" => Lang::Toml,
@@ -101,4 +107,16 @@ pub fn with_line_numbers(lines: &[Line], theme: &HighlightTheme) -> Vec<Line> {
             out
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn javascript_and_typescript_fences_are_recognized() {
+        for info in ["js", "javascript", "jsx", "ts", "typescript", "tsx"] {
+            assert_eq!(lang_from_info(info), Lang::JavaScript, "{info}");
+        }
+    }
 }

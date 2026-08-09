@@ -1495,7 +1495,7 @@ mod tests {
         let mut a = app();
         a.blocks.clear();
         a.blocks.push(Block::Assistant {
-            text: "```rust\nfn main() {}\n```".into(),
+            text: "```javascript\nfunction nav(user, amount) {}\n```".into(),
             streaming: false,
         });
 
@@ -1503,15 +1503,22 @@ mod tests {
         let hit = a
             .assistant_row_hits
             .iter()
-            .find(|hit| hit.text.contains("fn main"))
+            .find(|hit| hit.text.contains("function nav"))
             .cloned()
             .expect("code row");
 
-        assert_eq!(hit.text, "fn main() {}");
+        assert_eq!(hit.text, "function nav(user, amount) {}");
         assert_eq!(
             buf.get(hit.x - 2, hit.screen_row).map(|cell| cell.ch),
             Some('│')
         );
+        let keyword = comb::HighlightTheme::dark().keyword.fg;
+        assert_eq!(
+            buf.get(hit.x, hit.screen_row)
+                .and_then(|cell| cell.style.fg),
+            keyword
+        );
+        assert_ne!(keyword, Some(a.theme.accent));
         assert!(
             (hit.x..hit.x + hit.text.len() as u16).all(|x| {
                 buf.get(x, hit.screen_row)
@@ -1525,7 +1532,7 @@ mod tests {
         assert_eq!(
             a.finish_assistant_selection(hit.x + hit.text.len() as u16 - 1, hit.screen_row,)
                 .as_deref(),
-            Some("fn main() {}")
+            Some("function nav(user, amount) {}")
         );
     }
 

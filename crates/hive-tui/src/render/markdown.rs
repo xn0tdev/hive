@@ -784,18 +784,10 @@ impl<'t> Writer<'t> {
     }
 
     fn code_highlight_theme(&self) -> highlight::HighlightTheme {
-        let mk = |fg| Style::default().fg(fg);
-        highlight::HighlightTheme {
-            text: mk(self.theme.code_fg),
-            keyword: mk(self.theme.accent),
-            string: mk(self.theme.warn),
-            comment: mk(self.theme.faint),
-            number: mk(self.theme.ok),
-            type_name: mk(self.theme.tool),
-            function: mk(self.theme.heading),
-            punctuation: mk(self.theme.dim),
-            line_number: mk(self.theme.faint),
-        }
+        // Code gets a dedicated truecolor palette. The surrounding product is
+        // deliberately grayscale, but syntax categories need enough contrast
+        // to be useful rather than inheriting several near-identical grays.
+        highlight::HighlightTheme::dark()
     }
 }
 
@@ -956,6 +948,31 @@ mod tests {
         let t = text(&out);
         assert!(t.contains("fn main"));
         assert!(!t.contains('`'), "backticks must be stripped: {t}");
+    }
+
+    #[test]
+    fn javascript_fence_uses_the_dedicated_code_palette() {
+        let theme = Theme::gray();
+        let palette = highlight::HighlightTheme::dark();
+        let out = render(
+            "```javascript\nfunction nav(user, amount = 42) { return \"ok\"; }\n```",
+            &theme,
+            80,
+        );
+        let line = &out[0];
+        let style = |text: &str| {
+            line.spans
+                .iter()
+                .find(|span| span.content == text)
+                .map(|span| span.style)
+                .unwrap_or_else(|| panic!("missing syntax span {text:?}: {line:?}"))
+        };
+
+        assert_eq!(style("function"), palette.keyword);
+        assert_eq!(style("nav"), palette.function);
+        assert_eq!(style("42"), palette.number);
+        assert_eq!(style("\"ok\""), palette.string);
+        assert_ne!(palette.keyword.fg, Some(theme.accent));
     }
 
     #[test]
