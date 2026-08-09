@@ -143,9 +143,8 @@ impl<'a> Block<'a> {
                     })
                     .collect(),
             };
-            let ts = self.title_style.patch(self.fill.unwrap_or_default());
-            buf.set_line(area.x, y, &title_line, area.width);
-            let _ = ts;
+            let base = self.fill.unwrap_or_default().patch(self.title_style);
+            buf.set_line_on(area.x, y, &title_line, area.width, base);
         }
         self.inner(area)
     }
@@ -188,5 +187,22 @@ mod tests {
             buf.get(0, 1).unwrap().style.bg,
             Some(Color::rgb(0x22, 0x22, 0x22))
         );
+    }
+
+    #[test]
+    fn borderless_title_keeps_fill_and_title_style() {
+        let bg = Color::rgb(0x22, 0x22, 0x22);
+        let fg = Color::rgb(0xe0, 0xe0, 0xe0);
+        let b = Block::default()
+            .fill(Style::new().bg(bg))
+            .title("Hi")
+            .title_style(Style::new().fg(fg));
+        let buf = render(Size::new(6, 2), |f| {
+            b.render(f.buffer(), Rect::new(0, 0, 6, 2));
+        });
+
+        assert_eq!(buf.get(0, 0).unwrap().style.fg, Some(fg));
+        assert_eq!(buf.get(0, 0).unwrap().style.bg, Some(bg));
+        assert_eq!(buf.get(5, 0).unwrap().style.bg, Some(bg));
     }
 }

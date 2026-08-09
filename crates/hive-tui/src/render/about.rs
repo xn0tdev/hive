@@ -1,8 +1,9 @@
 //! Centered About overlay — HIVE wordmark, version, short tagline.
 
-use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Color, Line, ModalLayout, Rect, Span, Style};
 
 use crate::app::App;
+use crate::render::panel::Panel;
 use crate::render::wordmark;
 
 const MIN_W: u16 = 40;
@@ -16,32 +17,22 @@ pub const TAGLINE: &str =
 
 const HINT: &str = "esc close  ·  Ctrl+P commands";
 
-struct AboutGeom {
-    win: Rect,
-    content: Rect,
-}
-
-fn geom(area: Rect) -> AboutGeom {
-    let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);
+fn overlay() -> Panel<'static> {
     // title + gap + wordmark + gap + version + gap + up to 3 tagline + gap + hint
     let h = (PAD_Y * 2 + 1 + 1 + wordmark::HEIGHT + 1 + 1 + 1 + 3 + 1 + 1)
-        .min(area.height.saturating_sub(2))
         .max(PAD_Y * 2 + wordmark::HEIGHT + 6);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let win = Rect::new(x, y, w, h);
-    let content = Rect {
-        x: win.x + PAD_X,
-        y: win.y + PAD_Y,
-        width: win.width.saturating_sub(PAD_X * 2),
-        height: win.height.saturating_sub(PAD_Y * 2),
-    };
-    AboutGeom { win, content }
+    Panel::new("About", "esc", h)
+        .width_bounds(MIN_W, MAX_W)
+        .padding(PAD_X, PAD_Y)
+}
+
+fn geom(area: Rect) -> ModalLayout {
+    overlay().layout(area)
 }
 
 /// The card rect, so a click off it can dismiss the overlay.
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
-    app.about_open().then(|| geom(area).win)
+    app.about_open().then(|| geom(area).panel)
 }
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
@@ -51,17 +42,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let theme = &app.theme;
     let panel = theme.strip;
     let panel_style = Style::default().bg(panel);
-    let g = geom(area);
-
-    dim_outside(buf, area, g.win);
-    buf.paint(g.win, panel_style);
+    let g = overlay().render(buf, area, theme);
 
     if g.content.width < 12 || g.content.height < 8 {
         return;
     }
 
     let mut y = g.content.y;
-    draw_title(buf, g.content, theme.fg, theme.faint, panel);
     y += 2; // title + breathing room
 
     // Block-letter HIVE wordmark, centered. Use strip paint so letter gaps
@@ -134,28 +121,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn draw_title(buf: &mut Buffer, area: Rect, fg: Color, faint: Color, bg: Color) {
-    let title = "About";
-    let esc = "esc";
-    let pad = Style::default().bg(bg);
-    let title_line = Line::from(vec![
-        Span::styled(
-            title.to_string(),
-            Style::default().fg(fg).bg(bg).add(Modifier::BOLD),
-        ),
-        Span::styled(
-            " ".repeat(
-                area.width
-                    .saturating_sub(title.chars().count() as u16 + esc.len() as u16)
-                    as usize,
-            ),
-            pad,
-        ),
-        Span::styled(esc, Style::default().fg(faint).bg(bg)),
-    ]);
-    crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &title_line, area.width, bg);
-}
-
 fn center_line(
     buf: &mut Buffer,
     x: u16,
@@ -198,38 +163,6 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
-    let area = area.intersection(buf.area());
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            if exclude.contains(x, y) {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut(x, y) {
-                if let Some(fg) = cell.style.fg {
-                    cell.style.fg = Some(darken_color(fg));
-                }
-                cell.style.bg = Some(match cell.style.bg {
-                    Some(bg) => darken_color(bg),
-                    None => Color::Rgb(0x0a, 0x0a, 0x0a),
-                });
-                cell.style = cell.style.add(Modifier::DIM);
-            }
-        }
-    }
-}
-
-fn darken_color(c: Color) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((r as u16 * 160) / 255) as u8,
-            ((g as u16 * 160) / 255) as u8,
-            ((b as u16 * 160) / 255) as u8,
-        ),
-        Color::Reset => Color::Rgb(0x0a, 0x0a, 0x0a),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,9 +195,9 @@ mod tests {
         let size = Size::new(80, 24);
         let area = Rect::new(0, 0, size.width, size.height);
         let g = geom(area);
-        assert!(g.win.width <= MAX_W);
-        assert_eq!(g.win.x, (size.width - g.win.width) / 2);
-        assert_eq!(g.win.y, (size.height - g.win.height) / 2);
+        assert!(g.panel.width <= MAX_W);
+        assert_eq!(g.panel.x, (size.width - g.panel.width) / 2);
+        assert_eq!(g.panel.y, (size.height - g.panel.height) / 2);
     }
 
     #[test]

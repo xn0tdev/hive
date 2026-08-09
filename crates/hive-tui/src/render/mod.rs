@@ -24,6 +24,7 @@ mod input_bars;
 mod jump_bottom;
 mod menu;
 pub(crate) mod palette;
+mod panel;
 pub(crate) mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;

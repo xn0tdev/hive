@@ -1,9 +1,10 @@
 //! Simple Settings overlay: Chat and Sidebar pages.
 
-use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Line, ModalLayout, Modifier, Rect, Span, Style};
 
 use crate::app::settings::{SettingsPage, SettingsState};
 use crate::app::App;
+use crate::render::panel::Panel;
 
 const MIN_W: u16 = 36;
 const MAX_W: u16 = 48;
@@ -16,56 +17,16 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let theme = &app.theme;
     let panel = theme.strip;
-    let g = geom(area, st);
-    dim_outside(buf, area, g.win);
-    buf.paint(g.win, Style::default().bg(panel));
+    let g = overlay(st).render(buf, area, theme);
 
     if g.content.width < 16 || g.content.height < 6 {
         return;
     }
 
-    let title = match st.page {
-        SettingsPage::Root => "Settings",
-        SettingsPage::Chat => "Chat",
-        SettingsPage::Sidebar => "Sidebar",
-        SettingsPage::Tools => "Tools",
-    };
-    let hint = match st.page {
-        SettingsPage::Root => "enter open  ·  esc close",
-        _ => "enter toggle  ·  esc back",
-    };
-
-    let mut y = g.content.y;
-    // One full-width header line so the gap between title and hint keeps panel bg.
-    let hint_w = hint.chars().count();
-    let title_w = title.chars().count();
-    let gap = g
-        .content
-        .width
-        .saturating_sub(title_w as u16)
-        .saturating_sub(hint_w as u16);
-    crate::render::strip_paint::set_line_on_strip(
-        buf,
-        g.content.x,
-        y,
-        &Line::from(vec![
-            Span::styled(
-                title.to_string(),
-                Style::default().fg(theme.fg).add(Modifier::BOLD),
-            ),
-            Span::styled(" ".repeat(gap as usize), Style::default()),
-            Span::styled(hint.to_string(), Style::default().fg(theme.faint)),
-        ]),
-        g.content.width,
-        panel,
-    );
-    y += 2;
-
     let rows = rows_for(st, app);
-    for (i, (label, value)) in rows.iter().enumerate() {
-        if y >= g.content.bottom() {
-            break;
-        }
+    for (y, (i, (label, value))) in
+        (g.content.y + 2..g.content.bottom()).zip(rows.iter().enumerate())
+    {
         let sel = i == st.selected;
         let bg = if sel { theme.sel_bg } else { panel };
         let fg = if sel { theme.sel_fg } else { theme.fg };
@@ -94,14 +55,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
             g.content.width,
             bg,
         );
-        y += 1;
     }
 }
 
 /// The panel rect, for telling a click on the overlay from one that dismisses it.
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
     let st = app.settings.as_ref()?;
-    Some(geom(area, st).win)
+    Some(geom(area, st).panel)
 }
 
 /// Which settings row sits under the pointer.
@@ -160,64 +120,29 @@ fn on_off(v: bool) -> String {
     }
 }
 
-struct Geom {
-    win: Rect,
-    content: Rect,
-}
-
-fn geom(area: Rect, st: &SettingsState) -> Geom {
-    let rows = match st.page {
-        SettingsPage::Root => 3,
-        SettingsPage::Chat => 2,
-        SettingsPage::Sidebar => 3,
-        SettingsPage::Tools => 2,
+fn title_hint(st: &SettingsState) -> (&'static str, &'static str) {
+    let title = match st.page {
+        SettingsPage::Root => "Settings",
+        SettingsPage::Chat => "Chat",
+        SettingsPage::Sidebar => "Sidebar",
+        SettingsPage::Tools => "Tools",
     };
-    let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);
-    let h = (PAD_Y * 2 + 1 + 1 + rows as u16 + 1)
-        .min(area.height.saturating_sub(2))
-        .max(8);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let win = Rect::new(x, y, w, h);
-    let content = Rect {
-        x: win.x + PAD_X,
-        y: win.y + PAD_Y,
-        width: win.width.saturating_sub(PAD_X * 2),
-        height: win.height.saturating_sub(PAD_Y * 2),
+    let hint = match st.page {
+        SettingsPage::Root => "enter open  ·  esc close",
+        _ => "enter toggle  ·  esc back",
     };
-    Geom { win, content }
+    (title, hint)
 }
 
-fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
-    let area = area.intersection(buf.area());
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            if exclude.contains(x, y) {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut(x, y) {
-                if let Some(fg) = cell.style.fg {
-                    cell.style.fg = Some(darken(fg));
-                }
-                cell.style.bg = Some(match cell.style.bg {
-                    Some(bg) => darken(bg),
-                    None => Color::Rgb(0x0a, 0x0a, 0x0a),
-                });
-                cell.style = cell.style.add(Modifier::DIM);
-            }
-        }
-    }
+fn overlay(st: &SettingsState) -> Panel<'static> {
+    let (title, hint) = title_hint(st);
+    Panel::new(title, hint, 8)
+        .width_bounds(MIN_W, MAX_W)
+        .padding(PAD_X, PAD_Y)
 }
 
-fn darken(c: Color) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((r as u16 * 160) / 255) as u8,
-            ((g as u16 * 160) / 255) as u8,
-            ((b as u16 * 160) / 255) as u8,
-        ),
-        Color::Reset => Color::Rgb(0x0a, 0x0a, 0x0a),
-    }
+fn geom(area: Rect, st: &SettingsState) -> ModalLayout {
+    overlay(st).layout(area)
 }
 
 #[cfg(test)]

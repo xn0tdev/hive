@@ -6,6 +6,7 @@ use crate::app::palette::{ConnectRow, ModelRow, PaletteMode, PaletteState};
 use crate::app::{App, ModelsCatalogState};
 use crate::commands::PaletteRow;
 use crate::intro::PRESETS;
+use crate::render::panel::Panel;
 
 const MAX_LIST: u16 = 14;
 const MIN_W: u16 = 36;
@@ -22,7 +23,7 @@ const PAD_Y: u16 = 1;
 const CHROME_ROWS: u16 = 3;
 
 struct PaletteGeom {
-    win: Rect,
+    panel: Rect,
     content: Rect,
     search_y: u16,
     list: Rect,
@@ -36,41 +37,59 @@ fn max_width_for(mode: PaletteMode) -> u16 {
     }
 }
 
-fn geom(area: Rect, list_rows: u16, mode: PaletteMode) -> PaletteGeom {
-    let max_w = max_width_for(mode);
-    // Prefer ~2/3 of the terminal for models; ~1/2 for compact palettes.
-    let prefer = match mode {
-        PaletteMode::Models => area.width.saturating_mul(2) / 3,
-        PaletteMode::Connect => (area.width / 2).max(MIN_W_CONNECT),
-        _ => area.width / 2,
+fn title_hint(mode: PaletteMode) -> (&'static str, &'static str) {
+    let title = match mode {
+        PaletteMode::Commands => "Commands",
+        PaletteMode::Models => "Switch model",
+        PaletteMode::Connect => "Providers",
+        PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => "API key",
+        PaletteMode::Sessions => "Resume session",
     };
-    let w = prefer.clamp(MIN_W, max_w).min(area.width);
+    let hint = if matches!(mode, PaletteMode::Connect) {
+        "ctrl+e key · ctrl+r remove · esc"
+    } else {
+        "esc"
+    };
+    (title, hint)
+}
+
+fn overlay(list_rows: u16, mode: PaletteMode) -> Panel<'static> {
+    let (title, hint) = title_hint(mode);
     let list_h = list_rows.clamp(1, MAX_LIST);
-    let h = (PAD_Y * 2 + CHROME_ROWS + list_h)
-        .min(area.height.saturating_sub(2))
-        .max(PAD_Y * 2 + CHROME_ROWS + 1);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let win = Rect::new(x, y, w, h);
-    let content = Rect {
-        x: win.x + PAD_X,
-        y: win.y + PAD_Y,
-        width: win.width.saturating_sub(PAD_X * 2),
-        height: win.height.saturating_sub(PAD_Y * 2),
-    };
-    let search_y = content.y + 1;
-    let list_top = search_y + 2; // blank row under search
-    let list_h = content
-        .height
-        .saturating_sub(CHROME_ROWS)
-        .min(win.y + win.height - PAD_Y - list_top);
-    let list = Rect::new(content.x, list_top, content.width, list_h);
+    let panel = Panel::new(title, hint, PAD_Y * 2 + CHROME_ROWS + list_h).padding(PAD_X, PAD_Y);
+    match mode {
+        PaletteMode::Models => panel
+            .width_ratio(2, 3)
+            .width_bounds(MIN_W, max_width_for(mode)),
+        PaletteMode::Connect => panel
+            .width_ratio(1, 2)
+            .width_bounds(MIN_W_CONNECT, max_width_for(mode)),
+        _ => panel
+            .width_ratio(1, 2)
+            .width_bounds(MIN_W, max_width_for(mode)),
+    }
+}
+
+fn from_layout(layout: comb::ModalLayout) -> PaletteGeom {
+    let content = layout.content;
+    let search_y = content.y.saturating_add(1).min(content.bottom());
+    let list_top = search_y.saturating_add(2).min(content.bottom());
+    let list = Rect::new(
+        content.x,
+        list_top,
+        content.width,
+        content.bottom().saturating_sub(list_top),
+    );
     PaletteGeom {
-        win,
+        panel: layout.panel,
         content,
         search_y,
         list,
     }
+}
+
+fn geom(area: Rect, list_rows: u16, mode: PaletteMode) -> PaletteGeom {
+    from_layout(overlay(list_rows, mode).layout(area))
 }
 
 fn list_row_count(pal: &PaletteState, app: &App) -> u16 {
@@ -103,36 +122,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let panel = theme.strip;
     let panel_style = Style::default().bg(panel);
 
-    let g = geom(area, list_row_count(pal, app), pal.mode);
-    // Soft scrim behind the panel so it reads with a bit of depth.
-    dim_outside(buf, area, g.win);
-    buf.paint(g.win, panel_style);
+    let rows = list_row_count(pal, app);
+    let g = from_layout(overlay(rows, pal.mode).render(buf, area, theme));
 
     if g.content.width < 8 || g.content.height < 2 {
         return;
     }
 
-    let title = match pal.mode {
-        PaletteMode::Commands => "Commands",
-        PaletteMode::Models => "Switch model",
-        PaletteMode::Connect => "Providers",
-        PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => "API key",
-        PaletteMode::Sessions => "Resume session",
-    };
-    let title_hint = if matches!(pal.mode, PaletteMode::Connect) {
-        "ctrl+e key · ctrl+r remove · esc"
-    } else {
-        "esc"
-    };
-    draw_title(
-        buf,
-        g.content,
-        title,
-        title_hint,
-        theme.fg,
-        theme.faint,
-        panel,
-    );
     draw_search(
         buf,
         Rect::new(g.content.x, g.search_y, g.content.width, 1),
@@ -170,40 +166,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn draw_title(
-    buf: &mut Buffer,
-    area: Rect,
-    title: &str,
-    hint: &str,
-    fg: Color,
-    faint: Color,
-    bg: Color,
-) {
-    let base = Style::default().bg(bg);
-    let width = area.width as usize;
-    let title_w = title.chars().count();
-    // A hint that won't fit falls back to plain "esc", then to nothing —
-    // never onto the title.
-    const MIN_GAP: usize = 2;
-    let hint = if title_w + MIN_GAP + hint.chars().count() <= width {
-        hint
-    } else if title_w + MIN_GAP + 3 <= width {
-        "esc"
-    } else {
-        ""
-    };
-    let gap = width.saturating_sub(title_w + hint.chars().count());
-    let title_line = Line::from(vec![
-        Span::styled(
-            title.to_string(),
-            Style::default().fg(fg).bg(bg).add(Modifier::BOLD),
-        ),
-        Span::styled(" ".repeat(gap), base),
-        Span::styled(hint, Style::default().fg(faint).bg(bg)),
-    ]);
-    crate::render::strip_paint::set_line_on_strip(buf, area.x, area.y, &title_line, area.width, bg);
-}
-
 fn draw_search(
     buf: &mut Buffer,
     area: Rect,
@@ -234,40 +196,6 @@ fn draw_search(
     let _ = pal.cursor;
 }
 
-/// Darken cells outside `exclude` slightly (scrim / depth cue).
-fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
-    let area = area.intersection(buf.area());
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            if exclude.contains(x, y) {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut(x, y) {
-                if let Some(fg) = cell.style.fg {
-                    cell.style.fg = Some(darken_color(fg));
-                }
-                cell.style.bg = Some(match cell.style.bg {
-                    Some(bg) => darken_color(bg),
-                    None => Color::Rgb(0x0a, 0x0a, 0x0a),
-                });
-                cell.style = cell.style.add(Modifier::DIM);
-            }
-        }
-    }
-}
-
-/// ~62% luminance — noticeable but not a heavy modal veil.
-fn darken_color(c: Color) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((r as u16 * 160) / 255) as u8,
-            ((g as u16 * 160) / 255) as u8,
-            ((b as u16 * 160) / 255) as u8,
-        ),
-        Color::Reset => Color::Rgb(0x0a, 0x0a, 0x0a),
-    }
-}
-
 /// Screen position for the search caret when search is focused.
 pub fn search_cursor(area: Rect, app: &App) -> Option<(u16, u16)> {
     let pal = app.palette.as_ref()?;
@@ -295,7 +223,7 @@ pub fn list_visible(area: Rect, app: &App) -> u16 {
 /// "dismiss this".
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
     let pal = app.palette.as_ref()?;
-    Some(geom(area, list_row_count(pal, app), pal.mode).win)
+    Some(geom(area, list_row_count(pal, app), pal.mode).panel)
 }
 
 /// Row index under the pointer, or `None` when it is not over the list.
@@ -715,12 +643,12 @@ mod tests {
         let pal = a.palette.as_ref().unwrap();
         let g = geom(area, list_row_count(pal, &a), pal.mode);
 
-        assert!(g.win.width <= MAX_W, "width={}", g.win.width);
-        assert!(g.win.width >= MIN_W.min(size.width));
-        let expected_x = (size.width - g.win.width) / 2;
-        let expected_y = (size.height - g.win.height) / 2;
-        assert_eq!(g.win.x, expected_x);
-        assert_eq!(g.win.y, expected_y);
+        assert!(g.panel.width <= MAX_W, "width={}", g.panel.width);
+        assert!(g.panel.width >= MIN_W.min(size.width));
+        let expected_x = (size.width - g.panel.width) / 2;
+        let expected_y = (size.height - g.panel.height) / 2;
+        assert_eq!(g.panel.x, expected_x);
+        assert_eq!(g.panel.y, expected_y);
     }
 
     #[test]
@@ -731,8 +659,8 @@ mod tests {
         let area = Rect::new(0, 0, size.width, size.height);
         let pal = a.palette.as_ref().unwrap();
         let g = geom(area, list_row_count(pal, &a), pal.mode);
-        assert!(g.win.width > MAX_W, "width={}", g.win.width);
-        assert!(g.win.width <= MAX_W_MODELS, "width={}", g.win.width);
+        assert!(g.panel.width > MAX_W, "width={}", g.panel.width);
+        assert!(g.panel.width <= MAX_W_MODELS, "width={}", g.panel.width);
     }
 
     #[test]
@@ -813,7 +741,7 @@ mod tests {
         let area = Rect::new(0, 0, size.width, size.height);
         let pal = a.palette.as_ref().unwrap();
         let g = geom(area, list_row_count(pal, &a), pal.mode);
-        assert!(!g.win.contains(0, 0), "probe cell must be outside panel");
+        assert!(!g.panel.contains(0, 0), "probe cell must be outside panel");
 
         let mut buf = Buffer::blank(size);
         let bright = Style::default()

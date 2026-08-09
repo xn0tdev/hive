@@ -1,6 +1,6 @@
 //! About-style drawing for the intro wizard.
 
-use comb::{Buffer, Color, Frame, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Color, Frame, Line, Modal, Modifier, Rect, Span, Style};
 
 use super::{FetchState, IntroState, ProviderKeyFocus, SearchChoice, SearchFocus, Step, PRESETS};
 use crate::render::wordmark;
@@ -12,24 +12,12 @@ const PAD_X: u16 = 3;
 const PAD_Y: u16 = 1;
 const CANVAS: Color = Color::Rgb(0x14, 0x14, 0x14);
 
-struct Geom {
-    win: Rect,
-    content: Rect,
-}
-
-fn geom(area: Rect) -> Geom {
-    let w = (area.width * 3 / 4).clamp(MIN_W, MAX_W).min(area.width);
+fn modal(area: Rect) -> Modal {
     let h = area.height.saturating_sub(2).clamp(14, 22);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let win = Rect::new(x, y, w, h);
-    let content = Rect {
-        x: win.x + PAD_X,
-        y: win.y + PAD_Y,
-        width: win.width.saturating_sub(PAD_X * 2),
-        height: win.height.saturating_sub(PAD_Y * 2),
-    };
-    Geom { win, content }
+    Modal::new(h)
+        .width_ratio(3, 4)
+        .width_bounds(MIN_W, MAX_W)
+        .padding(PAD_X, PAD_Y)
 }
 
 /// Paint the intro frame. Returns optional caret position.
@@ -39,9 +27,9 @@ pub fn paint(f: &mut Frame<'_>, state: &IntroState) -> Option<(u16, u16)> {
     buf.paint(area, Style::default().bg(CANVAS));
     let theme = &state.theme;
     let panel = theme.strip;
-    let g = geom(area);
-    dim_outside(buf, area, g.win);
-    buf.paint(g.win, Style::default().bg(panel));
+    let g = modal(area)
+        .fill(Style::default().bg(panel))
+        .render(buf, area);
     if g.content.width < 20 || g.content.height < 8 {
         return None;
     }
@@ -104,39 +92,6 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         lines.push(cur);
     }
     lines
-}
-
-fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
-    let dim_bg = Style::default().bg(Color::Rgb(0x0c, 0x0c, 0x0c));
-    // Top
-    if exclude.y > area.y {
-        buf.paint(
-            Rect::new(area.x, area.y, area.width, exclude.y - area.y),
-            dim_bg,
-        );
-    }
-    // Bottom
-    let below = exclude.bottom();
-    if below < area.bottom() {
-        buf.paint(
-            Rect::new(area.x, below, area.width, area.bottom() - below),
-            dim_bg,
-        );
-    }
-    // Left / right beside panel
-    if exclude.x > area.x {
-        buf.paint(
-            Rect::new(area.x, exclude.y, exclude.x - area.x, exclude.height),
-            dim_bg,
-        );
-    }
-    let right = exclude.right();
-    if right < area.right() {
-        buf.paint(
-            Rect::new(right, exclude.y, area.right() - right, exclude.height),
-            dim_bg,
-        );
-    }
 }
 
 fn draw_welcome(

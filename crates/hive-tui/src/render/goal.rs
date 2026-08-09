@@ -1,9 +1,10 @@
 //! `/goal` overlay: centered panel with editable objective + time limit.
 
-use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Line, ModalLayout, Modifier, Rect, Span, Style};
 
 use crate::app::goal::GoalField;
 use crate::app::App;
+use crate::render::panel::Panel;
 
 const MIN_W: u16 = 40;
 const MAX_W: u16 = 56;
@@ -16,42 +17,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let theme = &app.theme;
     let panel = theme.strip;
-    let g = geom(area);
-    dim_outside(buf, area, g.win);
-    buf.paint(g.win, Style::default().bg(panel));
+    let g = overlay().render(buf, area, theme);
 
     if g.content.width < 20 || g.content.height < 6 {
         return;
     }
 
-    let title = "Goal";
-    let hint = "tab field · enter start · esc";
-    let mut y = g.content.y;
-
-    // Header line.
-    let hint_w = hint.chars().count();
-    let title_w = title.chars().count();
-    let gap = g
-        .content
-        .width
-        .saturating_sub(title_w as u16)
-        .saturating_sub(hint_w as u16);
-    crate::render::strip_paint::set_line_on_strip(
-        buf,
-        g.content.x,
-        y,
-        &Line::from(vec![
-            Span::styled(
-                title.to_string(),
-                Style::default().fg(theme.fg).add(Modifier::BOLD),
-            ),
-            Span::styled(" ".repeat(gap as usize), Style::default()),
-            Span::styled(hint.to_string(), Style::default().fg(theme.faint)),
-        ]),
-        g.content.width,
-        panel,
-    );
-    y += 2;
+    let mut y = g.content.y + 2;
 
     // Objective field.
     let obj_focused = st.focus == GoalField::Objective;
@@ -124,56 +96,12 @@ pub fn field_at(area: Rect, app: &App, col: u16, row: u16) -> Option<GoalField> 
     }
 }
 
-struct Geom {
-    win: Rect,
-    content: Rect,
+fn overlay() -> Panel<'static> {
+    Panel::new("Goal", "tab field · enter start · esc", 7)
+        .width_bounds(MIN_W, MAX_W)
+        .padding(PAD_X, PAD_Y)
 }
 
-fn geom(area: Rect) -> Geom {
-    let w = (area.width * 2 / 3).clamp(MIN_W, MAX_W).min(area.width);
-    let h = (PAD_Y * 2 + 1 + 1 + 2 + 1)
-        .min(area.height.saturating_sub(2))
-        .max(7);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let win = Rect::new(x, y, w, h);
-    let content = Rect {
-        x: win.x + PAD_X,
-        y: win.y + PAD_Y,
-        width: win.width.saturating_sub(PAD_X * 2),
-        height: win.height.saturating_sub(PAD_Y * 2),
-    };
-    Geom { win, content }
-}
-
-fn dim_outside(buf: &mut Buffer, area: Rect, exclude: Rect) {
-    let area = area.intersection(buf.area());
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            if exclude.contains(x, y) {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut(x, y) {
-                if let Some(fg) = cell.style.fg {
-                    cell.style.fg = Some(darken(fg));
-                }
-                cell.style.bg = Some(match cell.style.bg {
-                    Some(bg) => darken(bg),
-                    None => Color::Rgb(0x0a, 0x0a, 0x0a),
-                });
-                cell.style = cell.style.add(Modifier::DIM);
-            }
-        }
-    }
-}
-
-fn darken(c: Color) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            ((r as u16 * 160) / 255) as u8,
-            ((g as u16 * 160) / 255) as u8,
-            ((b as u16 * 160) / 255) as u8,
-        ),
-        Color::Reset => Color::Rgb(0x0a, 0x0a, 0x0a),
-    }
+fn geom(area: Rect) -> ModalLayout {
+    overlay().layout(area)
 }

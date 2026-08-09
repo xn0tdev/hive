@@ -43,7 +43,7 @@ pub use crate::draw::surface::{Compositor, Surface};
 pub use crate::term::event::{Event, Key, KeyCode, KeyMods, Mouse, MouseButton, MouseKind};
 pub use crate::term::terminal::{render, render_with_cursor, restore, Frame, MouseMode, Terminal};
 pub use crate::widgets::{
-    unified_diff, Block, CodeBlock, DiffOp, DiffTheme, DiffView, Interactive, List, Menu, Padding,
-    Palette, Paragraph, ResizeEdge, ScrollView, Scrollbar, ScrollbarStyle, Table, TableCol, Tabs,
-    TextInput, Toast, Toasts, Widget, Window,
+    unified_diff, Block, CodeBlock, DiffOp, DiffTheme, DiffView, Interactive, List, Menu, Modal,
+    ModalLayout, Padding, Palette, Paragraph, ResizeEdge, Scrim, ScrollView, Scrollbar,
+    ScrollbarStyle, Table, TableCol, Tabs, TextInput, Toast, Toasts, Widget, Window,
 };
