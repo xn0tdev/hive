@@ -18,7 +18,9 @@ use hive_core::{AgentMode, SidebarMode, TerminalController, TerminalProcessState
 use crate::commands;
 use crate::render::spinner;
 use crate::render::wordmark::LogoBonk;
-use crate::render::{ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections};
+use crate::render::{
+    ProjectRefresh, ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections,
+};
 use crate::theme::Theme;
 use crate::{ModelChoice, SkillChoice, TuiInit};
 
@@ -354,6 +356,8 @@ pub struct App {
     pub(crate) md_cache: MdCache,
     /// Cached git project / diff summary for the right sidebar.
     pub(crate) project: ProjectSnapshot,
+    /// Coalescing background loader; Git and filesystem scans never run while drawing.
+    pub(crate) project_refresh: ProjectRefresh,
     /// Whether the wide-screen project sidebar is visible.
     pub(crate) sidebar_open: bool,
     /// Hit target for the sidebar show/hide control (last draw).
@@ -479,6 +483,7 @@ impl App {
             pending_context_update: None,
             md_cache: MdCache::default(),
             project: ProjectSnapshot::default(),
+            project_refresh: ProjectRefresh::new(),
             sidebar_open: !matches!(init.ui.sidebar_mode, SidebarMode::Hidden),
             sidebar_toggle_hit: None,
             sidebar_resize_hit: None,
@@ -494,23 +499,30 @@ impl App {
             turn_started_at: None,
         };
         app.blocks.push(Block::Welcome);
-        app.project.refresh_if_stale(&app.cwd);
-        app.refresh_context_files();
+        app.project_refresh.request(&app.cwd);
         app
     }
 
-    /// Refresh git project snapshot when the cache is stale.
-    pub fn refresh_project(&mut self) {
-        let was_stale = self.project.stale();
-        self.project.refresh_if_stale(&self.cwd);
-        if was_stale {
-            self.refresh_context_files();
+    /// Request stale project data and apply a completed background refresh.
+    /// Returns true only when visible data changed.
+    pub fn refresh_project(&mut self) -> bool {
+        if self.project.stale() {
+            self.project_refresh.request(&self.cwd);
         }
-    }
-
-    /// Re-scan project instruction files (AGENTS.md, CLAUDE.md, …).
-    pub fn refresh_context_files(&mut self) {
-        self.context_files = hive_core::discover_context_files(std::path::Path::new(&self.cwd));
+        let Some(result) = self.project_refresh.take_latest() else {
+            return false;
+        };
+        if result.cwd != self.cwd {
+            return false;
+        }
+        let changed = self.project.name != result.snapshot.name
+            || self.project.branch != result.snapshot.branch
+            || self.project.files != result.snapshot.files
+            || self.project.available != result.snapshot.available
+            || self.context_files != result.context_files;
+        self.project = result.snapshot;
+        self.context_files = result.context_files;
+        changed
     }
 
     pub fn toggle_sidebar(&mut self) {

@@ -64,6 +64,10 @@ fn run_loop(
     loop {
         let content_dirty = drain_events(app, events, input_tx);
 
+        if app.refresh_project() {
+            dirty = true;
+        }
+
         if app.tick() {
             // Idle composer blur (or other tick-side visual change).
             dirty = true;

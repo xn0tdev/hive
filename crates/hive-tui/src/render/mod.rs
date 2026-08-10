@@ -33,7 +33,9 @@ mod toast;
 mod transcript;
 pub(crate) mod two_col;
 
-pub use sidebar::{clamp_width, ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections};
+pub use sidebar::{
+    clamp_width, ProjectRefresh, ProjectSnapshot, SidebarItem, SidebarSection, SidebarSections,
+};
 
 use comb::{Frame, Line, Rect, Span, Style};
 
@@ -136,8 +138,6 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     let plan = app.in_plan_view();
     let terminal = app.in_terminal_view();
     let menu_h = if special { 0 } else { menu::height(app) };
-
-    app.refresh_project();
 
     // Plan preview: hide sidebar; keep the same left/right page padding as chat.
     let side_w = if plan || terminal {

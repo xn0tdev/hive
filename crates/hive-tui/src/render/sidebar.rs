@@ -3,8 +3,10 @@
 //! Body sections are click-to-collapse; agent/terminal rows open their views.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
 
 use comb::{Buffer, Line, Modifier, Rect, Span, Style};
@@ -77,13 +79,83 @@ pub const MIN_WIDTH: u16 = 24;
 /// Widest panel — leave room for the chat column.
 pub const MAX_WIDTH: u16 = 56;
 const REFRESH: Duration = Duration::from_secs(2);
+const GIT_TIMEOUT: Duration = Duration::from_millis(750);
+
+pub struct ProjectRefreshResult {
+    pub cwd: String,
+    pub snapshot: ProjectSnapshot,
+    pub context_files: Vec<hive_core::ContextFile>,
+}
+
+/// A single coalescing background worker. Slow or broken repositories never
+/// block input or frame rendering; a full request channel simply means a
+/// refresh is already pending.
+pub struct ProjectRefresh {
+    request_tx: SyncSender<String>,
+    result_rx: Receiver<ProjectRefreshResult>,
+}
+
+impl ProjectRefresh {
+    pub fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::sync_channel::<String>(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("hive-project-refresh".into())
+            .spawn(move || {
+                while let Ok(mut cwd) = request_rx.recv() {
+                    while let Ok(newer) = request_rx.try_recv() {
+                        cwd = newer;
+                    }
+                    let snapshot = fetch(&cwd);
+                    let context_files =
+                        hive_core::discover_context_files(std::path::Path::new(&cwd));
+                    let result = ProjectRefreshResult {
+                        cwd,
+                        snapshot,
+                        context_files,
+                    };
+                    match result_tx.try_send(result) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => break,
+                    }
+                }
+            })
+            .expect("project refresh worker must start");
+        Self {
+            request_tx,
+            result_rx,
+        }
+    }
+
+    pub fn request(&self, cwd: &str) {
+        match self.request_tx.try_send(cwd.to_owned()) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    pub fn take_latest(&self) -> Option<ProjectRefreshResult> {
+        let mut latest = None;
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) => latest = Some(result),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
+            }
+        }
+    }
+}
+
+impl Default for ProjectRefresh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Clamp a preferred width into the allowed range.
 pub fn clamp_width(w: u16) -> u16 {
     w.clamp(MIN_WIDTH, MAX_WIDTH)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChangedFile {
     pub path: String,
     pub added: u32,
@@ -96,6 +168,7 @@ pub struct ProjectSnapshot {
     pub name: String,
     pub branch: String,
     pub files: Vec<ChangedFile>,
+    pub available: bool,
     fetched_at: Option<Instant>,
 }
 
@@ -109,12 +182,6 @@ impl ProjectSnapshot {
 
     pub fn invalidate(&mut self) {
         self.fetched_at = None;
-    }
-
-    pub fn refresh_if_stale(&mut self, cwd: &str) {
-        if self.stale() {
-            *self = fetch(cwd);
-        }
     }
 }
 
@@ -131,8 +198,9 @@ pub fn fetch(cwd: &str) -> ProjectSnapshot {
         .filter(|s| !s.is_empty() && s != "HEAD")
         .or_else(|| {
             git(cwd, &["rev-parse", "--short", "HEAD"]).map(|s| format!("detached {}", s.trim()))
-        })
-        .unwrap_or_else(|| "no git".into());
+        });
+    let available = branch.is_some();
+    let branch = branch.unwrap_or_default();
 
     let mut map: BTreeMap<String, ChangedFile> = BTreeMap::new();
 
@@ -191,20 +259,37 @@ pub fn fetch(cwd: &str) -> ProjectSnapshot {
         name,
         branch,
         files,
+        available,
         fetched_at: Some(Instant::now()),
     }
 }
 
 fn git(cwd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() && out.stdout.is_empty() {
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if started.elapsed() >= GIT_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if !status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let mut stdout = Vec::new();
+    child.stdout.take()?.read_to_end(&mut stdout).ok()?;
+    Some(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 fn numstat(cwd: &str, args: &[&str]) -> Vec<(u32, u32, String)> {
@@ -329,17 +414,19 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         None,
         None,
     ));
-    lines.push((
-        Line::from(vec![
-            Span::styled("· ", Style::default().fg(theme.faint)),
-            Span::styled(
-                truncate(&snap.branch, w.saturating_sub(2)),
-                Style::default().fg(theme.dim),
-            ),
-        ]),
-        None,
-        None,
-    ));
+    if snap.available {
+        lines.push((
+            Line::from(vec![
+                Span::styled("· ", Style::default().fg(theme.faint)),
+                Span::styled(
+                    truncate(&snap.branch, w.saturating_sub(2)),
+                    Style::default().fg(theme.dim),
+                ),
+            ]),
+            None,
+            None,
+        ));
+    }
     // Session spend (footer shows context fill instead).
     let session = format_session_tokens(app.usage.total_tokens);
     let cost = session_cost(app);
@@ -480,55 +567,57 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         }
     }
 
-    lines.push((Line::from(""), None, None));
-    let ch_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Changes);
-    lines.push((
-        section_header("Changes", ch_open, collapsible, theme),
-        if collapsible {
-            Some(SidebarSection::Changes)
-        } else {
-            None
-        },
-        None,
-    ));
-    if ch_open {
-        if snap.files.is_empty() {
-            lines.push((
-                Line::from(Span::styled(
-                    "clean working tree",
-                    Style::default().fg(theme.faint),
-                )),
-                None,
-                None,
-            ));
-        } else {
-            // Changes is the last section, so without a cap the tail of a long
-            // list just falls off the bottom edge with nothing to say it did.
-            let room = (body.height as usize).saturating_sub(lines.len());
-            let (shown, hidden) = if snap.files.len() > room && room > 0 {
-                (room - 1, snap.files.len() - (room - 1))
+    if snap.available {
+        lines.push((Line::from(""), None, None));
+        let ch_open = !collapsible || app.sidebar_sections.expanded(SidebarSection::Changes);
+        lines.push((
+            section_header("Changes", ch_open, collapsible, theme),
+            if collapsible {
+                Some(SidebarSection::Changes)
             } else {
-                (snap.files.len(), 0)
-            };
-            let stat_w = snap
-                .files
-                .iter()
-                .take(shown)
-                .map(|f| file_stat(f, theme).1)
-                .max()
-                .unwrap_or(0);
-            for f in snap.files.iter().take(shown) {
-                lines.push((file_line(f, app, w, stat_w), None, None));
-            }
-            if hidden > 0 {
+                None
+            },
+            None,
+        ));
+        if ch_open {
+            if snap.files.is_empty() {
                 lines.push((
                     Line::from(Span::styled(
-                        format!("+{hidden} more"),
+                        "clean working tree",
                         Style::default().fg(theme.faint),
                     )),
                     None,
                     None,
                 ));
+            } else {
+                // Changes is the last section, so without a cap the tail of a long
+                // list just falls off the bottom edge with nothing to say it did.
+                let room = (body.height as usize).saturating_sub(lines.len());
+                let (shown, hidden) = if snap.files.len() > room && room > 0 {
+                    (room - 1, snap.files.len() - (room - 1))
+                } else {
+                    (snap.files.len(), 0)
+                };
+                let stat_w = snap
+                    .files
+                    .iter()
+                    .take(shown)
+                    .map(|f| file_stat(f, theme).1)
+                    .max()
+                    .unwrap_or(0);
+                for f in snap.files.iter().take(shown) {
+                    lines.push((file_line(f, app, w, stat_w), None, None));
+                }
+                if hidden > 0 {
+                    lines.push((
+                        Line::from(Span::styled(
+                            format!("+{hidden} more"),
+                            Style::default().fg(theme.faint),
+                        )),
+                        None,
+                        None,
+                    ));
+                }
             }
         }
     }
@@ -905,6 +994,7 @@ mod tests {
             name: "hive".into(),
             branch: "development".into(),
             files,
+            available: true,
             fetched_at: Some(Instant::now()),
         };
         app
@@ -998,6 +1088,7 @@ mod tests {
                     untracked: false,
                 })
                 .collect(),
+            available: true,
             fetched_at: Some(Instant::now()),
         };
         app.apply(AgentEvent::SubagentSpawned {
@@ -1079,6 +1170,7 @@ mod tests {
                 deleted: 1,
                 untracked: false,
             }],
+            available: true,
             fetched_at: Some(Instant::now()),
         };
         app.context_files = vec![hive_core::ContextFile {
@@ -1110,6 +1202,7 @@ mod tests {
     #[test]
     fn sidebar_shows_terminals_and_records_item_hits() {
         let mut app = test_app();
+        app.project.available = true;
         app.apply(AgentEvent::TerminalStarted {
             id: "term-1".into(),
             command: "theme-installer".into(),
