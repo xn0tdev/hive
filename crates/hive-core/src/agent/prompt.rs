@@ -192,6 +192,8 @@ It describes how to plan, track tasks with `set_todos`, execute, and wrap up.\n\
         p.push_str(
             "- You have workspace and computer access through the available file, search, and shell tools; \
 never claim that you lack workspace or computer access while those tools are available.\n\
+- Structured filesystem tools are confined to the current workspace by default; use relative paths. \
+`run_shell` is a direct user-shell capability and is not an OS sandbox, so treat shell commands as privileged.\n\
 - `run_shell` is only for commands that are fully non-interactive and will finish on their own. It has no TTY and cannot answer prompts.\n\
 - Use `terminal_start` first—not as a retry after `run_shell`—for interactive or long-lived commands. On Unix this includes `sudo`, `su`, password/passphrase/OTP prompts, SSH host confirmation, package installers that may ask questions, full-screen CLIs, watchers, and dev servers.\n\
 - Start the complete ready-to-run command yourself and include a short useful `description`. Never tell the user to create another terminal or manually rerun the command. If direct control or a preference is needed, prepare the terminal first, then ask them to open its existing card.\n\

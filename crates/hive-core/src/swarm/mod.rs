@@ -28,6 +28,7 @@ struct Inner {
     events: EventSender,
     sem: Arc<Semaphore>,
     max_depth: usize,
+    root_cwd: std::path::PathBuf,
     me: Weak<Inner>,
 }
 
@@ -39,11 +40,33 @@ pub fn new_spawner(
     max_concurrent: usize,
     max_depth: usize,
 ) -> Arc<dyn SubagentSpawner> {
+    new_spawner_in(
+        builder,
+        events,
+        max_concurrent,
+        max_depth,
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    )
+}
+
+/// Build a swarm whose fallback cwd is the parent agent's workspace.
+///
+/// The old constructor remains convenient for embedders that use the process
+/// cwd. The composition root should use this variant because an agent can be
+/// rebuilt for a cwd that differs from the process cwd, notably in ACP.
+pub fn new_spawner_in(
+    builder: AgentBuilder,
+    events: EventSender,
+    max_concurrent: usize,
+    max_depth: usize,
+    root_cwd: std::path::PathBuf,
+) -> Arc<dyn SubagentSpawner> {
     Arc::new_cyclic(|me| Inner {
         builder,
         events,
         sem: Arc::new(Semaphore::new(max_concurrent.max(1))),
         max_depth,
+        root_cwd,
         me: me.clone(),
     })
 }
@@ -87,7 +110,7 @@ impl Inner {
         });
 
         let model = self.builder.config.model(task.model_role).to_string();
-        let main_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let main_cwd = task.cwd.clone().unwrap_or_else(|| self.root_cwd.clone());
 
         let worktree_meta = if task.isolate_worktree {
             match worktree::create(&main_cwd, &id) {

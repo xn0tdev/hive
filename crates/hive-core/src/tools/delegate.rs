@@ -33,6 +33,7 @@ fn make_task(
     prompt: String,
     depth: usize,
     isolate: bool,
+    cwd: &std::path::Path,
 ) -> SubagentTask {
     SubagentTask {
         id,
@@ -41,7 +42,7 @@ fn make_task(
         model_role: ModelRole::Default,
         depth,
         isolate_worktree: isolate,
-        cwd: None,
+        cwd: Some(cwd.to_path_buf()),
     }
 }
 
@@ -106,6 +107,7 @@ build/lint/review pass."
             build_verify_prompt(task),
             ctx.depth + 1,
             false,
+            &ctx.cwd,
         );
 
         let outcome = ctx.spawner.spawn(st).await;
@@ -165,6 +167,7 @@ runs in an isolated git worktree."
             task.to_string(),
             ctx.depth + 1,
             ctx.isolate_worktrees,
+            &ctx.cwd,
         );
 
         let outcome = ctx.spawner.spawn(st).await;
@@ -240,6 +243,7 @@ Great for fan-out work across independent features."
                 prompt,
                 ctx.depth + 1,
                 true,
+                &ctx.cwd,
             ));
         }
 

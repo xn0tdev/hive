@@ -56,8 +56,14 @@ base_url = "https://api.perplexity.ai"
 model = "sonar"
 
 [swarm]
-max_concurrent = 200
+# Keep the default bounded; raise it only when the machine and provider can
+# handle the extra parallel processes and requests.
+max_concurrent = 8
 max_depth = 2
+
+[agent]
+context_window = 256000
+workspace_only = true
 
 [ui]
 theme = "gray"

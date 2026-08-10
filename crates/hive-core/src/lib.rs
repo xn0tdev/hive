@@ -51,5 +51,5 @@ pub use agent::{
 };
 pub use skills::inside::{CompositeSkills, InsideSkills};
 pub use skills::DiskSkills;
-pub use swarm::new_spawner;
+pub use swarm::{new_spawner, new_spawner_in};
 pub use tools::all_tools;

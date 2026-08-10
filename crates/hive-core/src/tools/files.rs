@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::message::ImageSource;
 use crate::tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 
-use super::{bool_arg, resolve, str_arg, u64_arg};
+use super::{bool_arg, resolve_workspace, str_arg, u64_arg};
 
 /// Recognized raster image extensions that `read_file` returns as images.
 fn image_media_type(path: &Path) -> Option<&'static str> {
@@ -48,7 +48,7 @@ returns metadata, and attaches the image when the active model supports vision."
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
+                "path": {"type": "string", "description": "File path relative to the current workspace. Absolute paths are rejected unless workspace_only=false."},
                 "offset": {"type": "integer", "description": "1-based line to start reading from."},
                 "limit": {"type": "integer", "description": "Maximum number of lines to return."}
             },
@@ -60,7 +60,10 @@ returns metadata, and attaches the image when the active model supports vision."
         let Some(path) = str_arg(&args, "path") else {
             return ToolResult::error("missing 'path'");
         };
-        let full = resolve(&ctx.cwd, path);
+        let full = match resolve_workspace(ctx, path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
 
         // Images: attach only for vision-capable models, and only under a size
         // cap so non-vision / huge files cannot blow up or break the request.
@@ -140,7 +143,7 @@ impl Tool for WriteFile {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
+                "path": {"type": "string", "description": "File path relative to the current workspace. Absolute paths are rejected unless workspace_only=false."},
                 "content": {"type": "string", "description": "Full file contents to write."}
             },
             "required": ["path", "content"]
@@ -154,7 +157,10 @@ impl Tool for WriteFile {
         let Some(content) = str_arg(&args, "content") else {
             return ToolResult::error("missing 'content'");
         };
-        let full = resolve(&ctx.cwd, path);
+        let full = match resolve_workspace(ctx, path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
 
         if let Some(parent) = full.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -195,7 +201,7 @@ impl Tool for EditFile {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
+                "path": {"type": "string", "description": "File path relative to the current workspace. Absolute paths are rejected unless workspace_only=false."},
                 "old_string": {"type": "string", "description": "Exact text to find (include enough context to be unique)."},
                 "new_string": {"type": "string", "description": "Replacement text."},
                 "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness."}
@@ -215,7 +221,10 @@ impl Tool for EditFile {
             return ToolResult::error("missing 'new_string'");
         };
         let replace_all = bool_arg(&args, "replace_all");
-        let full = resolve(&ctx.cwd, path);
+        let full = match resolve_workspace(ctx, path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
 
         let content = match tokio::fs::read_to_string(&full).await {
             Ok(c) => c,
@@ -315,7 +324,7 @@ not delete broad trees unless the user explicitly named them."
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File or directory path, absolute or relative to the working directory."
+                    "description": "File or directory path relative to the current workspace. Absolute paths are rejected unless workspace_only=false."
                 }
             },
             "required": ["path"]
@@ -329,7 +338,10 @@ not delete broad trees unless the user explicitly named them."
         else {
             return ToolResult::error("missing 'path'");
         };
-        let full = resolve(&ctx.cwd, path);
+        let full = match resolve_workspace(ctx, path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
         if let Some(msg) = refuse_dangerous_delete(&ctx.cwd, &full) {
             return ToolResult::error(msg);
         }
@@ -399,7 +411,10 @@ impl Tool for ListDir {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
         let path = str_arg(&args, "path").unwrap_or(".");
-        let full = resolve(&ctx.cwd, path);
+        let full = match resolve_workspace(ctx, path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
 
         let mut rd = match tokio::fs::read_dir(&full).await {
             Ok(rd) => rd,
@@ -469,7 +484,10 @@ impl Tool for Glob {
         let Some(pattern) = str_arg(&args, "pattern") else {
             return ToolResult::error("missing 'pattern'");
         };
-        let base = resolve(&ctx.cwd, str_arg(&args, "path").unwrap_or("."));
+        let base = match resolve_workspace(ctx, str_arg(&args, "path").unwrap_or(".")) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
         let pattern = pattern.to_string();
 
         let matcher = match GlobBuilder::new(&pattern).literal_separator(true).build() {
@@ -535,7 +553,10 @@ impl Tool for Grep {
             Ok(r) => r,
             Err(e) => return ToolResult::error(format!("invalid regex: {e}")),
         };
-        let base = resolve(&ctx.cwd, str_arg(&args, "path").unwrap_or("."));
+        let base = match resolve_workspace(ctx, str_arg(&args, "path").unwrap_or(".")) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(error),
+        };
         let cwd = ctx.cwd.clone();
 
         let results = tokio::task::spawn_blocking(move || {

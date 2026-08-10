@@ -313,18 +313,26 @@ pub struct ConnectionsConfig {
 /// Default model context window (tokens) when unset in config.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 
-/// Agent runtime knobs (context window, compaction).
+/// Agent runtime knobs (context window, compaction, filesystem scope).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     /// Model context window in tokens. Auto-compact fires at 75% of this.
     pub context_window: u64,
+    /// Keep filesystem tools inside the agent's current workspace by default.
+    ///
+    /// `run_shell` is intentionally still a direct user-shell capability. This
+    /// flag protects the structured filesystem tools and makes their boundary
+    /// explicit; it is not a substitute for an OS-level shell sandbox.
+    #[serde(default = "default_true")]
+    pub workspace_only: bool,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         AgentConfig {
             context_window: DEFAULT_CONTEXT_WINDOW,
+            workspace_only: true,
         }
     }
 }

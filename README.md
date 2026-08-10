@@ -56,9 +56,10 @@ default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast"
 
 [agent]
 context_window = 128000   # auto-/compact around 75% of this
+workspace_only = true      # structured file tools stay inside the current workspace
 ```
 
-You can also just export `FIREWORKS_API_KEY` (or whatever `api_key_env` you set). Extra providers go in via `/connect`; switch models with `/model`. Skills live under `~/.config/hive/skills/` or `.hive/skills/` and show up as `/skill-name`.
+You can also just export `FIREWORKS_API_KEY` (or whatever `api_key_env` you set). Extra providers go in via `/connect`; switch models with `/model`. Skills live under `~/.config/hive/skills/` or `.hive/skills/` and show up as `/skill-name`. Structured file tools are workspace-only by default. `run_shell` remains an explicit direct shell capability and is not an OS sandbox.
 
 ## Under the hood (brief)
 

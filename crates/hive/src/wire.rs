@@ -11,7 +11,7 @@ use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::{
-    all_tools, new_spawner, Agent, AgentBuilder, CompositeSkills, DiskSkills, FollowUpSlot,
+    all_tools, new_spawner_in, Agent, AgentBuilder, CompositeSkills, DiskSkills, FollowUpSlot,
     InsideSkills,
 };
 use hive_llm::FireworksProvider;
@@ -44,11 +44,12 @@ pub fn build_agent(cfg: &Arc<AppConfig>, event_tx: hive_core::EventSender) -> Ag
         config: cfg.clone(),
     };
 
-    let spawner = new_spawner(
+    let spawner = new_spawner_in(
         builder.clone(),
         event_tx.clone(),
         cfg.swarm.max_concurrent,
         cfg.swarm.max_depth,
+        cwd.clone(),
     );
 
     let default_model = cfg.models.default.id().to_string();
@@ -153,11 +154,12 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         config: cfg.clone(),
     };
 
-    let spawner = new_spawner(
+    let spawner = new_spawner_in(
         builder.clone(),
         event_tx.clone(),
         cfg.swarm.max_concurrent,
         cfg.swarm.max_depth,
+        cwd.clone(),
     );
 
     let default_model = cfg.models.default.id().to_string();
