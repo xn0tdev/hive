@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::tool::{Tool, ToolContext, ToolRegistration};
 
 mod delegate;
+#[path = "fs/mod.rs"]
 mod files;
 mod mode;
 mod plan;
