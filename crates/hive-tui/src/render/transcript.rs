@@ -118,6 +118,7 @@ fn transcript_has_moving_blocks(app: &App) -> bool {
             streaming: true, ..
         } => true,
         UiBlock::Compacted(card) => card.before.is_none(),
+        UiBlock::Goal(_) => app.goal.as_ref().is_some_and(|goal| !goal.paused),
         _ => false,
     })
 }
@@ -1056,6 +1057,28 @@ mod tests {
             a.transcript_cache.builds, builds,
             "footer animation must not rebuild stable transcript history"
         );
+    }
+
+    #[test]
+    fn active_goal_deadline_refreshes_cached_transcript_once_per_second() {
+        use comb::{render, Size};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::GoalSet {
+            objective: "keep working".into(),
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        });
+        a.running = false;
+        let _ = render(Size::new(100, 30), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        let builds = a.transcript_cache.builds;
+        a.spinner += 10;
+        let _ = render(Size::new(100, 30), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        assert_eq!(a.transcript_cache.builds, builds + 1);
     }
 
     #[test]
