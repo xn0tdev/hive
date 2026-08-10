@@ -43,9 +43,7 @@ use crate::app::App;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    // Full-frame clear first: landing ↔ active, sidebar open/close, and
-    // resize all shift rects; without this, vacated columns/rows keep ghosts.
-    f.buffer().paint(area, Style::default());
+    // comb supplies a freshly cleared retained back-buffer for every frame.
     // Only the chat layout re-arms this; landing and the special views have no
     // scrollback of their own to jump to.
     app.scroll_bottom_hit = None;

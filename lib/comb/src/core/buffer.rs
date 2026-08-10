@@ -465,6 +465,17 @@ mod tests {
     }
 
     #[test]
+    fn clear_resets_wide_transparent_and_styled_cells() {
+        let mut b = Buffer::transparent(Size::new(4, 1));
+        b.set_str(0, 0, "界", Style::new().add(Modifier::BOLD));
+        b.clear(Cell::blank());
+
+        for x in 0..4 {
+            assert_eq!(b.get(x, 0), Some(&Cell::blank()));
+        }
+    }
+
+    #[test]
     fn set_str_clips_at_edge() {
         let mut b = Buffer::blank(Size::new(4, 1));
         let next = b.set_str(2, 0, "hello", Style::new());

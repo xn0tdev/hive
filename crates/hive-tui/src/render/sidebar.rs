@@ -99,7 +99,7 @@ impl ProjectRefresh {
     pub fn new() -> Self {
         let (request_tx, request_rx) = mpsc::sync_channel::<String>(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let _ = std::thread::Builder::new()
             .name("hive-project-refresh".into())
             .spawn(move || {
                 while let Ok(mut cwd) = request_rx.recv() {
@@ -119,8 +119,7 @@ impl ProjectRefresh {
                         Err(TrySendError::Disconnected(_)) => break,
                     }
                 }
-            })
-            .expect("project refresh worker must start");
+            });
         Self {
             request_tx,
             result_rx,
@@ -182,6 +181,10 @@ impl ProjectSnapshot {
 
     pub fn invalidate(&mut self) {
         self.fetched_at = None;
+    }
+
+    pub fn mark_refreshed(&mut self) {
+        self.fetched_at = Some(Instant::now());
     }
 }
 

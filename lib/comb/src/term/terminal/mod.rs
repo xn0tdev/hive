@@ -125,6 +125,7 @@ pub struct Terminal {
     front: Buffer,
     back: Buffer,
     ansi: String,
+    last_changed_cells: usize,
     size: Size,
     inbuf: Vec<u8>,
     /// When `inbuf` is exactly `[ESC]` awaiting more bytes (or Esc timeout).
@@ -143,6 +144,7 @@ impl Terminal {
             front: Buffer::blank(size),
             back: Buffer::blank(size),
             ansi: String::with_capacity(size.area() as usize),
+            last_changed_cells: 0,
             size,
             inbuf: Vec::new(),
             esc_seen_at: None,
@@ -161,6 +163,10 @@ impl Terminal {
 
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    pub fn last_changed_cells(&self) -> usize {
+        self.last_changed_cells
     }
 
     /// Choose how much mouse activity to receive. Disables the other modes first
@@ -222,8 +228,10 @@ impl Terminal {
         let mut pen: Option<(u16, u16)> = None;
         let size = self.size;
         let ansi = &mut self.ansi;
+        let mut changed_cells = 0usize;
 
         self.back.for_each_diff(&self.front, |x, y, cell| {
+            changed_cells += 1;
             if cell.ch == WIDE_CONT {
                 pen = if x + 1 < size.width {
                     Some((x + 1, y))
@@ -251,6 +259,7 @@ impl Terminal {
                 None
             };
         });
+        self.last_changed_cells = changed_cells;
         if last_style.is_some() {
             ansi.push_str("\x1b[0m");
         }

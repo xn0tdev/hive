@@ -35,6 +35,8 @@ struct FrameProfiler {
     frames: u64,
     total: Duration,
     max: Duration,
+    changed_cells: u64,
+    max_changed_cells: usize,
 }
 
 impl FrameProfiler {
@@ -45,6 +47,8 @@ impl FrameProfiler {
             frames: 0,
             total: Duration::ZERO,
             max: Duration::ZERO,
+            changed_cells: 0,
+            max_changed_cells: 0,
         }
     }
 
@@ -52,12 +56,14 @@ impl FrameProfiler {
         self.enabled.then(Instant::now)
     }
 
-    fn finish(&mut self, started: Option<Instant>) {
+    fn finish(&mut self, started: Option<Instant>, changed_cells: usize) {
         let Some(started) = started else { return };
         let elapsed = started.elapsed();
         self.frames += 1;
         self.total += elapsed;
         self.max = self.max.max(elapsed);
+        self.changed_cells = self.changed_cells.saturating_add(changed_cells as u64);
+        self.max_changed_cells = self.max_changed_cells.max(changed_cells);
         if self.window_started.elapsed() >= Duration::from_secs(1) {
             let average_us = self.total.as_micros() / u128::from(self.frames.max(1));
             tracing::debug!(
@@ -65,12 +71,16 @@ impl FrameProfiler {
                 frames = self.frames,
                 average_us,
                 max_us = self.max.as_micros(),
+                average_changed_cells = self.changed_cells / self.frames.max(1),
+                max_changed_cells = self.max_changed_cells,
                 "TUI frame timings"
             );
             self.window_started = Instant::now();
             self.frames = 0;
             self.total = Duration::ZERO;
             self.max = Duration::ZERO;
+            self.changed_cells = 0;
+            self.max_changed_cells = 0;
         }
     }
 }
@@ -141,7 +151,7 @@ fn run_loop(
         if dirty || content_dirty || animation_moved {
             let frame_started = profiler.start();
             terminal.draw(|f| render::draw(f, app))?;
-            profiler.finish(frame_started);
+            profiler.finish(frame_started, terminal.last_changed_cells());
             if let Some((id, rows, cols)) = app.take_pending_terminal_resize() {
                 if rows > 0 && cols > 0 {
                     let _ = input_tx.send(InputCommand::TerminalResize { id, rows, cols });

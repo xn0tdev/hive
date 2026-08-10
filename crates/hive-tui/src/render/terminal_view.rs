@@ -4,7 +4,6 @@ use crate::app::state::{Block, TerminalViewPhase};
 use crate::app::App;
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    frame.buffer().paint(area, Style::default());
     app.click_hits.clear();
     app.assistant_row_hits.clear();
     app.assistant_rows.clear();

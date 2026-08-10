@@ -534,13 +534,20 @@ impl App {
         if result.cwd != self.cwd {
             return false;
         }
+        let context_changed = self.context_files != result.context_files;
+        self.context_files = result.context_files;
+        if !result.snapshot.available && self.project.available {
+            // A transient Git failure must not erase a previously useful
+            // snapshot. Keep it quietly and retry on the normal cadence.
+            self.project.mark_refreshed();
+            return context_changed;
+        }
         let changed = self.project.name != result.snapshot.name
             || self.project.branch != result.snapshot.branch
             || self.project.files != result.snapshot.files
             || self.project.available != result.snapshot.available
-            || self.context_files != result.context_files;
+            || context_changed;
         self.project = result.snapshot;
-        self.context_files = result.context_files;
         changed
     }
 
