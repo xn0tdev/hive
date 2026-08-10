@@ -43,31 +43,110 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         app.assistant_selection = None;
     }
     app.assistant_selection_width = content_width;
-    let (all, heads, assistant_rows) = build(app, width);
-    let total = all.len();
-    // One intentional row of breathing room above the conversation. Block
-    // separators are handled independently, so Welcome cannot turn this into
-    // two rows.
+
+    if matches!(app.view, ChatView::Main) {
+        let animation_epoch = if transcript_has_moving_blocks(app) {
+            // Footer animation stays at 10 FPS; transcript elapsed labels and
+            // card spinners only require a low-frequency refresh.
+            app.spinner / 10
+        } else {
+            0
+        };
+        let mut cache = std::mem::take(&mut app.transcript_cache);
+        let rebuild = !cache.valid
+            || cache.width != width
+            || cache.revision != app.transcript_revision
+            || cache.animation_epoch != animation_epoch
+            || cache.hover_block != app.hover_block
+            || cache.show_tool_cards != app.ui.show_tool_cards;
+        if rebuild {
+            let (lines, heads, rows) = build(app, width);
+            cache.width = width;
+            cache.revision = app.transcript_revision;
+            cache.animation_epoch = animation_epoch;
+            cache.hover_block = app.hover_block;
+            cache.show_tool_cards = app.ui.show_tool_cards;
+            cache.lines = lines;
+            cache.heads = heads;
+            cache.assistant_rows = rows.into_iter().map(AssistantResponseRow::from).collect();
+            cache.builds = cache.builds.saturating_add(1);
+            cache.valid = true;
+            app.assistant_rows = cache.assistant_rows.clone();
+        } else if app.assistant_rows.len() != cache.assistant_rows.len() {
+            app.assistant_rows = cache.assistant_rows.clone();
+        }
+        draw_layout(
+            buf,
+            area,
+            app,
+            &cache.lines,
+            &cache.heads,
+            &cache.assistant_rows,
+        );
+        app.transcript_cache = cache;
+    } else {
+        let (lines, heads, rows) = build(app, width);
+        let rows: Vec<AssistantResponseRow> =
+            rows.into_iter().map(AssistantResponseRow::from).collect();
+        app.assistant_rows = rows.clone();
+        draw_layout(buf, area, app, &lines, &heads, &rows);
+    }
+}
+
+impl From<BuiltAssistantRow> for AssistantResponseRow {
+    fn from(row: BuiltAssistantRow) -> Self {
+        Self {
+            line_idx: row.line_idx,
+            block: row.block,
+            response_row: row.response_row,
+            text: row.text,
+            join_before: row.join_before,
+        }
+    }
+}
+
+fn transcript_has_moving_blocks(app: &App) -> bool {
+    app.blocks.iter().any(|block| match block {
+        UiBlock::Tool(card) => card.status == ToolStatus::Running,
+        UiBlock::Subagent(card) => card.status == SubagentStatus::Running,
+        UiBlock::Plan(card) => card.status == crate::app::state::PlanStatus::Writing,
+        UiBlock::Terminal(card) => {
+            matches!(card.process, hive_core::TerminalProcessState::Running)
+        }
+        UiBlock::Reasoning(thought) => thought.elapsed_ms.is_none(),
+        UiBlock::Assistant {
+            streaming: true, ..
+        } => true,
+        UiBlock::Compacted(card) => card.before.is_none(),
+        _ => false,
+    })
+}
+
+fn draw_layout(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &mut App,
+    lines: &[Line],
+    heads: &[(usize, usize)],
+    assistant_rows: &[AssistantResponseRow],
+) {
     let target = Rect {
         y: area.y.saturating_add(1),
         height: area.height.saturating_sub(1),
         ..area
     };
     let viewport = target.height as usize;
-    let max_scroll = total.saturating_sub(viewport);
+    let max_scroll = lines.len().saturating_sub(viewport);
     app.set_transcript_max_scroll(max_scroll);
     let scroll = max_scroll.saturating_sub(app.scroll_from_bottom);
 
-    // Remember which screen rows hold expandable headers (thoughts / subagents)
-    // so a mouse click can be mapped back to its block.
     app.click_hits.clear();
-    for (line_idx, block_idx) in heads {
+    for &(line_idx, block_idx) in heads {
         if line_idx >= scroll && line_idx < scroll + target.height as usize {
             app.click_hits
                 .push((target.y + (line_idx - scroll) as u16, block_idx));
         }
     }
-    app.assistant_rows.clear();
     app.assistant_row_hits.clear();
     for row in assistant_rows {
         if row.line_idx >= scroll && row.line_idx < scroll + target.height as usize {
@@ -80,16 +159,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
                 join_before: row.join_before,
             });
         }
-        app.assistant_rows.push(AssistantResponseRow {
-            line_idx: row.line_idx,
-            block: row.block,
-            response_row: row.response_row,
-            text: row.text,
-            join_before: row.join_before,
-        });
     }
 
-    buf.set_lines(target, &all, scroll);
+    buf.set_lines(target, lines, scroll);
     paint_assistant_selection(buf, app);
     app.transcript_hit = Some(target);
 }
@@ -958,6 +1030,32 @@ mod tests {
             cost_input: 0.0,
             cost_output: 0.0,
         })
+    }
+
+    #[test]
+    fn stable_long_history_is_built_once_across_animation_frames() {
+        use comb::{render, Size};
+
+        let mut a = app();
+        for i in 0..400 {
+            a.notice(format!("completed history row {i}"));
+        }
+        let _ = render(Size::new(100, 30), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        let builds = a.transcript_cache.builds;
+        assert_eq!(builds, 1);
+
+        for _ in 0..20 {
+            a.spinner += 1;
+            let _ = render(Size::new(100, 30), |frame| {
+                crate::render::draw(frame, &mut a)
+            });
+        }
+        assert_eq!(
+            a.transcript_cache.builds, builds,
+            "footer animation must not rebuild stable transcript history"
+        );
     }
 
     #[test]

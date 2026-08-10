@@ -622,8 +622,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         }
     }
 
-    let draw_lines: Vec<Line> = lines.iter().map(|(l, _, _)| l.clone()).collect();
-    buf.set_lines(body, &draw_lines, 0);
+    for (row, (line, _, _)) in lines.iter().take(body.height as usize).enumerate() {
+        buf.set_line(body.x, body.y + row as u16, line, body.width);
+    }
 
     app.sidebar_section_hits.clear();
     app.sidebar_item_hits.clear();
@@ -977,6 +978,22 @@ mod tests {
             terminal_line(card, &app, 34).spans[0].style.fg
         };
         assert_eq!(hover_fg, Some(app.theme.fg));
+    }
+
+    #[test]
+    fn a_non_git_directory_is_optional_project_metadata() {
+        let dir = std::env::temp_dir().join(format!(
+            "hive-sidebar-no-git-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot = fetch(dir.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!snapshot.available);
+        assert!(snapshot.branch.is_empty());
+        assert!(snapshot.files.is_empty());
     }
 
     fn changed(path: &str, added: u32, deleted: u32, untracked: bool) -> ChangedFile {

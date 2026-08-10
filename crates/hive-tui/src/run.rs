@@ -4,7 +4,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use comb::{Event, Key, KeyCode, Mouse, MouseButton, MouseKind, MouseMode, Terminal};
@@ -24,12 +24,56 @@ use crate::{InputCommand, PrivateTerminalInput, TuiInit};
 
 const UNKNOWN_HINT: &str = "Ctrl+P for commands · /about for About";
 
-/// Poll interval while something is animating (spinner / shimmer).
-const ANIM_TICK: Duration = Duration::from_millis(100);
 /// Idle poll — long enough to skip needless redraws, short enough for input.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 /// Keep a hot producer from starving keyboard and mouse polling.
 const MAX_EVENTS_PER_TICK: usize = 128;
+
+struct FrameProfiler {
+    enabled: bool,
+    window_started: Instant,
+    frames: u64,
+    total: Duration,
+    max: Duration,
+}
+
+impl FrameProfiler {
+    fn from_env() -> Self {
+        Self {
+            enabled: std::env::var_os("HIVE_TUI_PROFILE").is_some(),
+            window_started: Instant::now(),
+            frames: 0,
+            total: Duration::ZERO,
+            max: Duration::ZERO,
+        }
+    }
+
+    fn start(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn finish(&mut self, started: Option<Instant>) {
+        let Some(started) = started else { return };
+        let elapsed = started.elapsed();
+        self.frames += 1;
+        self.total += elapsed;
+        self.max = self.max.max(elapsed);
+        if self.window_started.elapsed() >= Duration::from_secs(1) {
+            let average_us = self.total.as_micros() / u128::from(self.frames.max(1));
+            tracing::debug!(
+                target: "hive_tui::perf",
+                frames = self.frames,
+                average_us,
+                max_us = self.max.as_micros(),
+                "TUI frame timings"
+            );
+            self.window_started = Instant::now();
+            self.frames = 0;
+            self.total = Duration::ZERO;
+            self.max = Duration::ZERO;
+        }
+    }
+}
 
 pub fn run(
     init: TuiInit,
@@ -60,7 +104,8 @@ fn run_loop(
     interrupt: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut dirty = true;
-    let mut last_spinner = usize::MAX;
+    let mut last_animation_frame = u128::MAX;
+    let mut profiler = FrameProfiler::from_env();
     loop {
         let content_dirty = drain_events(app, events, input_tx);
 
@@ -84,26 +129,32 @@ fn run_loop(
                 dirty = true;
             }
         }
-        let animating = app.needs_animation();
-        let spinner_moved = animating && app.spinner != last_spinner;
+        let animation_interval = app.animation_interval();
+        let animation_frame = animation_interval.map(|step| app.animation_frame(step));
+        let animation_moved = animation_frame.is_some_and(|frame| frame != last_animation_frame);
 
         if app.take_repaint_request() {
             terminal.invalidate()?;
             dirty = true;
         }
 
-        if dirty || content_dirty || spinner_moved {
+        if dirty || content_dirty || animation_moved {
+            let frame_started = profiler.start();
             terminal.draw(|f| render::draw(f, app))?;
+            profiler.finish(frame_started);
             if let Some((id, rows, cols)) = app.take_pending_terminal_resize() {
                 if rows > 0 && cols > 0 {
                     let _ = input_tx.send(InputCommand::TerminalResize { id, rows, cols });
                 }
             }
-            last_spinner = app.spinner;
+            last_animation_frame = animation_frame.unwrap_or(u128::MAX);
             dirty = false;
         }
 
-        let wait = if animating { ANIM_TICK } else { IDLE_TICK };
+        let mut wait = animation_interval.unwrap_or(IDLE_TICK).min(IDLE_TICK);
+        if let Some(deadline) = app.next_visual_deadline() {
+            wait = wait.min(deadline);
+        }
         if let Some(ev) = terminal.read_event(wait)? {
             match ev {
                 Event::Key(key) => {

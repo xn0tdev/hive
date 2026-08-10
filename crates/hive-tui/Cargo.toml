@@ -16,6 +16,7 @@ hive-core = { workspace = true }
 hive-llm = { workspace = true }
 comb = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 base64 = { workspace = true }
 ignore = { workspace = true }
 unicode-width = "0.2"

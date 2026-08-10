@@ -77,6 +77,20 @@ pub(crate) struct MdRows {
 }
 
 #[derive(Default)]
+pub(crate) struct TranscriptCache {
+    pub width: usize,
+    pub revision: u64,
+    pub animation_epoch: usize,
+    pub hover_block: Option<usize>,
+    pub show_tool_cards: bool,
+    pub lines: Vec<Line>,
+    pub heads: Vec<(usize, usize)>,
+    pub assistant_rows: Vec<AssistantResponseRow>,
+    pub builds: u64,
+    pub valid: bool,
+}
+
+#[derive(Default)]
 pub(crate) struct MdCache {
     width: usize,
     entries: HashMap<u64, MdRows>,
@@ -354,6 +368,9 @@ pub struct App {
     pub(crate) pending_context_update: Option<u64>,
     /// Finished-assistant markdown cache (invalidated on width change).
     pub(crate) md_cache: MdCache,
+    /// Retained main transcript layout. Stable history is not rebuilt for every footer frame.
+    pub(crate) transcript_cache: TranscriptCache,
+    pub(crate) transcript_revision: u64,
     /// Cached git project / diff summary for the right sidebar.
     pub(crate) project: ProjectSnapshot,
     /// Coalescing background loader; Git and filesystem scans never run while drawing.
@@ -482,6 +499,8 @@ impl App {
             pending_terminal_resize: None,
             pending_context_update: None,
             md_cache: MdCache::default(),
+            transcript_cache: TranscriptCache::default(),
+            transcript_revision: 1,
             project: ProjectSnapshot::default(),
             project_refresh: ProjectRefresh::new(),
             sidebar_open: !matches!(init.ui.sidebar_mode, SidebarMode::Hidden),
@@ -605,6 +624,7 @@ impl App {
         input_tx: &tokio::sync::mpsc::UnboundedSender<crate::InputCommand>,
     ) {
         self.apply_ui_prefs();
+        self.invalidate_transcript();
         let _ = input_tx.send(crate::InputCommand::SaveUi(self.ui.clone()));
         self.flash("Settings saved");
     }
@@ -1436,14 +1456,26 @@ Keep everything else unless a note says otherwise.\n",
         spinner::frame(self.spinner)
     }
 
-    /// Advance the animation frame from wall-clock time. Called every loop
-    /// iteration; mouse/key event bursts don't speed the animation up because
-    /// the frame is a pure function of elapsed time. Also idle-blurs the
-    /// composer when typing has paused — returns true if a redraw is needed.
+    /// Advance clocks and retire one-shot visual state. Returns true when a
+    /// final repaint is needed (for example, to erase an expired toast).
     pub fn tick(&mut self) -> bool {
         self.spinner = (self.anim_start.elapsed().as_millis() / 100) as usize;
-        if self.logo_bonk.as_ref().is_some_and(|b| !b.alive()) {
+        let bonk_expired = self.logo_bonk.as_ref().is_some_and(|b| !b.alive());
+        if bonk_expired {
             self.logo_bonk = None;
+        }
+        let flash_expired = self
+            .flash_msg
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed().as_millis() >= FLASH_MS.max(TOAST_MS));
+        if flash_expired {
+            self.flash_msg = None;
+        }
+        let paste_expired = self
+            .image_pasted_at
+            .is_some_and(|at| at.elapsed().as_millis() >= TOAST_MS);
+        if paste_expired {
+            self.image_pasted_at = None;
         }
         let tasks_retired = self
             .todos_completed_at
@@ -1452,47 +1484,82 @@ Keep everything else unless a note says otherwise.\n",
             self.clear_todos();
         }
         let input_blurred = self.maybe_idle_blur_input();
-        tasks_retired || input_blurred
+        bonk_expired || flash_expired || paste_expired || tasks_retired || input_blurred
     }
 
-    /// True when the frame should keep painting (spinner / shimmer / bonk / flash).
-    pub fn needs_animation(&self) -> bool {
-        if self.logo_bonk.is_some() || self.flash_text().is_some() {
-            return true;
+    /// Cadence required by genuinely moving visuals. Deadline-only state such
+    /// as toasts is deliberately excluded so it does not create a 10 FPS loop.
+    pub fn animation_interval(&self) -> Option<std::time::Duration> {
+        let fast = self.logo_bonk.is_some()
+            || self.running
+            || self.blocks.iter().any(|b| match b {
+                Block::Tool(c) => c.status == ToolStatus::Running,
+                Block::Subagent(c) => c.status == SubagentStatus::Running,
+                Block::Plan(c) => c.status == PlanStatus::Writing,
+                Block::Terminal(c) => {
+                    !self.in_terminal_view()
+                        && matches!(c.process, hive_core::TerminalProcessState::Running)
+                }
+                Block::Reasoning(th) => th.elapsed_ms.is_none(),
+                Block::Assistant {
+                    streaming: true, ..
+                } => true,
+                Block::Compacted(c) => c.before.is_none(),
+                _ => false,
+            });
+        if fast {
+            Some(std::time::Duration::from_millis(100))
+        } else if self.goal.as_ref().is_some_and(|g| !g.paused) {
+            Some(std::time::Duration::from_secs(1))
+        } else {
+            None
         }
-        // Keep painting so the paste notice can retire on its own.
-        if self.just_pasted_image() {
-            return true;
+    }
+
+    pub fn animation_frame(&self, interval: std::time::Duration) -> u128 {
+        let step = interval.as_millis().max(1);
+        self.anim_start.elapsed().as_millis() / step
+    }
+
+    /// Nearest one-shot state transition that must wake the loop. The idle
+    /// input poll may wake sooner, but no redraw happens until the deadline.
+    pub fn next_visual_deadline(&self) -> Option<std::time::Duration> {
+        fn remaining(at: std::time::Instant, after_ms: u128) -> std::time::Duration {
+            let left = after_ms.saturating_sub(at.elapsed().as_millis());
+            std::time::Duration::from_millis(left.min(u128::from(u64::MAX)) as u64)
         }
-        if self.pending_dispatch.is_some() {
-            return true;
+        let mut next: Option<std::time::Duration> = None;
+        let mut include = |duration: std::time::Duration| {
+            next = Some(next.map_or(duration, |current| current.min(duration)));
+        };
+        if let Some((_, at)) = &self.flash_msg {
+            include(remaining(*at, FLASH_MS.max(TOAST_MS)));
         }
-        if self.todos_completed_at.is_some() {
-            return true;
+        if let Some(at) = self.image_pasted_at {
+            include(remaining(at, TOAST_MS));
         }
-        if self.running {
-            return true;
+        if let Some(at) = self.todos_completed_at {
+            include(remaining(at, TASKS_DONE_VISIBLE_MS));
         }
-        // Active goal: animate so the footer timer ticks.
-        if self.goal.as_ref().is_some_and(|g| !g.paused) {
-            return true;
+        if let Some(dispatch) = &self.pending_dispatch {
+            include(remaining(dispatch.submitted_at, DISPATCH_GRACE_MS));
         }
-        self.blocks.iter().any(|b| match b {
-            Block::Tool(c) => c.status == ToolStatus::Running,
-            Block::Subagent(c) => c.status == SubagentStatus::Running,
-            Block::Plan(c) => c.status == PlanStatus::Writing,
-            // Running terminals animate their spinner card (like subagents).
-            Block::Terminal(c) => {
-                matches!(c.process, hive_core::TerminalProcessState::Running)
+        if self.input_focused {
+            if let Some(at) = self.input_last_activity {
+                include(remaining(at, INPUT_IDLE_BLUR_MS));
             }
-            Block::Reasoning(th) => th.elapsed_ms.is_none(),
-            Block::Assistant {
-                streaming: true, ..
-            } => true,
-            // Compaction in progress: spinner animates.
-            Block::Compacted(c) => c.before.is_none(),
-            _ => false,
-        })
+        }
+        next
+    }
+
+    /// Compatibility helper used by render tests.
+    #[cfg(test)]
+    pub fn needs_animation(&self) -> bool {
+        self.animation_interval().is_some()
+            || self.flash_text().is_some()
+            || self.just_pasted_image()
+            || self.pending_dispatch.is_some()
+            || self.todos_completed_at.is_some()
     }
 
     /// Start a logo bonk ripple at a screen cell (landing only).
@@ -1774,10 +1841,12 @@ Keep everything else unless a note says otherwise.\n",
     pub fn push_user(&mut self, text: String) {
         self.blocks.push(Block::User(text));
         self.scroll_from_bottom = 0;
+        self.invalidate_transcript();
     }
 
     pub fn notice(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::Notice(text.into()));
+        self.invalidate_transcript();
     }
 
     fn clear_todos(&mut self) {
@@ -1785,6 +1854,7 @@ Keep everything else unless a note says otherwise.\n",
         self.todos_completed_at = None;
         self.blocks
             .retain(|block| !matches!(block, Block::Todos(_)));
+        self.invalidate_transcript();
     }
 
     /// Start a fresh chat — back to the centered Home/landing screen.
@@ -1827,6 +1897,13 @@ Keep everything else unless a note says otherwise.\n",
         self.pending_terminal_resize = None;
         self.pending_context_update = None;
         self.md_cache = MdCache::default();
+        self.transcript_cache = TranscriptCache::default();
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn invalidate_transcript(&mut self) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.transcript_cache.valid = false;
     }
 
     /// True when the composer can take an attachment: plain chat, no overlay,
@@ -1973,6 +2050,7 @@ Keep everything else unless a note says otherwise.\n",
         self.agent_mode = pd.mode;
         self.reset_menu();
         self.scroll_from_bottom = 0;
+        self.invalidate_transcript();
         self.flash("Prompt recalled — edit and resend");
         true
     }
@@ -2345,6 +2423,7 @@ Keep everything else unless a note says otherwise.\n",
             _ => None,
         }) {
             card.details_open = !card.details_open;
+            self.invalidate_transcript();
         }
     }
 
@@ -2372,6 +2451,22 @@ Keep everything else unless a note says otherwise.\n",
     /// Apply an agent event. Returns `true` when the visible UI should redraw
     /// (background subagent transcript updates while on the main chat do not).
     pub fn apply(&mut self, ev: AgentEvent) -> bool {
+        let transcript_changed = !matches!(
+            &ev,
+            AgentEvent::Usage(_)
+                | AgentEvent::ContextTokens(_)
+                | AgentEvent::ModelsListed { .. }
+                | AgentEvent::ModelsListFailed(_)
+                | AgentEvent::ConnectionsUpdated { .. }
+        );
+        let changed = self.apply_inner(ev);
+        if changed && transcript_changed {
+            self.invalidate_transcript();
+        }
+        changed
+    }
+
+    fn apply_inner(&mut self, ev: AgentEvent) -> bool {
         match ev {
             AgentEvent::TurnStarted => {
                 self.running = true;
@@ -3079,6 +3174,7 @@ Keep everything else unless a note says otherwise.\n",
                 th.open = !any_open;
             }
         }
+        self.invalidate_transcript();
         self.flash(if any_open {
             "Thoughts hidden"
         } else {
@@ -3093,6 +3189,7 @@ Keep everything else unless a note says otherwise.\n",
             Some(Block::Reasoning(_)) => {
                 if let Some(Block::Reasoning(th)) = self.blocks.get_mut(block_idx) {
                     th.open = !th.open;
+                    self.invalidate_transcript();
                 }
             }
             Some(Block::Subagent(card)) => {
@@ -3858,6 +3955,24 @@ mod tests {
             detail: "done".into(),
         });
         assert!(!a.needs_animation());
+    }
+
+    #[test]
+    fn deadline_only_state_does_not_request_fast_animation() {
+        let mut a = app();
+        a.flash("saved");
+        assert!(a.animation_interval().is_none());
+        assert!(a.next_visual_deadline().is_some());
+
+        a.apply(AgentEvent::GoalSet {
+            objective: "wait".into(),
+            deadline: None,
+        });
+        a.running = false;
+        assert_eq!(
+            a.animation_interval(),
+            Some(std::time::Duration::from_secs(1))
+        );
     }
 
     #[test]
