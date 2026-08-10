@@ -160,6 +160,11 @@ impl Buffer {
         Size::new(self.width, self.height)
     }
 
+    /// Reset every cell while retaining the allocation.
+    pub fn clear(&mut self, cell: Cell) {
+        self.cells.fill(cell);
+    }
+
     pub fn area(&self) -> Rect {
         Rect::new(0, 0, self.width, self.height)
     }
@@ -382,26 +387,31 @@ impl Buffer {
         }
     }
 
-    /// The cells that differ from `prev` (same dimensions assumed), as
-    /// `(x, y, cell)`, in row-major order — ready to emit to the terminal.
-    pub fn diff<'a>(&'a self, prev: &Buffer) -> Vec<(u16, u16, &'a Cell)> {
-        let mut out = Vec::new();
+    /// Visit changed cells in row-major order without allocating an
+    /// intermediate diff list.
+    pub fn for_each_diff<'a>(&'a self, prev: &Buffer, mut visit: impl FnMut(u16, u16, &'a Cell)) {
         if self.width != prev.width || self.height != prev.height {
-            // Different geometry: treat everything as changed.
             for y in 0..self.height {
                 for x in 0..self.width {
-                    out.push((x, y, &self.cells[self.index(x, y).unwrap()]));
+                    visit(x, y, &self.cells[self.index(x, y).unwrap()]);
                 }
             }
-            return out;
+            return;
         }
-        for (i, (a, b)) in self.cells.iter().zip(prev.cells.iter()).enumerate() {
-            if a != b {
+        for (i, (next, current)) in self.cells.iter().zip(prev.cells.iter()).enumerate() {
+            if next != current {
                 let x = (i % self.width as usize) as u16;
                 let y = (i / self.width as usize) as u16;
-                out.push((x, y, a));
+                visit(x, y, next);
             }
         }
+    }
+
+    /// Collected form kept for diagnostics and tests. Terminal rendering uses
+    /// [`Buffer::for_each_diff`] to avoid this allocation.
+    pub fn diff<'a>(&'a self, prev: &Buffer) -> Vec<(u16, u16, &'a Cell)> {
+        let mut out = Vec::new();
+        self.for_each_diff(prev, |x, y, cell| out.push((x, y, cell)));
         out
     }
 

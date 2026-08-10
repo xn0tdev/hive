@@ -7,6 +7,7 @@
 
 mod platform;
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -122,6 +123,8 @@ impl Frame<'_> {
 pub struct Terminal {
     platform: PlatformState,
     front: Buffer,
+    back: Buffer,
+    ansi: String,
     size: Size,
     inbuf: Vec<u8>,
     /// When `inbuf` is exactly `[ESC]` awaiting more bytes (or Esc timeout).
@@ -138,6 +141,8 @@ impl Terminal {
         let mut term = Terminal {
             platform,
             front: Buffer::blank(size),
+            back: Buffer::blank(size),
+            ansi: String::with_capacity(size.area() as usize),
             size,
             inbuf: Vec::new(),
             esc_seen_at: None,
@@ -181,19 +186,21 @@ impl Terminal {
 
     /// Build a frame, then flush the minimal diff to the terminal.
     pub fn draw<F: FnOnce(&mut Frame)>(&mut self, f: F) -> io::Result<()> {
-        // Adapt to a resized window: reset our record of the screen and clear.
+        // Adapt to a resized window: reset both retained buffers and clear.
         let size = platform::query_size();
         if size != self.size {
             self.size = size;
             self.front = Buffer::blank(size);
+            self.back = Buffer::blank(size);
             self.write_raw("\x1b[H\x1b[2J\x1b[3J")?;
             platform::clear_resize_flag();
+        } else {
+            self.back.clear(crate::core::buffer::Cell::blank());
         }
 
-        let mut back = Buffer::blank(self.size);
         let cursor = {
             let mut frame = Frame {
-                root: &mut back,
+                root: &mut self.back,
                 comp: Compositor::new(),
                 cursor: None,
                 size: self.size,
@@ -202,65 +209,67 @@ impl Terminal {
             frame.finish()
         };
 
-        let out = self.render_diff(&back, cursor);
-        self.write_raw(&out)?;
-        self.front = back;
+        self.render_diff(cursor);
+        self.out.write_all(self.ansi.as_bytes())?;
+        self.out.flush()?;
+        std::mem::swap(&mut self.front, &mut self.back);
         Ok(())
     }
 
-    fn render_diff(&mut self, back: &Buffer, cursor: Option<(u16, u16)>) -> String {
-        let mut s = String::new();
+    fn render_diff(&mut self, cursor: Option<(u16, u16)>) {
+        self.ansi.clear();
         let mut last_style: Option<Style> = None;
         let mut pen: Option<(u16, u16)> = None;
+        let size = self.size;
+        let ansi = &mut self.ansi;
 
-        for (x, y, cell) in back.diff(&self.front) {
+        self.back.for_each_diff(&self.front, |x, y, cell| {
             if cell.ch == WIDE_CONT {
-                pen = if x + 1 < self.size.width {
+                pen = if x + 1 < size.width {
                     Some((x + 1, y))
                 } else {
                     None
                 };
-                continue;
+                return;
             }
             if pen != Some((x, y)) {
-                s.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+                let _ = write!(ansi, "\x1b[{};{}H", y + 1, x + 1);
             }
             if last_style != Some(cell.style) {
-                s.push_str(&sgr(cell.style));
+                ansi.push_str(&sgr(cell.style));
                 last_style = Some(cell.style);
             }
             let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
-            s.push(ch);
+            ansi.push(ch);
             let adv = unicode_width::UnicodeWidthChar::width(ch)
                 .unwrap_or(1)
                 .max(1) as u16;
             let next = x.saturating_add(adv);
-            pen = if next < self.size.width {
+            pen = if next < size.width {
                 Some((next, y))
             } else {
                 None
             };
-        }
+        });
         if last_style.is_some() {
-            s.push_str("\x1b[0m");
+            ansi.push_str("\x1b[0m");
         }
 
         match cursor {
             Some((x, y)) => {
-                s.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+                let _ = write!(ansi, "\x1b[{};{}H", y + 1, x + 1);
                 if !self.cursor_visible {
-                    s.push_str("\x1b[?25h");
+                    ansi.push_str("\x1b[?25h");
                     self.cursor_visible = true;
                 }
             }
             None => {
                 if self.cursor_visible {
-                    s.push_str("\x1b[?25l");
+                    ansi.push_str("\x1b[?25l");
                     self.cursor_visible = false;
                 }
             }
         }
-        s
     }
 
     /// Wait up to `timeout` for the next input event. `Ok(None)` on timeout.
