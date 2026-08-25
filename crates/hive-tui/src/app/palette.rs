@@ -244,10 +244,7 @@ impl PaletteState {
             choices
                 .iter()
                 .filter(|c| {
-                    c.key.to_ascii_lowercase().contains(&q)
-                        || c.display.to_ascii_lowercase().contains(&q)
-                        || c.detail.to_ascii_lowercase().contains(&q)
-                        || c.group.to_ascii_lowercase().contains(&q)
+                    hive_llm::catalog::query_matches(&q, &[&c.key, &c.display, &c.detail, &c.group])
                 })
                 .collect()
         };
@@ -427,68 +424,6 @@ impl PaletteState {
                 }
             }
         }
-    }
-
-    /// Whether `row` picks something (headers and spacers do not).
-    pub fn row_is_selectable(
-        &self,
-        choices: &[ModelChoice],
-        connections: &[ConnectionInfo],
-        sessions: &[SessionMeta],
-        row: usize,
-    ) -> bool {
-        match self.mode {
-            PaletteMode::Commands => self
-                .command_rows()
-                .get(row)
-                .is_some_and(|r| r.is_selectable()),
-            PaletteMode::Models => self
-                .model_rows(choices)
-                .get(row)
-                .is_some_and(|r| r.is_selectable()),
-            PaletteMode::Connect => row < self.connect_rows(connections).len(),
-            PaletteMode::Sessions => row < self.session_rows(sessions).len(),
-            PaletteMode::ConnectKey { .. } | PaletteMode::EditConnectionKey => false,
-        }
-    }
-
-    /// Point the palette at `row` (mouse hover / click). Returns whether the
-    /// highlight moved; a header or an out-of-range row is left alone.
-    pub fn select_row(
-        &mut self,
-        choices: &[ModelChoice],
-        connections: &[ConnectionInfo],
-        sessions: &[SessionMeta],
-        row: usize,
-    ) -> bool {
-        if self.selected == row || !self.row_is_selectable(choices, connections, sessions, row) {
-            return false;
-        }
-        self.selected = row;
-        true
-    }
-
-    /// Scroll the viewport by `delta` rows without moving the highlight — the
-    /// wheel looks around, the keyboard picks.
-    pub fn scroll_list(
-        &mut self,
-        choices: &[ModelChoice],
-        connections: &[ConnectionInfo],
-        sessions: &[SessionMeta],
-        visible: usize,
-        delta: isize,
-    ) -> bool {
-        let (len, vis) = self.scroll_metrics(choices, connections, sessions, visible);
-        if len == 0 || vis == 0 {
-            return false;
-        }
-        let max_off = len.saturating_sub(vis);
-        let next = (self.list_offset as isize + delta).clamp(0, max_off as isize) as usize;
-        if next == self.list_offset {
-            return false;
-        }
-        self.list_offset = next;
-        true
     }
 
     pub fn move_up_visible(
@@ -813,6 +748,45 @@ mod tests {
             .collect();
         assert_eq!(headers, vec!["Fireworks", "Groq"]);
         assert_eq!(rows.iter().filter(|r| r.is_selectable()).count(), 3);
+    }
+
+    /// OpenRouter spells it "Grok 4.6"; xAI's id is grok-4.6. Same search.
+    #[test]
+    fn model_search_hits_every_provider_spelling() {
+        let model = |key: &str, display: &str, group: &str| ModelChoice {
+            key: key.into(),
+            display: display.into(),
+            detail: String::new(),
+            group: group.into(),
+            connection_id: group.to_ascii_lowercase(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        };
+        let choices = vec![
+            model("x-ai/grok-4.6", "Grok 4.6", "OpenRouter"),
+            model("grok-4.6", "grok-4.6", "xAI"),
+            model(
+                "accounts/fireworks/models/kimi-k2p6",
+                "Kimi K2.6",
+                "Fireworks",
+            ),
+            model("gpt-4.1", "GPT-4.1", "OpenAI"),
+        ];
+        let mut pal = PaletteState::models();
+        pal.query = "Grok 4.6".into();
+        let rows = pal.model_rows(&choices);
+        let groups: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ModelRow::Header(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, vec!["OpenRouter", "xAI"]);
+        assert!(!groups.contains(&"OpenAI"));
+        assert!(!groups.contains(&"Fireworks"));
     }
 
     /// Scrolling back up used to stop at the first *model*, leaving the first

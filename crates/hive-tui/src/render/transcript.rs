@@ -163,6 +163,7 @@ fn draw_layout(
     }
 
     buf.set_lines(target, lines, scroll);
+    paint_live_thought_shimmer(buf, app, heads, scroll, target);
     paint_assistant_selection(buf, app);
     app.transcript_hit = Some(target);
 }
@@ -195,28 +196,94 @@ fn paint_assistant_selection(buf: &mut Buffer, app: &App) {
     }
 }
 
-/// Brighter shimmer for the live Thinking header — readable at a glance.
-fn shimmer_bright(text: &str, tick: usize) -> Vec<Span> {
-    shimmer_range(text, tick, 0xb8, 0xff)
+/// Overlay the live Thinking header without rebuilding the transcript cache.
+/// Three grey steps, coalesced into runs, so the ANSI diff stays a handful of
+/// cells instead of a unique SGR per character.
+///
+/// `heads` also lists the live sentence rows so a click toggles the thought —
+/// shimmer belongs only on the header, which is the first heads entry per block.
+fn paint_live_thought_shimmer(
+    buf: &mut Buffer,
+    app: &App,
+    heads: &[(usize, usize)],
+    scroll: usize,
+    target: Rect,
+) {
+    let view_end = scroll + target.height as usize;
+    let mut painted = Vec::new();
+    for &(line_idx, block_idx) in heads {
+        let Some(UiBlock::Reasoning(th)) = app.blocks.get(block_idx) else {
+            continue;
+        };
+        if !thought_is_live(th, app) {
+            continue;
+        }
+        if painted.contains(&block_idx) {
+            continue;
+        }
+        painted.push(block_idx);
+        if line_idx < scroll || line_idx >= view_end {
+            continue;
+        }
+        let label = live_thought_label(th, app);
+        let y = target.y + (line_idx - scroll) as u16;
+        let x = target.x.saturating_add(2);
+        let spans = shimmer_spans(label, app.spinner, &app.theme);
+        let w = label.chars().count() as u16;
+        buf.set_line(x, y, &Line::from(spans), w);
+    }
 }
 
-fn shimmer_range(text: &str, tick: usize, lo: i32, hi: i32) -> Vec<Span> {
+fn live_thought_label(th: &crate::app::state::Thought, app: &App) -> &'static str {
+    match app.activity_label() {
+        "Thinking" if th.secs() > 10.0 => "Thinking hard",
+        other => other,
+    }
+}
+
+/// Three luminance steps, merged into runs so adjacent cells share a style.
+fn shimmer_spans(text: &str, tick: usize, theme: &crate::theme::Theme) -> Vec<Span> {
     let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
     let n = chars.len() as i32;
-    let head = (tick as i32 % (n + 6)) - 3;
-    chars
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let dist = (i as i32 - head).abs() as f32;
-            let t = (1.0 - dist / 3.0).max(0.0);
-            let v = (lo as f32 + (hi - lo) as f32 * t) as u8;
-            Span::styled(
-                c.to_string(),
-                Style::default().fg(Color::Rgb(v, v, v)).add(Modifier::BOLD),
-            )
-        })
-        .collect()
+    let head = ((tick as i32) / 2) % (n + 4) - 2;
+    let color = |level: u8| match level {
+        2 => theme.accent,
+        1 => theme.fg,
+        _ => theme.dim,
+    };
+    let level_of = |i: i32| {
+        let d = (i - head).abs();
+        if d == 0 {
+            2
+        } else if d == 1 {
+            1
+        } else {
+            0
+        }
+    };
+    let mut spans = Vec::new();
+    let mut start = 0;
+    let mut cur = level_of(0);
+    for i in 1..=chars.len() {
+        let next = if i == chars.len() {
+            cur
+        } else {
+            level_of(i as i32)
+        };
+        if i == chars.len() || next != cur {
+            let s: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                s,
+                Style::default().fg(color(cur)).add(Modifier::BOLD),
+            ));
+            start = i;
+            cur = next;
+        }
+    }
+    spans
 }
 
 /// Build the full, pre-wrapped set of transcript lines (test helper).
@@ -492,7 +559,12 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             }
             UiBlock::WorkSummary(card) => {
                 let card = card.clone();
-                out.extend(work_summary_card_lines(&card, app, width));
+                let hovered = app.hover_block == Some(i);
+                let start = out.len();
+                out.extend(work_summary_card_lines(&card, app, width, hovered));
+                for line_idx in start..out.len() {
+                    heads.push((line_idx, i));
+                }
             }
             UiBlock::Goal(card) => {
                 let card = card.clone();
@@ -529,8 +601,8 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let s = s.clone();
                 out.extend(wrap::wrap_lines(
                     vec![Line::from(vec![
-                        Span::styled("  ✗ ", Style::default().fg(app.theme.err)),
-                        Span::styled(s, Style::default().fg(app.theme.err)),
+                        Span::styled("  Error  ", Style::default().fg(app.theme.faint)),
+                        Span::styled(s, Style::default().fg(app.theme.dim)),
                     ])],
                     width,
                 ));
@@ -836,13 +908,13 @@ fn thought_header(th: &crate::app::state::Thought, app: &App, show_hint: bool) -
 
     let mut spans: Vec<Span> = vec![Span::raw("  ")];
     if active {
-        // Say what's actually happening: a running terminal or tool is not
-        // "thinking", and the label updates in place instead of stacking.
-        let label = match app.activity_label() {
-            "Thinking" if th.secs() > 10.0 => "Thinking hard",
-            other => other,
-        };
-        spans.extend(shimmer_bright(label, app.spinner));
+        // Static header in the cached line; draw_layout overlays the shimmer
+        // on the visible row so a 10 FPS tick does not rebuild history.
+        let label = live_thought_label(th, app);
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default().fg(theme.fg).add(Modifier::BOLD),
+        ));
         spans.push(Span::styled(
             format!("  {}", think_secs(th.secs(), true)),
             Style::default().fg(theme.dim),
@@ -1056,6 +1128,76 @@ mod tests {
         assert_eq!(
             a.transcript_cache.builds, builds,
             "footer animation must not rebuild stable transcript history"
+        );
+    }
+
+    #[test]
+    fn live_thought_shimmer_does_not_rebuild_the_transcript() {
+        use comb::{render, Size};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta("Considering the lexer.".into()));
+        let _ = render(Size::new(80, 24), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        let builds = a.transcript_cache.builds;
+        assert!(builds >= 1);
+
+        for _ in 0..8 {
+            a.spinner += 1;
+            let _ = render(Size::new(80, 24), |frame| {
+                crate::render::draw(frame, &mut a)
+            });
+        }
+        assert_eq!(
+            a.transcript_cache.builds, builds,
+            "Thinking shimmer must overlay the cached header, not rebuild history"
+        );
+        let text = render(Size::new(80, 24), |frame| {
+            crate::render::draw(frame, &mut a)
+        })
+        .text();
+        assert!(text.contains("Thinking"), "{text}");
+        assert!(
+            text.contains("Considering the lexer."),
+            "shimmer must not overwrite the live sentences: {text}"
+        );
+        let thinking_hits = text.matches("Thinking").count();
+        assert_eq!(
+            thinking_hits, 1,
+            "Thinking belongs on the header only: {text}"
+        );
+    }
+
+    #[test]
+    fn live_thought_shimmer_stays_on_the_header() {
+        use comb::{render, Size};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::TurnStarted);
+        a.apply(AgentEvent::ReasoningDelta(
+            "First I read the lexer. Then I check the parser. Finally I write the fix.".into(),
+        ));
+        let last = a.blocks.len() - 1;
+        if let crate::app::state::Block::Reasoning(th) = &mut a.blocks[last] {
+            th.started = std::time::Instant::now() - std::time::Duration::from_secs(20);
+        }
+
+        let text = render(Size::new(80, 24), |frame| {
+            crate::render::draw(frame, &mut a)
+        })
+        .text();
+        assert!(text.contains("Thinking hard"), "{text}");
+        assert!(text.contains("First I read the lexer."), "{text}");
+        assert!(text.contains("Then I check the parser."), "{text}");
+        assert!(text.contains("Finally I write the fix."), "{text}");
+        assert_eq!(
+            text.matches("Thinking hard").count(),
+            1,
+            "label must not stamp every sentence: {text}"
         );
     }
 

@@ -20,6 +20,7 @@ pub(crate) fn work_summary_card_lines(
     card: &WorkSummaryCard,
     app: &App,
     width: usize,
+    hovered: bool,
 ) -> Vec<Line> {
     let theme = &app.theme;
     let line_color = Color::Rgb(0x40, 0x40, 0x40);
@@ -28,10 +29,15 @@ pub(crate) fn work_summary_card_lines(
     let fill = width.saturating_sub(text_w);
     let left = fill / 2;
     let right = fill.saturating_sub(left);
+    let text_fg = if hovered { theme.fg } else { theme.dim };
+    let mut text_style = Style::default().fg(text_fg);
+    if hovered {
+        text_style = text_style.add(comb::Modifier::BOLD);
+    }
 
     vec![Line::from(vec![
         Span::styled("─".repeat(left), Style::default().fg(line_color)),
-        Span::styled(text, Style::default().fg(theme.dim)),
+        Span::styled(text, text_style),
         Span::styled("─".repeat(right), Style::default().fg(line_color)),
     ])]
 }
@@ -62,7 +68,15 @@ mod tests {
     #[test]
     fn worked_label_is_dim_even_at_zero_seconds() {
         let app = app();
-        let lines = work_summary_card_lines(&WorkSummaryCard { secs: 0 }, &app, 40);
+        let lines = work_summary_card_lines(
+            &WorkSummaryCard {
+                secs: 0,
+                ..Default::default()
+            },
+            &app,
+            40,
+            false,
+        );
 
         assert_eq!(lines[0].spans[1].content, " Worked for 0s ");
         assert_eq!(lines[0].spans[1].style.fg, Some(app.theme.dim));

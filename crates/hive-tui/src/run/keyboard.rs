@@ -75,16 +75,24 @@ pub(super) fn handle_key(
         return handle_context_menu_key(app, key);
     }
 
+    if app.recap_open() {
+        return handle_recap_key(app, key);
+    }
+
     let ctrl = key.mods.ctrl;
     let alt = key.mods.alt;
     let shift = key.mods.shift;
 
     let special = app.in_special_view();
-    let slash_menu =
-        !special && !app.palette_open() && !app.about_open() && !app.slash_items().is_empty();
+    let slash_menu = !special
+        && !app.palette_open()
+        && !app.about_open()
+        && !app.recap_open()
+        && !app.slash_items().is_empty();
     let file_menu = !special
         && !app.palette_open()
         && !app.about_open()
+        && !app.recap_open()
         && app.slash_items().is_empty()
         && app.at_mention().is_some()
         && !app.file_menu_items().is_empty();

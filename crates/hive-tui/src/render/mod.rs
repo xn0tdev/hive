@@ -25,6 +25,7 @@ mod jump_bottom;
 mod menu;
 pub(crate) mod palette;
 mod panel;
+pub(crate) mod recap;
 pub(crate) mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod strip_paint;
@@ -215,13 +216,9 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         input_bars::draw(f, band(input_y, input_h), app);
         // Full band width: text flush left with strip, chip flush right.
         footer::draw_with_mode(f, band(footer_y, 2), app);
-        // Gap row above the composer: todo progress bar or jump-to-bottom.
+        // Gap row above the composer: jump-to-bottom. Tasks live in the sidebar.
         let gap_y = follow_y.saturating_sub(1);
-        if !app.todos.is_empty() {
-            draw_todo_bar(f.buffer(), band(gap_y, 1), app);
-        } else {
-            jump_bottom::draw(f.buffer(), band(gap_y, 1), app);
-        }
+        jump_bottom::draw(f.buffer(), band(gap_y, 1), app);
     }
 
     if plan || terminal {
@@ -255,17 +252,14 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    // Active chat: same x as the chat column, y on the very bottom screen row.
-    toast::draw(
-        f,
-        Rect::new(ix, area.bottom().saturating_sub(1), inner_w, 1),
-        app,
-    );
+    // Corner of the transcript — gray text, never on the composer/footer.
+    toast::draw(f, transcript, app);
 
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
     draw_goal(f, area, app);
+    draw_recap(f, area, app);
     draw_context_menu(f, area, app);
 }
 
@@ -278,6 +272,12 @@ fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
 fn draw_goal(f: &mut Frame, area: Rect, app: &App) {
     if app.goal_overlay_open() {
         goal::draw(f.buffer(), area, app);
+    }
+}
+
+fn draw_recap(f: &mut Frame, area: Rect, app: &mut App) {
+    if app.recap_open() {
+        recap::draw(f.buffer(), area, app);
     }
 }
 
@@ -304,40 +304,6 @@ fn draw_context_menu(f: &mut Frame, area: Rect, app: &mut App) {
     if app.context_menu_open() {
         context_menu::draw(f.buffer(), area, app);
     }
-}
-
-fn draw_todo_bar(buf: &mut comb::Buffer, area: Rect, app: &App) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let theme = &app.theme;
-    let done = app.todos.iter().filter(|t| t.done).count();
-    let total = app.todos.len();
-    let current = app.todos.iter().find(|t| !t.done);
-
-    let mut spans = vec![Span::styled(
-        format!("→ Tasks {done}/{total}"),
-        Style::default().fg(if done == total {
-            theme.ok
-        } else {
-            theme.accent
-        }),
-    )];
-    if let Some(cur) = current {
-        let used = spans[0].content.chars().count();
-        let max = (area.width as usize).saturating_sub(used + 4);
-        let label = if cur.text.chars().count() > max && max > 4 {
-            let mut s: String = cur.text.chars().take(max - 1).collect();
-            s.push('…');
-            s
-        } else {
-            cur.text.clone()
-        };
-        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(label, Style::default().fg(theme.dim)));
-    }
-    buf.paint(area, Style::default());
-    buf.set_line(area.x, area.y, &Line::from(spans), area.width);
 }
 
 fn input_height(app: &mut App, band_width: u16) -> u16 {
@@ -405,6 +371,27 @@ mod tests {
             input.y
         );
         assert_eq!(hit.y + 1, input.y, "chip belongs on the gap row");
+    }
+
+    #[test]
+    fn tasks_do_not_replace_the_jump_chip() {
+        let mut a = chat_app();
+        a.todos = vec![hive_core::TodoItem {
+            text: "do the thing".into(),
+            done: false,
+        }];
+        let _ = render(Size::new(80, 24), |f| draw(f, &mut a));
+        a.scroll_up(4);
+        let buf = render(Size::new(80, 24), |f| draw(f, &mut a));
+        assert!(buf.text().contains('↓'), "jump chip still shows with tasks");
+        assert!(
+            !buf.text().contains("→ Tasks"),
+            "no task chrome above the composer: {}",
+            buf.text()
+        );
+        let input = a.input_hit.expect("input strip");
+        let hit = a.scroll_bottom_hit.expect("chip");
+        assert_eq!(hit.y + 1, input.y);
     }
 
     #[test]

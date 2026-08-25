@@ -50,6 +50,39 @@ fn format_context(n: u64) -> String {
     }
 }
 
+/// Fill in models.dev entries this provider lists in the catalog but omitted
+/// from `GET /models` (new ids, `/routers` paths, lagged first-party APIs).
+pub fn merge_catalog_models(
+    mut remote: Vec<RemoteModel>,
+    catalog: Option<&ModelsDevCatalog>,
+    provider_hint: Option<&str>,
+) -> Vec<RemoteModel> {
+    let Some(hint) = provider_hint else {
+        return remote;
+    };
+    let Some(catalog) = catalog else {
+        return remote;
+    };
+    let Some(map) = catalog.provider_models(hint) else {
+        return remote;
+    };
+    for meta in map.values() {
+        if remote.iter().any(|m| ids_overlap(&m.id, &meta.id)) {
+            continue;
+        }
+        remote.push(RemoteModel {
+            id: meta.id.clone(),
+            name: Some(meta.name.clone()),
+            free: None,
+        });
+    }
+    remote
+}
+
+fn ids_overlap(a: &str, b: &str) -> bool {
+    a == b || a.ends_with(&format!("/{b}")) || b.ends_with(&format!("/{a}"))
+}
+
 pub fn enrich_models(
     remote: &[RemoteModel],
     catalog: Option<&ModelsDevCatalog>,
@@ -240,5 +273,35 @@ mod tests {
         );
         assert!(cards[0].free);
         assert!(cards[0].badges().contains("FREE"), "{}", cards[0].badges());
+    }
+
+    #[test]
+    fn catalog_fills_in_models_the_listing_skipped() {
+        let cat = parse_models_dev_json(
+            r#"{
+          "xai": {
+            "id": "xai",
+            "models": {
+              "grok-4.6": { "id": "grok-4.6", "name": "Grok 4.6" },
+              "grok-4.5": { "id": "grok-4.5", "name": "Grok 4.5" }
+            }
+          }
+        }"#,
+        )
+        .unwrap();
+        let merged = merge_catalog_models(
+            vec![RemoteModel {
+                id: "grok-4.5".into(),
+                name: Some("from-api".into()),
+                free: None,
+            }],
+            Some(&cat),
+            Some("xai"),
+        );
+        let ids: Vec<_> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"grok-4.5"));
+        assert!(ids.contains(&"grok-4.6"));
+        let listed = merged.iter().find(|m| m.id == "grok-4.5").unwrap();
+        assert_eq!(listed.name.as_deref(), Some("from-api"));
     }
 }

@@ -207,6 +207,19 @@ pub enum AgentEvent {
     },
     Error(String),
     TurnFinished,
+    /// Out-of-chat recap for one turn (`Worked for`). Not part of the session.
+    RecapDelta {
+        id: u64,
+        chunk: String,
+    },
+    RecapFinished {
+        id: u64,
+        text: String,
+    },
+    RecapFailed {
+        id: u64,
+        error: String,
+    },
 }
 
 /// One task in the agent's todo list.

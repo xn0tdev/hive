@@ -4,6 +4,7 @@ pub mod files;
 pub mod goal;
 pub mod input;
 pub mod palette;
+pub mod recap;
 pub mod settings;
 pub mod state;
 
@@ -57,6 +58,7 @@ impl SlashItem {
 
 use files::AtQuery;
 use palette::PaletteState;
+use recap::RecapOverlay;
 use settings::SettingsState;
 
 use input::InputState;
@@ -64,8 +66,8 @@ use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
     Block, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot,
     GoalCard, LoopDetectedCard, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
-    PlanViewState, PromptHistory, SubagentCard, TerminalCard, TerminalViewPhase, TerminalViewState,
-    Thought, ToolCard, ToolStatus, WorkSummaryCard,
+    PlanViewState, PromptHistory, RecapBody, SubagentCard, TerminalCard, TerminalViewPhase,
+    TerminalViewState, Thought, ToolCard, ToolStatus, WorkSummaryCard,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -278,6 +280,12 @@ pub struct App {
     pub(crate) settings: Option<SettingsState>,
     /// `/goal` overlay (editable objective + time limit).
     pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
+    /// Recap panel opened from a "Worked for" line.
+    pub(crate) recap_overlay: Option<RecapOverlay>,
+    /// Click target for the centered Generating label (last draw).
+    pub(crate) recap_generating_hit: Option<Rect>,
+    /// Next id stamped on a WorkSummaryCard so recap events find it.
+    pub(crate) next_recap_id: u64,
     /// Active goal state for the autonomous loop (footer + transcript card).
     pub(crate) goal: Option<goal::GoalStatus>,
     /// Agent's self-managed task list (set_todos tool).
@@ -298,8 +306,10 @@ pub struct App {
     pub(crate) quit_requested: bool,
     /// Cached relative file paths for `@` mentions (lazy).
     pub(crate) file_index: Option<Vec<String>>,
-    /// Short-lived status message shown in the footer (not the chat).
+    /// Short-lived Info toast (corner, not the chat).
     pub(crate) flash_msg: Option<(String, std::time::Instant)>,
+    /// Short-lived Error toast, stacked above Info when both are up.
+    pub(crate) error_flash: Option<(String, std::time::Instant)>,
     /// Set on the first ctrl+c; a second press within the window quits.
     pub(crate) ctrl_c_armed: Option<std::time::Instant>,
     /// Animation clock: frames derive from elapsed time, so the spinner and
@@ -457,6 +467,9 @@ impl App {
             about_open: false,
             settings: None,
             goal_overlay: None,
+            recap_overlay: None,
+            recap_generating_hit: None,
+            next_recap_id: 1,
             goal: None,
             todos: Vec::new(),
             todos_completed_at: None,
@@ -467,6 +480,7 @@ impl App {
             quit_requested: false,
             file_index: None,
             flash_msg: None,
+            error_flash: None,
             ctrl_c_armed: None,
             anim_start: std::time::Instant::now(),
             context_menu_win: None,

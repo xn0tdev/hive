@@ -51,6 +51,7 @@ impl App {
     pub fn open_settings(&mut self) {
         self.close_palette();
         self.close_about();
+        self.close_recap();
         self.settings = Some(settings::SettingsState::root());
     }
 
@@ -68,6 +69,7 @@ impl App {
         self.close_palette();
         self.close_settings();
         self.close_about();
+        self.close_recap();
         self.goal_overlay = Some(goal::GoalOverlayState::new());
     }
 
@@ -84,6 +86,7 @@ impl App {
     pub fn open_sessions_picker(&mut self) {
         self.about_open = false;
         self.close_settings();
+        self.close_recap();
         self.saved_sessions.clear();
         self.palette = Some(palette::PaletteState::sessions());
     }

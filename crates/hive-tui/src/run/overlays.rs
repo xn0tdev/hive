@@ -10,11 +10,7 @@ pub(super) fn handle_settings_key(
     let ctrl = key.mods.ctrl;
     match key.code {
         KeyCode::Esc => {
-            if let Some(st) = app.settings.as_mut() {
-                if st.back() {
-                    app.close_settings();
-                }
-            }
+            app.close_settings();
         }
         KeyCode::Up => {
             if let Some(st) = app.settings.as_mut() {
@@ -28,7 +24,7 @@ pub(super) fn handle_settings_key(
         }
         KeyCode::Enter | KeyCode::Right => {
             let width_row = app.settings.as_ref().is_some_and(|st| {
-                st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+                st.item() == Some(crate::app::settings::SettingsItem::SidebarWidth)
             });
             let changed = if width_row {
                 crate::app::settings::nudge_width(app, 2)
@@ -41,7 +37,7 @@ pub(super) fn handle_settings_key(
         }
         KeyCode::Left => {
             let width_row = app.settings.as_ref().is_some_and(|st| {
-                st.page == crate::app::settings::SettingsPage::Sidebar && st.selected == 2
+                st.item() == Some(crate::app::settings::SettingsItem::SidebarWidth)
             });
             if width_row && crate::app::settings::nudge_width(app, -2) {
                 app.persist_ui(input_tx);
@@ -95,7 +91,7 @@ pub(super) fn handle_goal_key(
             } else if let Some(duration) = crate::app::goal::parse_duration(&time_limit) {
                 Some(duration)
             } else {
-                app.flash("Invalid time limit — try 30m or 2h");
+                app.flash_error("Invalid time limit — try 30m or 2h");
                 return false;
             };
             app.close_goal_overlay();
@@ -118,6 +114,53 @@ pub(super) fn handle_goal_key(
         _ => {}
     }
     false
+}
+
+pub(super) fn handle_recap_key(app: &mut App, key: Key) -> bool {
+    let ctrl = key.mods.ctrl;
+    match key.code {
+        KeyCode::Esc => app.close_recap(),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.reveal_recap_stream();
+        }
+        KeyCode::Up => {
+            app.scroll_recap(-1);
+        }
+        KeyCode::Down => {
+            app.scroll_recap(1);
+        }
+        KeyCode::PageUp => {
+            app.scroll_recap(-8);
+        }
+        KeyCode::PageDown => {
+            app.scroll_recap(8);
+        }
+        KeyCode::Char('p') if ctrl => {
+            app.close_recap();
+            app.open_palette();
+        }
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        _ => {}
+    }
+    false
+}
+
+pub(super) fn handle_recap_mouse(app: &mut App, m: Mouse) -> bool {
+    match m.kind {
+        MouseKind::ScrollUp => app.scroll_recap(-3),
+        MouseKind::ScrollDown => app.scroll_recap(3),
+        MouseKind::Down(MouseButton::Left) => {
+            if app
+                .recap_generating_hit
+                .is_some_and(|hit| hit.contains(m.col, m.row))
+            {
+                app.reveal_recap_stream();
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn handle_about_key(app: &mut App, key: Key) -> bool {
@@ -168,7 +211,7 @@ pub(super) fn activate_context_action(app: &mut App, action: ContextAction) {
             let full = std::path::Path::new(&app.cwd).join(&path);
             match std::fs::write(&full, &content) {
                 Ok(()) => app.flash(format!("Reverted {}", path)),
-                Err(e) => app.flash(format!("Revert failed: {e}")),
+                Err(e) => app.flash_error(format!("Revert failed: {e}")),
             }
             app.project.invalidate();
             app.refresh_project();
@@ -246,7 +289,7 @@ pub(super) fn handle_palette_key(
                 Some(ConnectRow::Profile(c)) => {
                     let (id, label) = (c.id.clone(), c.label.clone());
                     if app.connections.len() <= 1 {
-                        app.flash("Can't remove the only provider");
+                        app.flash_error("Can't remove the only provider");
                     } else {
                         let _ = input_tx.send(InputCommand::RemoveConnection { id });
                         app.flash(format!("Removing {label}…"));
@@ -372,161 +415,6 @@ pub(super) fn activate_menu_selection(
     }
 }
 
-/// Whether a frame has been painted, so the centered overlays have geometry to
-/// hit-test against. Guessing before that would dismiss them on a stray event.
-pub(super) fn overlay_is_painted(app: &App) -> bool {
-    app.overlay_area.width > 0 && app.overlay_area.height > 0
-}
-
-/// Mouse over the Settings overlay: hover highlights, click opens a page or
-/// flips a toggle, wheel walks the rows, and a click off the panel closes it.
-pub(super) fn handle_settings_mouse(
-    app: &mut App,
-    m: Mouse,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
-    if !overlay_is_painted(app) {
-        return false;
-    }
-    let area = app.overlay_area;
-    let row = render::settings::row_at(area, app, m.col, m.row);
-
-    match m.kind {
-        MouseKind::Moved => {
-            let Some(row) = row else { return false };
-            let Some(st) = app.settings.as_mut() else {
-                return false;
-            };
-            if st.selected == row {
-                return false;
-            }
-            st.selected = row;
-            true
-        }
-        MouseKind::ScrollUp | MouseKind::ScrollDown => {
-            let Some(st) = app.settings.as_mut() else {
-                return false;
-            };
-            if matches!(m.kind, MouseKind::ScrollUp) {
-                st.move_up();
-            } else {
-                st.move_down();
-            }
-            true
-        }
-        MouseKind::Down(MouseButton::Left) => {
-            if let Some(row) = row {
-                if let Some(st) = app.settings.as_mut() {
-                    st.selected = row;
-                }
-                // Drilling into a page changes nothing to save; a toggle does.
-                if crate::app::settings::activate(app) {
-                    let _ = input_tx.send(InputCommand::SaveUi(app.ui.clone()));
-                }
-                return true;
-            }
-            let inside = render::settings::window_rect(area, app)
-                .is_some_and(|win| win.contains(m.col, m.row));
-            if !inside {
-                app.close_settings();
-                return true;
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Mouse over the `/goal` form: click a field to put the caret in it. The
-/// overlay holds typed text, so a click off it is swallowed rather than
-/// throwing that away.
-pub(super) fn handle_goal_mouse(app: &mut App, m: Mouse) -> bool {
-    if !overlay_is_painted(app) {
-        return false;
-    }
-    if !matches!(m.kind, MouseKind::Down(MouseButton::Left)) {
-        return false;
-    }
-    let Some(field) = render::goal::field_at(app.overlay_area, app, m.col, m.row) else {
-        return false;
-    };
-    let Some(st) = app.goal_overlay.as_mut() else {
-        return false;
-    };
-    if st.focus == field {
-        return false;
-    }
-    st.focus = field;
-    true
-}
-
-/// Mouse over the palette overlay: hover highlights, click picks, wheel scrolls,
-/// and a click outside the panel dismisses it.
-pub(super) fn handle_palette_mouse(
-    app: &mut App,
-    m: Mouse,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
-    let area = app.overlay_area;
-    // Opened but not painted yet — there is no geometry to hit-test against,
-    // and guessing would dismiss the overlay on the first stray event.
-    if area.width == 0 || area.height == 0 {
-        return false;
-    }
-    let choices = app.model_choices.clone();
-    let connections = app.connections.clone();
-    let sessions = app.saved_sessions.clone();
-    let visible = app.palette_list_visible as usize;
-    let row = render::palette::row_at(area, app, m.col, m.row);
-
-    match m.kind {
-        MouseKind::Moved => {
-            let Some(row) = row else { return false };
-            app.palette
-                .as_mut()
-                .is_some_and(|pal| pal.select_row(&choices, &connections, &sessions, row))
-        }
-        MouseKind::ScrollUp | MouseKind::ScrollDown => {
-            let delta = if matches!(m.kind, MouseKind::ScrollUp) {
-                -3
-            } else {
-                3
-            };
-            app.palette.as_mut().is_some_and(|pal| {
-                pal.scroll_list(&choices, &connections, &sessions, visible, delta)
-            })
-        }
-        MouseKind::Down(MouseButton::Left) => {
-            if let Some(row) = row {
-                let picked = app
-                    .palette
-                    .as_mut()
-                    .map(|pal| {
-                        pal.select_row(&choices, &connections, &sessions, row);
-                        pal.row_is_selectable(&choices, &connections, &sessions, row)
-                    })
-                    .unwrap_or(false);
-                if picked {
-                    if activate_palette(app, input_tx) {
-                        app.request_quit();
-                    }
-                    return true;
-                }
-                // A group header — highlight nothing, swallow the click.
-                return true;
-            }
-            let inside = render::palette::window_rect(area, app)
-                .is_some_and(|win| win.contains(m.col, m.row));
-            if !inside {
-                app.close_palette();
-                return true;
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
 pub(super) fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCommand>) -> bool {
     let mode = app.palette.as_ref().map(|p| p.mode);
     match mode {
@@ -626,7 +514,7 @@ pub(super) fn activate_palette(app: &mut App, input_tx: &UnboundedSender<InputCo
                 .cloned();
             let Some(connection) = connection else {
                 app.open_connect_picker();
-                app.flash("Provider is no longer available");
+                app.flash_error("Provider is no longer available");
                 return false;
             };
             app.close_palette();

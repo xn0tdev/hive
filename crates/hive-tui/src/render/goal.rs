@@ -1,6 +1,8 @@
 //! `/goal` overlay: centered panel with editable objective + time limit.
 
-use comb::{Buffer, Line, ModalLayout, Modifier, Rect, Span, Style};
+#[cfg(test)]
+use comb::ModalLayout;
+use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 
 use crate::app::goal::GoalField;
 use crate::app::App;
@@ -83,6 +85,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
 
 /// Which field sits under the pointer. Same two rows `draw` writes: objective
 /// two lines below the title, time limit under it.
+#[cfg(test)]
 pub fn field_at(area: Rect, app: &App, col: u16, row: u16) -> Option<GoalField> {
     app.goal_overlay.as_ref()?;
     let g = geom(area);
@@ -102,6 +105,7 @@ fn overlay() -> Panel<'static> {
         .padding(PAD_X, PAD_Y)
 }
 
+#[cfg(test)]
 fn geom(area: Rect) -> ModalLayout {
     overlay().layout(area)
 }

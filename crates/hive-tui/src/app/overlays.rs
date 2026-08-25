@@ -5,6 +5,7 @@ use super::*;
 impl App {
     pub fn open_palette(&mut self) {
         self.about_open = false;
+        self.close_recap();
         self.palette = Some(PaletteState::commands());
     }
 
@@ -13,6 +14,7 @@ impl App {
         input_tx: &tokio::sync::mpsc::UnboundedSender<crate::InputCommand>,
     ) {
         self.about_open = false;
+        self.close_recap();
         self.palette = Some(PaletteState::models());
         // Keep a ready catalog visible while it refreshes. Reopening /models
         // should feel instant instead of flashing back to a loading row.
@@ -25,6 +27,7 @@ impl App {
     pub fn open_connect_picker(&mut self) {
         self.about_open = false;
         self.close_settings();
+        self.close_recap();
         let mut pal = PaletteState::connect();
         pal.clamp_selection(&self.model_choices, &self.connections, &self.saved_sessions);
         self.palette = Some(pal);
@@ -185,6 +188,7 @@ impl App {
     pub fn open_about(&mut self) {
         self.close_palette();
         self.close_settings();
+        self.close_recap();
         self.about_open = true;
     }
 

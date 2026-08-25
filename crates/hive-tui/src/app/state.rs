@@ -416,10 +416,42 @@ pub struct CompactedCard {
     pub after: u64,
 }
 
+/// Recap of one turn, stored on that turn's "Worked for" card.
+#[derive(Clone, Debug, Default)]
+pub enum RecapBody {
+    #[default]
+    Idle,
+    Generating {
+        text: String,
+    },
+    Ready {
+        text: String,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+impl RecapBody {
+    pub fn is_generating(&self) -> bool {
+        matches!(self, Self::Generating { .. })
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Idle => "",
+            Self::Generating { text } | Self::Ready { text } => text,
+            Self::Failed { error } => error,
+        }
+    }
+}
+
 /// Inline card: "Worked for Nm" summary at the end of a turn.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct WorkSummaryCard {
     pub secs: u64,
+    pub recap_id: u64,
+    pub recap: RecapBody,
 }
 
 /// One renderable chunk of the transcript.

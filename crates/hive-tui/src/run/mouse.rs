@@ -5,8 +5,9 @@ use super::*;
 /// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
 /// chats, hits `← back` / Make, or bonks the logo.
 ///
-/// Palette / About overlays are keyboard-only — mouse events are swallowed so
-/// they don't leak through to the chat underneath.
+/// Palette / Settings / Goal / About are keyboard-only — mouse events are
+/// swallowed so they don't leak through to the chat underneath. Recap takes
+/// clicks on Generating and wheel-scrolls the body.
 /// Returns `true` when the UI should redraw.
 pub(super) fn handle_mouse(
     app: &mut App,
@@ -35,26 +36,10 @@ pub(super) fn handle_mouse(
             _ => false,
         };
     }
-    if app.palette_open() {
-        return handle_palette_mouse(app, m, input_tx);
+    if app.recap_open() {
+        return handle_recap_mouse(app, m);
     }
-    if app.settings_open() {
-        return handle_settings_mouse(app, m, input_tx);
-    }
-    if app.goal_overlay_open() {
-        return handle_goal_mouse(app, m);
-    }
-    if app.about_open() {
-        // Nothing to pick on the card — clicking off it is the only gesture.
-        if !matches!(m.kind, MouseKind::Down(MouseButton::Left)) {
-            return false;
-        }
-        let inside = render::about::window_rect(app.overlay_area, app)
-            .is_some_and(|win| win.contains(m.col, m.row));
-        if !inside && overlay_is_painted(app) {
-            app.close_about();
-            return true;
-        }
+    if app.palette_open() || app.settings_open() || app.goal_overlay_open() || app.about_open() {
         return false;
     }
     // The composer menu is on top of the transcript, so it gets first refusal
@@ -197,6 +182,15 @@ pub(super) fn handle_mouse(
             }
             let cleared_selection = app.clear_assistant_selection();
             if let Some(idx) = app.expandable_at(m.col, m.row) {
+                if matches!(
+                    app.blocks.get(idx),
+                    Some(crate::app::state::Block::WorkSummary(_))
+                ) {
+                    app.clear_assistant_selection();
+                    app.open_recap(idx, input_tx);
+                    app.blur_input();
+                    return true;
+                }
                 let terminal = app.blocks.get(idx).and_then(|block| match block {
                     crate::app::state::Block::Terminal(card)
                         if matches!(card.process, hive_core::TerminalProcessState::Running) =>
@@ -299,6 +293,7 @@ pub(super) fn handle_mouse(
                             | Some(crate::app::state::Block::Terminal(_))
                             | Some(crate::app::state::Block::User(_))
                             | Some(crate::app::state::Block::Tool(_))
+                            | Some(crate::app::state::Block::WorkSummary(_))
                     )
                     .then_some(i)
                 });

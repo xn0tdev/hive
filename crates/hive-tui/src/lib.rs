@@ -184,6 +184,11 @@ pub enum InputCommand {
     ListSessions,
     /// Persist UI prefs into `~/.config/hive/config.toml`.
     SaveUi(UiConfig),
+    /// Write a short recap of one finished turn. Does not join the chat history.
+    Recap {
+        id: u64,
+        context: String,
+    },
 }
 
 #[cfg(test)]

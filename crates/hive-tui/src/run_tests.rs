@@ -1007,94 +1007,137 @@ fn lay_out(app: &mut App) -> comb::Rect {
     comb::Rect::new(0, 0, size.width, size.height)
 }
 
-/// Before the first paint there is no geometry, so the mouse must not guess.
+/// Palette / Settings / Goal / About are keyboard-only: the pointer must not
+/// pick, hover-highlight, or dismiss them — and must not leak into the chat.
 #[test]
-fn palette_mouse_waits_for_a_frame() {
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_palette();
-    assert!(!handle_mouse(&mut app, click(0, 0), &tx));
-    assert!(
-        app.palette_open(),
-        "an unpainted palette can't be dismissed"
-    );
-}
-
-#[test]
-fn clicking_away_from_the_palette_closes_it() {
+fn palette_ignores_the_mouse() {
     let mut app = test_app();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.open_palette();
     let area = lay_out(&mut app);
-    let win = render::palette::window_rect(area, &app).expect("panel");
-    assert!(!win.contains(0, 0), "probe must be outside the panel");
-
-    assert!(handle_mouse(&mut app, click(0, 0), &tx));
-    assert!(!app.palette_open());
-}
-
-#[test]
-fn hovering_the_palette_moves_the_highlight() {
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_palette();
-    let area = lay_out(&mut app);
-
-    // Find a row the pointer can actually land on.
     let win = render::palette::window_rect(area, &app).expect("panel");
     let before = app.palette.as_ref().unwrap().selected;
-    let mut moved_to = None;
-    for row in win.y..win.bottom() {
-        let Some(idx) = render::palette::row_at(area, &app, win.x + 2, row) else {
-            continue;
-        };
-        let selectable = app.palette.as_ref().unwrap().row_is_selectable(
-            &app.model_choices,
-            &app.connections,
-            &app.saved_sessions,
-            idx,
-        );
-        if selectable && idx != before {
-            handle_mouse(&mut app, moved(win.x + 2, row), &tx);
-            moved_to = Some(idx);
-            break;
-        }
-    }
-    let moved_to = moved_to.expect("a selectable row under the pointer");
-    assert_eq!(app.palette.as_ref().unwrap().selected, moved_to);
-    assert!(app.palette_open(), "hover must not activate anything");
+
+    assert!(!handle_mouse(&mut app, click(0, 0), &tx));
+    assert!(app.palette_open(), "click-away must not dismiss");
+
+    assert!(!handle_mouse(&mut app, click(win.x + 2, win.y + 4), &tx));
+    assert!(app.palette_open());
+    assert_eq!(app.palette.as_ref().unwrap().selected, before);
+
+    assert!(!handle_mouse(&mut app, moved(win.x + 2, win.y + 4), &tx));
+    assert_eq!(app.palette.as_ref().unwrap().selected, before);
 }
 
-/// Hovering a provider header should do nothing — it picks nothing.
 #[test]
-fn palette_headers_do_not_take_the_highlight() {
+fn settings_ignores_the_mouse() {
     let mut app = test_app();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_palette();
+    app.open_settings();
     let area = lay_out(&mut app);
-    let win = render::palette::window_rect(area, &app).expect("panel");
+    let win = render::settings::window_rect(area, &app).expect("panel");
+    let before = app.settings.as_ref().unwrap().selected;
+    let revert = app.ui.tool_revert;
 
-    for row in win.y..win.bottom() {
-        let Some(idx) = render::palette::row_at(area, &app, win.x + 2, row) else {
-            continue;
-        };
-        let selectable = app.palette.as_ref().unwrap().row_is_selectable(
-            &app.model_choices,
-            &app.connections,
-            &app.saved_sessions,
-            idx,
-        );
-        if selectable {
-            continue;
+    assert!(!handle_mouse(&mut app, click(0, 0), &tx));
+    assert!(app.settings_open(), "click-away must not dismiss");
+
+    assert!(!handle_mouse(&mut app, click(win.x + 2, win.y + 4), &tx));
+    assert!(app.settings_open());
+    assert_eq!(app.settings.as_ref().unwrap().selected, before);
+    assert_eq!(app.ui.tool_revert, revert, "click must not toggle");
+
+    assert!(!handle_mouse(&mut app, moved(win.x + 2, win.y + 6), &tx));
+    assert_eq!(app.settings.as_ref().unwrap().selected, before);
+}
+
+fn seed_worked_for(app: &mut App, recap: crate::app::state::RecapBody) {
+    use crate::app::state::{Block, WorkSummaryCard};
+    app.blocks.clear();
+    app.blocks.push(Block::User("fix the hover".into()));
+    app.blocks.push(Block::Assistant {
+        text: "hover is bold now".into(),
+        streaming: false,
+    });
+    app.blocks.push(Block::WorkSummary(WorkSummaryCard {
+        secs: 2,
+        recap_id: 9,
+        recap,
+    }));
+}
+
+#[test]
+fn clicking_worked_for_opens_recap_once() {
+    use crate::app::state::RecapBody;
+
+    let mut app = test_app();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    seed_worked_for(&mut app, RecapBody::Idle);
+    lay_out(&mut app);
+
+    let (row, idx) = app
+        .click_hits
+        .iter()
+        .copied()
+        .find(|&(_, i)| {
+            matches!(
+                app.blocks.get(i),
+                Some(crate::app::state::Block::WorkSummary(_))
+            )
+        })
+        .expect("worked-for row");
+    let col = app.transcript_hit.map(|r| r.x + 2).unwrap_or(4);
+    assert!(handle_mouse(&mut app, click(col, row), &tx));
+    assert!(app.recap_open());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(InputCommand::Recap { id: 9, .. })
+    ));
+    assert!(matches!(
+        app.blocks[idx],
+        crate::app::state::Block::WorkSummary(ref c)
+            if matches!(c.recap, RecapBody::Generating { .. })
+    ));
+
+    app.close_recap();
+    assert!(!app.recap_open());
+    lay_out(&mut app);
+    let (row, _) = app
+        .click_hits
+        .iter()
+        .copied()
+        .find(|&(_, i)| {
+            matches!(
+                app.blocks.get(i),
+                Some(crate::app::state::Block::WorkSummary(_))
+            )
+        })
+        .expect("worked-for row");
+    assert!(handle_mouse(&mut app, click(col, row), &tx));
+    assert!(app.recap_open());
+    assert!(rx.try_recv().is_err(), "reopening must not generate again");
+}
+
+#[test]
+fn recap_esc_keeps_the_text() {
+    use crate::app::state::RecapBody;
+    let mut app = test_app();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    seed_worked_for(
+        &mut app,
+        RecapBody::Ready {
+            text: "Made hover bold.".into(),
+        },
+    );
+    app.open_recap(2, &tx);
+    assert!(app.recap_open());
+    assert!(!handle_recap_key(&mut app, key(KeyCode::Esc)));
+    assert!(!app.recap_open());
+    match &app.blocks[2] {
+        crate::app::state::Block::WorkSummary(c) => {
+            assert!(matches!(&c.recap, RecapBody::Ready { text } if text == "Made hover bold."));
         }
-        let before = app.palette.as_ref().unwrap().selected;
-        handle_mouse(&mut app, moved(win.x + 2, row), &tx);
-        assert_eq!(
-            app.palette.as_ref().unwrap().selected,
-            before,
-            "header row {idx} stole the highlight"
-        );
-        return;
+        _ => panic!("card gone"),
     }
 }
 
@@ -1182,91 +1225,8 @@ fn the_slash_menu_swallows_clicks() {
     );
 }
 
-/// Row rect for a settings row, so tests click where `draw` actually paints.
-fn settings_row_xy(app: &App, idx: usize) -> (u16, u16) {
-    let area = app.overlay_area;
-    let win = render::settings::window_rect(area, app).expect("panel");
-    for row in win.y..win.bottom() {
-        if render::settings::row_at(area, app, win.x + 2, row) == Some(idx) {
-            return (win.x + 2, row);
-        }
-    }
-    panic!("row {idx} is not on screen");
-}
-
 #[test]
-fn clicking_a_settings_row_opens_its_page() {
-    use crate::app::settings::SettingsPage;
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_settings();
-    lay_out(&mut app);
-
-    // Root row 2 is Tools.
-    let (col, row) = settings_row_xy(&app, 2);
-    assert!(handle_mouse(&mut app, click(col, row), &tx));
-    assert_eq!(
-        app.settings.as_ref().map(|s| s.page),
-        Some(SettingsPage::Tools)
-    );
-}
-
-/// The pages behind the root menu are where the mouse was dead.
-#[test]
-fn clicking_a_row_on_a_nested_page_toggles_it() {
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_settings();
-    if let Some(st) = app.settings.as_mut() {
-        st.enter_tools();
-    }
-    lay_out(&mut app);
-    let before = app.ui.tool_revert;
-
-    // Row 1 is "Revert file" (row 0 is "Completed tools").
-    let (col, row) = settings_row_xy(&app, 1);
-    assert!(handle_mouse(&mut app, click(col, row), &tx));
-    assert_eq!(app.ui.tool_revert, !before, "the toggle flipped");
-    assert!(
-        std::iter::from_fn(|| rx.try_recv().ok()).any(|cmd| matches!(cmd, InputCommand::SaveUi(_))),
-        "a changed setting must be persisted"
-    );
-}
-
-#[test]
-fn hovering_settings_moves_the_highlight() {
-    use crate::app::settings::SettingsPage;
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_settings();
-    lay_out(&mut app);
-    assert_eq!(app.settings.as_ref().unwrap().selected, 0);
-
-    let (col, row) = settings_row_xy(&app, 1);
-    assert!(handle_mouse(&mut app, moved(col, row), &tx));
-    assert_eq!(app.settings.as_ref().unwrap().selected, 1);
-    assert_eq!(
-        app.settings.as_ref().map(|s| s.page),
-        Some(SettingsPage::Root),
-        "hover must not open anything"
-    );
-}
-
-#[test]
-fn clicking_away_from_settings_closes_it() {
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_settings();
-    let area = lay_out(&mut app);
-    let win = render::settings::window_rect(area, &app).expect("panel");
-    assert!(!win.contains(0, 0));
-
-    assert!(handle_mouse(&mut app, click(0, 0), &tx));
-    assert!(!app.settings_open());
-}
-
-#[test]
-fn clicking_a_goal_field_focuses_it() {
+fn goal_overlay_ignores_the_mouse() {
     use crate::app::goal::GoalField;
 
     let mut app = test_app();
@@ -1278,7 +1238,6 @@ fn clicking_a_goal_field_focuses_it() {
         GoalField::Objective
     );
 
-    // Find the time-limit row and click it.
     let mut hit = None;
     for row in area.y..area.bottom() {
         if render::goal::field_at(area, &app, area.x + area.width / 2, row)
@@ -1289,14 +1248,15 @@ fn clicking_a_goal_field_focuses_it() {
         }
     }
     let row = hit.expect("time limit row");
-    assert!(handle_mouse(
+    assert!(!handle_mouse(
         &mut app,
         click(area.x + area.width / 2, row),
         &tx
     ));
     assert_eq!(
         app.goal_overlay.as_ref().unwrap().focus,
-        GoalField::TimeLimit
+        GoalField::Objective,
+        "click must not steal focus"
     );
 }
 
@@ -1344,7 +1304,7 @@ fn clicking_away_from_the_goal_form_keeps_it_open() {
 }
 
 #[test]
-fn clicking_away_from_about_closes_it() {
+fn about_overlay_ignores_the_mouse() {
     let mut app = test_app();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.open_about();
@@ -1352,15 +1312,8 @@ fn clicking_away_from_about_closes_it() {
     let win = render::about::window_rect(area, &app).expect("card");
     assert!(!win.contains(0, 0));
 
-    assert!(handle_mouse(&mut app, click(0, 0), &tx));
-    assert!(!app.about_open());
-}
-
-#[test]
-fn about_overlay_still_ignores_the_mouse() {
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_about();
+    assert!(!handle_mouse(&mut app, click(0, 0), &tx));
+    assert!(app.about_open(), "click-away must not dismiss");
     assert!(!handle_mouse(
         &mut app,
         Mouse {

@@ -23,6 +23,7 @@ const PAD_Y: u16 = 1;
 const CHROME_ROWS: u16 = 3;
 
 struct PaletteGeom {
+    #[allow(dead_code)] // read by tests / window_rect
     panel: Rect,
     content: Rect,
     search_y: u16,
@@ -219,30 +220,11 @@ pub fn list_visible(area: Rect, app: &App) -> u16 {
     geom(area, list_row_count(pal, app), pal.mode).list.height
 }
 
-/// The panel rect, for telling a click inside the overlay from one that means
-/// "dismiss this".
+/// The panel rect, for tests that need to aim a click at or away from it.
+#[cfg(test)]
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
     let pal = app.palette.as_ref()?;
     Some(geom(area, list_row_count(pal, app), pal.mode).panel)
-}
-
-/// Row index under the pointer, or `None` when it is not over the list.
-///
-/// The geometry is a pure function of the area and the palette state, so this
-/// re-derives it rather than having the renderer stash rects per row.
-pub fn row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    let pal = app.palette.as_ref()?;
-    let g = geom(area, list_row_count(pal, app), pal.mode);
-    if !g.list.contains(col, row) {
-        return None;
-    }
-    let offset = pal.visible_offset(
-        &app.model_choices,
-        &app.connections,
-        &app.saved_sessions,
-        g.list.height as usize,
-    );
-    Some(offset + usize::from(row - g.list.y))
 }
 
 fn draw_command_list(

@@ -1,6 +1,8 @@
 //! Centered About overlay — HIVE wordmark, version, short tagline.
 
-use comb::{Buffer, Color, Line, ModalLayout, Rect, Span, Style};
+#[cfg(test)]
+use comb::ModalLayout;
+use comb::{Buffer, Color, Line, Rect, Span, Style};
 
 use crate::app::App;
 use crate::render::panel::Panel;
@@ -13,7 +15,7 @@ const PAD_Y: u16 = 1;
 
 /// Short description of Hive (wrapped to panel width at draw time).
 pub const TAGLINE: &str =
-    "A YOLO coding agent for your terminal — tools, swarm, and skills, no confirmations.";
+    "A YOLO coding agent for your terminal — tools and skills, no confirmations.";
 
 const HINT: &str = "esc close  ·  Ctrl+P commands";
 
@@ -26,11 +28,13 @@ fn overlay() -> Panel<'static> {
         .padding(PAD_X, PAD_Y)
 }
 
+#[cfg(test)]
 fn geom(area: Rect) -> ModalLayout {
     overlay().layout(area)
 }
 
-/// The card rect, so a click off it can dismiss the overlay.
+/// The card rect, so tests can aim a click at or away from it.
+#[cfg(test)]
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
     app.about_open().then(|| geom(area).panel)
 }
@@ -212,6 +216,10 @@ mod tests {
         // Block-letter HIVE wordmark (█ glyphs), not the bee art.
         assert!(text.contains('█'), "expected HIVE wordmark blocks: {text}");
         assert!(text.contains("YOLO"), "{text}");
+        assert!(
+            !text.contains("swarm"),
+            "about tagline should not mention swarm: {text}"
+        );
         assert!(
             !text.contains("(o.o)") && !text.contains("~hive~"),
             "bee art should not appear on About: {text}"

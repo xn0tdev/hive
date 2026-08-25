@@ -1,8 +1,10 @@
-//! Simple Settings overlay: Chat and Sidebar pages.
+//! Settings overlay: one list with Chat / Sidebar / Tools sections.
 
-use comb::{Buffer, Line, ModalLayout, Modifier, Rect, Span, Style};
+#[cfg(test)]
+use comb::ModalLayout;
+use comb::{Buffer, Line, Modifier, Rect, Span, Style};
 
-use crate::app::settings::{SettingsPage, SettingsState};
+use crate::app::settings::{SettingsItem, SettingsRow, ROWS};
 use crate::app::App;
 use crate::render::panel::Panel;
 
@@ -10,6 +12,8 @@ const MIN_W: u16 = 36;
 const MAX_W: u16 = 48;
 const PAD_X: u16 = 2;
 const PAD_Y: u16 = 1;
+/// Title + gap before the list.
+const CHROME_ROWS: u16 = 2;
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     let Some(st) = app.settings.as_ref() else {
@@ -17,98 +21,95 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let theme = &app.theme;
     let panel = theme.strip;
-    let g = overlay(st).render(buf, area, theme);
+    let g = overlay().render(buf, area, theme);
 
-    if g.content.width < 16 || g.content.height < 6 {
+    if g.content.width < 16 || g.content.height < 4 {
         return;
     }
 
-    let rows = rows_for(st, app);
-    for (y, (i, (label, value))) in
-        (g.content.y + 2..g.content.bottom()).zip(rows.iter().enumerate())
-    {
-        let sel = i == st.selected;
-        let bg = if sel { theme.sel_bg } else { panel };
-        let fg = if sel { theme.sel_fg } else { theme.fg };
-        let dim = if sel { theme.sel_fg } else { theme.dim };
-        let mark = if sel { "› " } else { "  " };
-        let left = format!("{mark}{label}");
-        let right = value.clone();
-        let gap = g
-            .content
-            .width
-            .saturating_sub(left.chars().count() as u16)
-            .saturating_sub(right.chars().count() as u16);
-        let mut style_left = Style::default().fg(fg);
-        if sel {
-            style_left = style_left.add(Modifier::BOLD);
+    let first = g.content.y + CHROME_ROWS;
+    for (i, row) in ROWS.iter().enumerate() {
+        let y = first + i as u16;
+        if y >= g.content.bottom() {
+            break;
         }
-        crate::render::strip_paint::set_line_on_strip(
-            buf,
-            g.content.x,
-            y,
-            &Line::from(vec![
-                Span::styled(left, style_left),
-                Span::styled(" ".repeat(gap as usize), Style::default()),
-                Span::styled(right, Style::default().fg(dim)),
-            ]),
-            g.content.width,
-            bg,
-        );
+        match row {
+            SettingsRow::Spacer => {
+                buf.paint(
+                    Rect::new(g.content.x, y, g.content.width, 1),
+                    Style::default().bg(panel),
+                );
+            }
+            SettingsRow::Header(label) => {
+                let line = Line::from(Span::styled(
+                    (*label).to_string(),
+                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
+                ));
+                crate::render::strip_paint::set_line_on_strip(
+                    buf,
+                    g.content.x,
+                    y,
+                    &line,
+                    g.content.width,
+                    panel,
+                );
+            }
+            SettingsRow::Item(item) => {
+                let sel = i == st.selected;
+                let bg = if sel { theme.sel_bg } else { panel };
+                let fg = if sel { theme.sel_fg } else { theme.fg };
+                let dim = if sel { theme.sel_fg } else { theme.dim };
+                let mark = if sel { "› " } else { "  " };
+                let (label, value) = item_cells(*item, app);
+                let left = format!("{mark}{label}");
+                let gap = g
+                    .content
+                    .width
+                    .saturating_sub(left.chars().count() as u16)
+                    .saturating_sub(value.chars().count() as u16);
+                let mut style_left = Style::default().fg(fg);
+                if sel {
+                    style_left = style_left.add(Modifier::BOLD);
+                }
+                crate::render::strip_paint::set_line_on_strip(
+                    buf,
+                    g.content.x,
+                    y,
+                    &Line::from(vec![
+                        Span::styled(left, style_left),
+                        Span::styled(" ".repeat(gap as usize), Style::default()),
+                        Span::styled(value, Style::default().fg(dim)),
+                    ]),
+                    g.content.width,
+                    bg,
+                );
+            }
+        }
     }
 }
 
-/// The panel rect, for telling a click on the overlay from one that dismisses it.
+/// The panel rect, for tests that need to aim a click at or away from it.
+#[cfg(test)]
 pub fn window_rect(area: Rect, app: &App) -> Option<Rect> {
-    let st = app.settings.as_ref()?;
-    Some(geom(area, st).panel)
+    app.settings.as_ref()?;
+    Some(geom(area).panel)
 }
 
-/// Which settings row sits under the pointer.
-///
-/// Rows start two lines below the content top (title, then a blank), one per
-/// line — the same walk `draw` does, so the two can't disagree.
-pub fn row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    let st = app.settings.as_ref()?;
-    let g = geom(area, st);
-    if col < g.content.x || col >= g.content.right() {
-        return None;
-    }
-    let first = g.content.y + 2;
-    if row < first || row >= g.content.bottom() {
-        return None;
-    }
-    let idx = usize::from(row - first);
-    (idx < st.len()).then_some(idx)
-}
-
-fn rows_for(st: &SettingsState, app: &App) -> Vec<(String, String)> {
-    match st.page {
-        // Root: label only — selection › is drawn on the left.
-        SettingsPage::Root => vec![
-            ("Chat".into(), String::new()),
-            ("Sidebar".into(), String::new()),
-            ("Tools".into(), String::new()),
-        ],
-        SettingsPage::Chat => vec![
-            (
-                "Always show thoughts".into(),
-                on_off(app.ui.thoughts_always_open),
-            ),
-            ("Work summary".into(), on_off(app.ui.show_work_summary)),
-        ],
-        SettingsPage::Sidebar => vec![
-            ("Panel".into(), app.ui.sidebar_mode.label().into()),
-            (
-                "Collapse sections".into(),
-                on_off(app.ui.sidebar_collapse_sections),
-            ),
-            ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
-        ],
-        SettingsPage::Tools => vec![
-            ("Completed tools".into(), on_off(app.ui.show_tool_cards)),
-            ("Revert file".into(), on_off(app.ui.tool_revert)),
-        ],
+fn item_cells(item: SettingsItem, app: &App) -> (String, String) {
+    match item {
+        SettingsItem::Thoughts => (
+            "Always show thoughts".into(),
+            on_off(app.ui.thoughts_always_open),
+        ),
+        SettingsItem::WorkSummary => ("Work summary".into(), on_off(app.ui.show_work_summary)),
+        SettingsItem::SidebarMode => ("Panel".into(), app.ui.sidebar_mode.label().into()),
+        SettingsItem::CollapseSections => (
+            "Collapse sections".into(),
+            on_off(app.ui.sidebar_collapse_sections),
+        ),
+        SettingsItem::SidebarWidth => ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
+        SettingsItem::ShowToolCards => ("Completed tools".into(), on_off(app.ui.show_tool_cards)),
+        SettingsItem::ToolRevert => ("Revert file".into(), on_off(app.ui.tool_revert)),
     }
 }
 
@@ -120,29 +121,19 @@ fn on_off(v: bool) -> String {
     }
 }
 
-fn title_hint(st: &SettingsState) -> (&'static str, &'static str) {
-    let title = match st.page {
-        SettingsPage::Root => "Settings",
-        SettingsPage::Chat => "Chat",
-        SettingsPage::Sidebar => "Sidebar",
-        SettingsPage::Tools => "Tools",
-    };
-    let hint = match st.page {
-        SettingsPage::Root => "enter open  ·  esc close",
-        _ => "enter toggle  ·  esc back",
-    };
-    (title, hint)
+fn overlay() -> Panel<'static> {
+    Panel::new(
+        "Settings",
+        "enter toggle  ·  esc",
+        PAD_Y * 2 + CHROME_ROWS + ROWS.len() as u16,
+    )
+    .width_bounds(MIN_W, MAX_W)
+    .padding(PAD_X, PAD_Y)
 }
 
-fn overlay(st: &SettingsState) -> Panel<'static> {
-    let (title, hint) = title_hint(st);
-    Panel::new(title, hint, 8)
-        .width_bounds(MIN_W, MAX_W)
-        .padding(PAD_X, PAD_Y)
-}
-
-fn geom(area: Rect, st: &SettingsState) -> ModalLayout {
-    overlay(st).layout(area)
+#[cfg(test)]
+fn geom(area: Rect) -> ModalLayout {
+    overlay().layout(area)
 }
 
 #[cfg(test)]
@@ -177,28 +168,28 @@ mod tests {
     }
 
     #[test]
-    fn tools_page_toggles_revert_and_asks_to_persist() {
+    fn one_screen_lists_every_category() {
         let mut a = app();
         a.open_settings();
-        assert!(text(&mut a).contains("Tools"), "root lists the page");
-
-        // Root row 2 → Tools.
-        if let Some(st) = a.settings.as_mut() {
-            st.selected = 2;
-        }
-        assert!(!activate(&mut a), "drilling in changes nothing to save");
-        assert_eq!(
-            a.settings.as_ref().map(|s| s.page),
-            Some(SettingsPage::Tools)
-        );
-
         let shown = text(&mut a);
+        assert!(shown.contains("Chat"), "{shown}");
+        assert!(shown.contains("Sidebar"), "{shown}");
+        assert!(shown.contains("Tools"), "{shown}");
+        assert!(shown.contains("Always show thoughts"), "{shown}");
         assert!(shown.contains("Revert file"), "{shown}");
-        assert!(shown.contains("on"), "starts enabled: {shown}");
+    }
 
-        // Row 1 is "Revert file" (row 0 is "Completed tools").
+    #[test]
+    fn toggling_revert_asks_to_persist() {
+        let mut a = app();
+        a.open_settings();
+        assert!(text(&mut a).contains("on"), "starts enabled");
+
         if let Some(st) = a.settings.as_mut() {
-            st.selected = 1;
+            st.selected = ROWS
+                .iter()
+                .position(|r| r.item() == Some(SettingsItem::ToolRevert))
+                .expect("Revert file row");
         }
         assert!(activate(&mut a), "a toggle must be persisted");
         assert!(!a.ui.tool_revert);

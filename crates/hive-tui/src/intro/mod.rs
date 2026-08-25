@@ -9,7 +9,8 @@ use std::time::Duration;
 use comb::{Event, Key, KeyCode, Terminal};
 use hive_core::config::SearchBackend;
 use hive_llm::catalog::{
-    enrich_models, fetch_models_dev, list_provider_models, suggest_roles, ModelCard, RolePicks,
+    enrich_models, fetch_models_dev, list_provider_models, merge_catalog_models, query_matches,
+    suggest_roles, ModelCard, RolePicks,
 };
 use tokio::sync::oneshot;
 
@@ -336,7 +337,10 @@ impl IntroState {
                     return;
                 }
             };
-            let cards = enrich_models(&listed, catalog.ok().as_ref(), hint.as_deref());
+            let catalog = catalog.ok();
+            let hint = hint.as_deref();
+            let listed = merge_catalog_models(listed, catalog.as_ref(), hint);
+            let cards = enrich_models(&listed, catalog.as_ref(), hint);
             let _ = tx.send(Ok(cards));
         });
     }
@@ -430,13 +434,7 @@ impl IntroState {
         cards
             .iter()
             .enumerate()
-            .filter(|(_, c)| {
-                if filter.is_empty() {
-                    return true;
-                }
-                c.id.to_ascii_lowercase().contains(&filter)
-                    || c.name.to_ascii_lowercase().contains(&filter)
-            })
+            .filter(|(_, c)| query_matches(&filter, &[&c.id, &c.name]))
             .map(|(i, _)| i)
             .collect()
     }

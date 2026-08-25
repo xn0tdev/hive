@@ -46,7 +46,7 @@ fn failed_background_refresh_keeps_the_last_catalog() {
 
     assert_eq!(a.models_catalog, ModelsCatalogState::Ready);
     assert!(a
-        .flash_text()
+        .error_toast()
         .is_some_and(|text| text.contains("Couldn't refresh models")));
 }
 

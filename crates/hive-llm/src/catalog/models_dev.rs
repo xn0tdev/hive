@@ -251,21 +251,43 @@ pub(crate) fn parse_models_dev_json(text: &str) -> Result<ModelsDevCatalog> {
 }
 
 impl ModelsDevCatalog {
-    /// Look up metadata: exact id, then provider-scoped id, then suffix match.
+    /// Models listed under one models.dev provider id (`xai`, `openrouter`, …).
+    pub fn provider_models(&self, provider_id: &str) -> Option<&HashMap<String, ModelMeta>> {
+        self.by_provider.get(provider_id)
+    }
+
+    /// Look up metadata: hinted provider first (ids collide across gateways),
+    /// then exact global id, then suffix match.
     pub fn lookup(&self, model_id: &str, provider_hint: Option<&str>) -> Option<&ModelMeta> {
+        if let Some(hint) = provider_hint {
+            if let Some(found) = self.lookup_in_provider(model_id, hint) {
+                return Some(found);
+            }
+        }
         if let Some(m) = self.by_id.get(model_id) {
             return Some(m);
         }
-        if let Some(hint) = provider_hint {
-            if let Some(map) = self.by_provider.get(hint) {
-                if let Some(m) = map.get(model_id) {
-                    return Some(m);
-                }
-            }
+        Self::suffix_match(self.by_id.values(), model_id)
+    }
+
+    fn lookup_in_provider(&self, model_id: &str, hint: &str) -> Option<&ModelMeta> {
+        let map = self.by_provider.get(hint)?;
+        if let Some(m) = map.get(model_id) {
+            return Some(m);
         }
-        // Suffix / tail match (e.g. short id vs full path).
         let tail = model_id.rsplit('/').next().unwrap_or(model_id);
-        self.by_id.values().find(|m| {
+        if let Some(m) = map.get(tail) {
+            return Some(m);
+        }
+        Self::suffix_match(map.values(), model_id)
+    }
+
+    fn suffix_match<'a, I>(mut models: I, model_id: &str) -> Option<&'a ModelMeta>
+    where
+        I: Iterator<Item = &'a ModelMeta>,
+    {
+        let tail = model_id.rsplit('/').next().unwrap_or(model_id);
+        models.find(|m| {
             m.id == tail || m.id.ends_with(&format!("/{tail}")) || m.id.ends_with(model_id)
         })
     }
@@ -303,5 +325,37 @@ mod tests {
         assert_eq!(m.context, 128000);
         assert!((m.cost_input - 2.1).abs() < 0.001);
         assert!((m.cost_output - 6.6).abs() < 0.001);
+    }
+
+    /// The same short id exists on many gateways. The hint must win so we
+    /// don't stamp OpenRouter's card onto a first-party xAI listing.
+    #[test]
+    fn lookup_prefers_the_hinted_provider() {
+        let cat = parse_models_dev_json(
+            r#"{
+          "openrouter": {
+            "id": "openrouter",
+            "models": {
+              "grok-4.6": { "id": "grok-4.6", "name": "OpenRouter Grok" }
+            }
+          },
+          "xai": {
+            "id": "xai",
+            "models": {
+              "grok-4.6": { "id": "grok-4.6", "name": "xAI Grok" }
+            }
+          }
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cat.lookup("grok-4.6", Some("xai")).map(|m| m.name.as_str()),
+            Some("xAI Grok")
+        );
+        assert_eq!(
+            cat.lookup("grok-4.6", Some("openrouter"))
+                .map(|m| m.name.as_str()),
+            Some("OpenRouter Grok")
+        );
     }
 }

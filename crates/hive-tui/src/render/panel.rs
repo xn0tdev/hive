@@ -62,7 +62,9 @@ impl<'a> Panel<'a> {
     pub(crate) fn render(self, buf: &mut Buffer, area: Rect, theme: &Theme) -> ModalLayout {
         let panel_style = Style::default().bg(theme.strip);
         let layout = self.modal(panel_style).render(buf, area);
-        draw_header(buf, layout.content, self.title, self.hint, theme);
+        if !self.title.is_empty() || !self.hint.is_empty() {
+            draw_header(buf, layout.content, self.title, self.hint, theme);
+        }
         layout
     }
 

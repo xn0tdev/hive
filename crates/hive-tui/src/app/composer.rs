@@ -144,7 +144,7 @@ impl App {
         match self.attach_rel(rel) {
             Ok(_) => self.reset_menu(),
             Err(e) => {
-                self.flash(e);
+                self.flash_error(e);
                 self.reset_menu();
             }
         }
@@ -267,6 +267,7 @@ impl App {
         self.close_about();
         self.close_context_menu();
         self.close_goal_overlay();
+        self.close_recap();
         self.goal = None;
         self.clear_todos();
         self.running = false;
@@ -306,6 +307,7 @@ impl App {
             && !self.about_open()
             && !self.settings_open()
             && !self.goal_overlay_open()
+            && !self.recap_open()
             && !self.palette_open()
     }
 

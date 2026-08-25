@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_toast_sits_below_the_bar_on_the_last_row() {
+    fn plan_toast_sits_in_the_transcript_corner() {
         use hive_core::event::AgentEvent;
 
         let mut a = app();
@@ -222,20 +222,40 @@ mod tests {
         let size = Size::new(80, 24);
         let (buf, _) = render_with_cursor(size, |f| crate::render::draw(f, &mut a));
         let last = size.height - 1;
+        let text = buf.text();
+        assert!(text.contains("Info"), "kind label: {text}");
+        assert!(text.contains("Ctrl+C again to quit"), "{text}");
 
-        // Toast text lands on the very last row…
-        let mut row = String::new();
+        // Not on the footer row — that stays clean.
+        let mut footer = String::new();
         for x in 0..size.width {
-            row.push(buf.get(x, last).map(|c| c.ch).unwrap_or(' '));
+            footer.push(buf.get(x, last).map(|c| c.ch).unwrap_or(' '));
         }
         assert!(
-            row.contains("Ctrl+C again to quit"),
-            "toast on last row: {row:?}"
+            !footer.contains("Ctrl+C again to quit"),
+            "toast left the last row: {footer:?}"
         );
 
-        // …on the default background, below the reserved bottom band.
-        let toast_bg = buf.get(40, last).and_then(|c| c.style.bg);
-        assert_eq!(toast_bg, None, "toast row is the clean default line");
+        // Find the Info line: right-aligned, no fill.
+        let mut found = false;
+        for y in 0..size.height {
+            let mut row = String::new();
+            for x in 0..size.width {
+                row.push(buf.get(x, y).map(|c| c.ch).unwrap_or(' '));
+            }
+            if let Some(at) = row.find("Info") {
+                found = true;
+                let cell = buf.get(at as u16, y).unwrap();
+                assert_eq!(cell.style.bg, None, "no toast fill");
+                let trimmed = row.trim_end();
+                assert!(
+                    trimmed.ends_with("quit"),
+                    "right-aligned in the column: {row:?}"
+                );
+                break;
+            }
+        }
+        assert!(found, "Info toast row missing");
 
         // The InputZone (back / MARK / SEND) is raised to the chat Input height:
         // its strip band ends two rows above the bottom (same reserve as chat).

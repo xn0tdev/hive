@@ -29,7 +29,7 @@ pub(super) fn handle_paste(
         });
         return true;
     }
-    if app.about_open() || app.settings_open() || app.goal_overlay_open() {
+    if app.about_open() || app.settings_open() || app.goal_overlay_open() || app.recap_open() {
         return false;
     }
     if app.palette_open() {
@@ -169,7 +169,7 @@ pub(super) fn paste_from_clipboard(
             app.flash(format!("Attached {}", app.attachment_tags_line()));
             app.reset_menu();
         }
-        Err(e) => app.flash(e),
+        Err(e) => app.flash_error(e),
     }
     true
 }

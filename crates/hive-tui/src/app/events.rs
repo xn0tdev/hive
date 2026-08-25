@@ -13,6 +13,9 @@ impl App {
                 | AgentEvent::ModelsListed { .. }
                 | AgentEvent::ModelsListFailed(_)
                 | AgentEvent::ConnectionsUpdated { .. }
+                | AgentEvent::RecapDelta { .. }
+                | AgentEvent::RecapFinished { .. }
+                | AgentEvent::RecapFailed { .. }
         );
         let changed = self.apply_inner(ev);
         if changed && transcript_changed {
@@ -386,7 +389,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|pal| pal.mode == palette::PaletteMode::Models)
                     {
-                        self.flash(format!("Couldn't refresh models: {err}"));
+                        self.flash_error(format!("Couldn't refresh models: {err}"));
                     }
                 } else {
                     self.models_catalog = ModelsCatalogState::Failed(err);
@@ -494,9 +497,11 @@ impl App {
                 true
             }
             AgentEvent::Notice(s) => {
-                // Status feedback (model/provider switch, interrupt, …) lives in
-                // the bottom toast — same place as Ctrl+C — not the transcript.
-                self.flash(s);
+                if looks_like_error(&s) {
+                    self.flash_error(s);
+                } else {
+                    self.flash(s);
+                }
                 true
             }
             AgentEvent::SessionsListed(metas) => {
@@ -620,8 +625,47 @@ impl App {
                 true
             }
             AgentEvent::Error(s) => {
+                self.flash_error(s.clone());
                 self.blocks.push(Block::Error(s));
                 true
+            }
+            AgentEvent::RecapDelta { id, chunk } => {
+                let Some(card) = self.recap_card_mut(id) else {
+                    return false;
+                };
+                if let RecapBody::Generating { text } = &mut card.recap {
+                    text.push_str(&chunk);
+                }
+                self.recap_overlay
+                    .as_ref()
+                    .is_some_and(|o| o.recap_id == id && o.reveal_stream)
+            }
+            AgentEvent::RecapFinished { id, text } => {
+                let Some(card) = self.recap_card_mut(id) else {
+                    return false;
+                };
+                let body = text.trim();
+                let fallback = match &card.recap {
+                    RecapBody::Generating { text } => text.trim().to_string(),
+                    _ => String::new(),
+                };
+                let final_text = if body.is_empty() {
+                    fallback
+                } else {
+                    body.to_string()
+                };
+                card.recap = RecapBody::Ready { text: final_text };
+                self.recap_overlay
+                    .as_ref()
+                    .is_some_and(|o| o.recap_id == id)
+            }
+            AgentEvent::RecapFailed { id, error } => {
+                if let Some(card) = self.recap_card_mut(id) {
+                    card.recap = RecapBody::Failed { error };
+                }
+                self.recap_overlay
+                    .as_ref()
+                    .is_some_and(|o| o.recap_id == id)
             }
             AgentEvent::TurnFinished => {
                 self.running = false;
@@ -632,8 +676,13 @@ impl App {
                 if self.ui.show_work_summary {
                     if let Some(started) = self.turn_started_at.take() {
                         let secs = started.elapsed().as_secs();
-                        self.blocks
-                            .push(Block::WorkSummary(WorkSummaryCard { secs }));
+                        let recap_id = self.next_recap_id;
+                        self.next_recap_id = self.next_recap_id.saturating_add(1);
+                        self.blocks.push(Block::WorkSummary(WorkSummaryCard {
+                            secs,
+                            recap_id,
+                            recap: RecapBody::Idle,
+                        }));
                         self.scroll_from_bottom = 0;
                     }
                 }
@@ -644,4 +693,15 @@ impl App {
             }
         }
     }
+}
+
+fn looks_like_error(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    l.contains("fail")
+        || l.contains("error")
+        || l.contains("couldn't")
+        || l.contains("could not")
+        || l.contains("invalid")
+        || l.contains("can't")
+        || l.contains("cannot")
 }

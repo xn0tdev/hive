@@ -22,6 +22,13 @@ impl App {
         if flash_expired {
             self.flash_msg = None;
         }
+        let error_expired = self
+            .error_flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed().as_millis() >= FLASH_MS.max(TOAST_MS));
+        if error_expired {
+            self.error_flash = None;
+        }
         let paste_expired = self
             .image_pasted_at
             .is_some_and(|at| at.elapsed().as_millis() >= TOAST_MS);
@@ -35,7 +42,12 @@ impl App {
             self.clear_todos();
         }
         let input_blurred = self.maybe_idle_blur_input();
-        bonk_expired || flash_expired || paste_expired || tasks_retired || input_blurred
+        bonk_expired
+            || flash_expired
+            || error_expired
+            || paste_expired
+            || tasks_retired
+            || input_blurred
     }
 
     /// Cadence required by genuinely moving visuals. Deadline-only state such
@@ -43,6 +55,10 @@ impl App {
     pub fn animation_interval(&self) -> Option<std::time::Duration> {
         let fast = self.logo_bonk.is_some()
             || self.running
+            || self.recap_overlay.as_ref().is_some_and(|o| {
+                self.recap_card(o.recap_id)
+                    .is_some_and(|c| c.recap.is_generating() && !o.reveal_stream)
+            })
             || self.blocks.iter().any(|b| match b {
                 Block::Tool(c) => c.status == ToolStatus::Running,
                 Block::Subagent(c) => c.status == SubagentStatus::Running,
@@ -86,6 +102,9 @@ impl App {
         if let Some((_, at)) = &self.flash_msg {
             include(remaining(*at, FLASH_MS.max(TOAST_MS)));
         }
+        if let Some((_, at)) = &self.error_flash {
+            include(remaining(*at, FLASH_MS.max(TOAST_MS)));
+        }
         if let Some(at) = self.image_pasted_at {
             include(remaining(at, TOAST_MS));
         }
@@ -108,6 +127,7 @@ impl App {
     pub fn needs_animation(&self) -> bool {
         self.animation_interval().is_some()
             || self.flash_text().is_some()
+            || self.error_toast().is_some()
             || self.just_pasted_image()
             || self.pending_dispatch.is_some()
             || self.todos_completed_at.is_some()
@@ -138,12 +158,18 @@ impl App {
         self.flash_msg = Some((msg.into(), std::time::Instant::now()));
     }
 
-    /// The flash text, if it hasn't expired yet.
+    pub fn flash_error(&mut self, msg: impl Into<String>) {
+        self.error_flash = Some((msg.into(), std::time::Instant::now()));
+    }
+
+    /// The Info toast text, if it hasn't expired yet.
     pub fn flash_text(&self) -> Option<&str> {
-        match &self.flash_msg {
-            Some((msg, at)) if at.elapsed().as_millis() < TOAST_MS => Some(msg.as_str()),
-            _ => None,
-        }
+        live_toast(&self.flash_msg)
+    }
+
+    /// The Error toast text, if it hasn't expired yet.
+    pub fn error_toast(&self) -> Option<&str> {
+        live_toast(&self.error_flash)
     }
 
     /// First press arms; a second within the window confirms the quit.
@@ -160,5 +186,12 @@ impl App {
 
     pub fn disarm_quit(&mut self) {
         self.ctrl_c_armed = None;
+    }
+}
+
+fn live_toast(slot: &Option<(String, std::time::Instant)>) -> Option<&str> {
+    match slot {
+        Some((msg, at)) if at.elapsed().as_millis() < TOAST_MS => Some(msg.as_str()),
+        _ => None,
     }
 }

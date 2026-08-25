@@ -12,11 +12,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use hive_core::agent::session_store;
 use hive_core::config::{AppConfig, ModelRef, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
-use hive_core::provider::LlmProvider;
+use hive_core::message::Message;
+use hive_core::provider::{ChatRequest, Delta, LlmProvider};
 use hive_core::{Agent, FollowUpSlot, TerminalHandle, UserInput};
 use hive_llm::catalog::{
-    enrich_models, fetch_models_dev, list_provider_models, models_dev_hint_for_base,
-    provider_label_for_base, ModelCard,
+    enrich_models, fetch_models_dev, list_provider_models, merge_catalog_models,
+    models_dev_hint_for_base, provider_label_for_base, ModelCard,
 };
 use hive_llm::FireworksProvider;
 use hive_tui::InputCommand;
@@ -490,6 +491,15 @@ pub async fn run(
                         events.send(AgentEvent::Notice(format!("could not save settings: {e}")));
                 }
             }
+            InputCommand::Recap { id, context } => {
+                spawn_recap(
+                    agent.provider_clone(),
+                    agent.model().to_string(),
+                    id,
+                    context,
+                    events.clone(),
+                );
+            }
             InputCommand::TerminalAttach { .. }
             | InputCommand::TerminalDetach { .. }
             | InputCommand::TerminalInput { .. }
@@ -863,6 +873,7 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
         match listed {
             Ok(remote) => {
                 let hint = models_dev_hint_for_base(&target.base_url);
+                let remote = merge_catalog_models(remote, catalog.as_ref(), hint);
                 let cards = enrich_models(&remote, catalog.as_ref(), hint);
                 models.extend(catalog_rows(&target.label, &target.connection_id, &cards));
             }
@@ -896,6 +907,11 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
                 models: models.clone(),
             });
         }
+    } else {
+        let _ = events.send(AgentEvent::Notice(format!(
+            "couldn't list {}",
+            errors.join("; ")
+        )));
     }
     emit_models(events, models);
 }
@@ -978,6 +994,52 @@ fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<Ca
             cost_output: c.cost_output,
         })
         .collect()
+}
+
+const RECAP_SYSTEM: &str = "\
+Write a short recap of this one coding-agent turn for the person who asked. \
+Cover what they wanted, what changed, and anything left unfinished. \
+Use 3–8 short sentences or a tight bullet list. \
+No title, no greeting, no 'here's a recap'. Keep it under 120 words.";
+
+fn spawn_recap(
+    provider: Arc<dyn LlmProvider>,
+    model: String,
+    id: u64,
+    context: String,
+    events: EventSender,
+) {
+    tokio::spawn(async move {
+        let messages = [Message::system(RECAP_SYSTEM), Message::user(context)];
+        let mut on_delta = |delta: Delta| {
+            if let Delta::Text(chunk) = delta {
+                if !chunk.is_empty() {
+                    let _ = events.send(AgentEvent::RecapDelta { id, chunk });
+                }
+            }
+        };
+        let req = ChatRequest {
+            model: &model,
+            messages: &messages,
+            tools: &[],
+            temperature: Some(0.3),
+            max_tokens: Some(280),
+        };
+        match provider.chat_stream(req, &mut on_delta).await {
+            Ok(out) => {
+                let _ = events.send(AgentEvent::RecapFinished {
+                    id,
+                    text: out.message.text(),
+                });
+            }
+            Err(e) => {
+                let _ = events.send(AgentEvent::RecapFailed {
+                    id,
+                    error: e.to_string(),
+                });
+            }
+        }
+    });
 }
 
 #[cfg(test)]

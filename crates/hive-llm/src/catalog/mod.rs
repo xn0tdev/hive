@@ -7,12 +7,14 @@ mod http;
 mod models_dev;
 mod provider_list;
 mod provider_meta;
+mod search;
 mod suggest;
 
-pub use enrich::{enrich_models, ModelCard};
+pub use enrich::{enrich_models, merge_catalog_models, ModelCard};
 pub use models_dev::{fetch_models_dev, warm_cache, ModelsDevCatalog};
 pub use provider_list::{list_provider_models, RemoteModel};
 pub use provider_meta::{models_dev_hint_for_base, provider_label_for_base};
+pub use search::query_matches;
 pub use suggest::{suggest_model, suggest_roles, RolePicks};
 
 #[derive(Debug, thiserror::Error)]
