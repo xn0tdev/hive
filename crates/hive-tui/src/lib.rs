@@ -1,5 +1,6 @@
 //! Hive terminal frontend on the `comb` engine.
 
+pub mod bot;
 mod app;
 mod commands;
 mod farewell;

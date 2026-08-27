@@ -15,6 +15,7 @@ categories = ["command-line-interface"]
 hive-core = { workspace = true }
 hive-llm = { workspace = true }
 comb = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }

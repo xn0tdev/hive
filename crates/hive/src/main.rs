@@ -4,6 +4,7 @@
 //! needed, then hand off to the composition root in `wire.rs`.
 
 
+mod bot;
 mod config;
 mod driver;
 mod setup;
@@ -18,6 +19,7 @@ hive — YOLO coding agent
 
 Usage:
   hive                Start the TUI (runs setup on first launch)
+  hive bot            Open the hive bot hub (persistent agent personas)
   hive --continue     Reopen the most recent session (-c)
   hive --resume <id>  Reopen a session by id (no id = most recent)
   hive --intro        Force the setup wizard
@@ -55,6 +57,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let force_intro = args.iter().any(|a| a == "--intro");
+    let bot_mode =
+        args.first().map(|a| a.as_str()) == Some("bot") || args.iter().any(|a| a == "--bot");
 
     let _log_guard = wire::init_tracing();
 
@@ -67,6 +71,7 @@ async fn main() -> Result<()> {
     };
 
     match setup::ensure_ready(preliminary, force_intro).await {
+        Ok(cfg) if bot_mode => crate::bot::run(cfg).await,
         Ok(cfg) => wire::run(cfg, parse_resume(&args)).await,
         Err(e) => {
             eprintln!("hive: {e:#}");

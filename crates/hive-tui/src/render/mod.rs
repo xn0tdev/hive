@@ -17,6 +17,7 @@ pub mod wordmark;
 pub mod wrap;
 
 pub(crate) mod about;
+pub mod bot;
 mod context_menu;
 mod footer;
 pub(crate) mod goal;

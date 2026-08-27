@@ -621,6 +621,7 @@ name = "hive-tui"
 version = "0.2.5"
 dependencies = [
  "arboard",
+ "async-trait",
  "base64",
  "comb-tui",
  "hive-core",
