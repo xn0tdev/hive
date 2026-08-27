@@ -47,27 +47,30 @@ pub fn run(init: BotInit) -> io::Result<()> {
     }
     let mut terminal = Terminal::new()?;
     let mut hub = BotHub::new(init);
+    // Paint once up front — a quiet hub would otherwise show a blank screen
+    // until the first key or engine message.
+    let mut dirty = true;
     loop {
-        let dirty = hub.drain_engine();
+        dirty |= hub.drain_engine();
         if dirty {
             let snapshot = &hub;
             terminal.draw(|f| crate::render::bot::draw(f, snapshot))?;
+            dirty = false;
         }
         if let Some(ev) = terminal.read_event(IDLE_TICK)? {
-            let mut quit = false;
-            let mut dirty_now = true;
             match ev {
-                Event::Key(key) => quit = hub.handle_key(key),
-                Event::Paste(text) => hub.handle_paste(&text),
-                Event::Resize(_, _) => {}
-                Event::Mouse(_) => dirty_now = false,
-            }
-            if quit {
-                return Ok(());
-            }
-            if dirty_now {
-                let snapshot = &hub;
-                terminal.draw(|f| crate::render::bot::draw(f, snapshot))?;
+                Event::Key(key) => {
+                    if hub.handle_key(key) {
+                        return Ok(());
+                    }
+                    dirty = true;
+                }
+                Event::Paste(text) => {
+                    hub.handle_paste(&text);
+                    dirty = true;
+                }
+                Event::Resize(_, _) => dirty = true,
+                Event::Mouse(_) => {}
             }
         }
     }
