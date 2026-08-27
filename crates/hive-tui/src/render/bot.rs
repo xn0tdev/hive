@@ -171,16 +171,28 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
         buf.paint(card, Style::new().bg(bg));
 
         let chat = hub.chat_for(&persona.name);
-        let preview = chat.preview();
+        // Messenger-style: last message from either side; a fresh chat falls
+        // back to what the persona is about.
+        let preview = chat
+            .preview()
+            .unwrap_or_else(|| first_non_empty(&persona.description, "New chat").to_string());
         // Name and preview share the middle row: `Maya, *Ohhh okay…*`.
         let line = rail_card_label(
             &persona.name,
             &preview,
-            card_w.saturating_sub(2) as usize,
+            card_w.saturating_sub(4) as usize,
             theme,
             selected,
         );
         buf.set_line(card_x + 1, y + 1, &line, card_w - 2);
+        if hub.is_streaming(&persona.name) {
+            buf.set_str(
+                card_x + card_w - 2,
+                y + 1,
+                "…",
+                Style::new().fg(theme.accent),
+            );
+        }
         y += 4;
     }
 }
@@ -470,4 +482,12 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+fn first_non_empty<'a>(a: &'a str, b: &'a str) -> &'a str {
+    if a.trim().is_empty() {
+        b
+    } else {
+        a
+    }
 }

@@ -85,18 +85,22 @@ pub(crate) struct Chat {
 }
 
 impl Chat {
-    pub(crate) fn preview(&self) -> String {
-        let source = if self.live.is_empty() {
-            self.history
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, Role::Assistant))
-                .map(|m| m.text())
-                .unwrap_or_default()
-        } else {
-            self.live.clone()
-        };
-        first_line(&source)
+    /// Last message from either side, messenger-style. `None` when the chat
+    /// has no turns yet; the rail falls back to the persona description.
+    pub(crate) fn preview(&self) -> Option<String> {
+        if !self.live.is_empty() {
+            return Some(first_line(&self.live));
+        }
+        self.history.iter().rev().find_map(|m| {
+            let line = first_line(&m.text());
+            if line.is_empty() {
+                return None;
+            }
+            Some(match m.role {
+                Role::User => format!("You: {line}"),
+                _ => line,
+            })
+        })
     }
 }
 
@@ -700,6 +704,21 @@ mod tests {
         assert_eq!(wrap_text("hello brave world", 5), ["hello", "brave", "world"]);
         assert_eq!(wrap_text("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrap_text("a\n\nb", 5), ["a", "", "b"]);
+    }
+
+    #[test]
+    fn preview_prefers_live_then_last_turn_any_role() {
+        let mut c = Chat::default();
+        assert!(c.preview().is_none());
+
+        c.history.push(Message::user("check my gmail"));
+        assert_eq!(c.preview().as_deref(), Some("You: check my gmail"));
+
+        c.history.push(Message::assistant("on it.\nsecond line"));
+        assert_eq!(c.preview().as_deref(), Some("on it."));
+
+        c.live.push_str("still typing");
+        assert_eq!(c.preview().as_deref(), Some("still typing"));
     }
 
     #[test]
