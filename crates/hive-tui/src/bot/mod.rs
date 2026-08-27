@@ -1,9 +1,10 @@
 //! Hive bot hub — a second TUI for talking to persistent agent personas.
 //!
-//! Layout follows docs/HIVE_BOT.md and the approved mockup: a persona rail on
-//! the left, one long chat per persona in the middle, and a create form on the
-//! right. Unlike the main hive TUI this is a standalone loop with a direct
-//! provider connection and no sessions, tools, or worktrees.
+//! Layout follows docs/HIVE_BOT.md and the approved mockup: a chat rail on
+//! the left and one long chat per persona in the middle. Personas are plain
+//! markdown files under the scope's `agents/` dir; unlike the main hive TUI
+//! this is a standalone loop with a direct provider connection and no
+//! sessions, tools, or worktrees.
 
 pub mod engine;
 
@@ -34,10 +35,6 @@ pub struct BotInit {
     pub provider: Arc<dyn LlmProvider>,
     /// Persona directories in precedence order (project first, global last).
     pub roots: Vec<PathBuf>,
-    /// Where personas created in this session are written.
-    pub save_root: PathBuf,
-    /// Short scope tag shown in the UI ("project" / "global").
-    pub scope_label: String,
 }
 
 /// Entry point: owns the terminal until the hub quits.
@@ -182,50 +179,16 @@ fn char_to_byte(s: &str, char_index: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Focus {
-    Composer,
-    FieldName,
-    FieldDesc,
-}
-
-/// State of the right-hand create-persona panel.
-pub(crate) struct Form {
-    pub(crate) name: LineEdit,
-    pub(crate) desc: LineEdit,
-    pub(crate) focus: Focus,
-}
-
-impl Form {
-    fn new() -> Self {
-        Form {
-            name: LineEdit::default(),
-            desc: LineEdit::default(),
-            focus: Focus::FieldName,
-        }
-    }
-
-    fn focus_next(&mut self) {
-        self.focus = match self.focus {
-            Focus::FieldName => Focus::FieldDesc,
-            _ => Focus::FieldName,
-        };
-    }
-}
-
 pub struct BotHub {
     theme: Theme,
     model: String,
     provider: Arc<dyn LlmProvider>,
     roots: Vec<PathBuf>,
-    save_root: PathBuf,
-    scope_label: String,
     book: hive_core::persona::PersonaBook,
     personas: Vec<hive_core::persona::PersonaMeta>,
     selected: usize,
     chats: HashMap<String, Chat>,
     composer: LineEdit,
-    form: Option<Form>,
     streaming: Option<String>,
     engine_tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     engine_rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
@@ -239,14 +202,11 @@ impl BotHub {
             model: init.model,
             provider: init.provider,
             roots: init.roots,
-            save_root: init.save_root,
-            scope_label: init.scope_label,
             book: hive_core::persona::PersonaBook::load(Vec::new()),
             personas: Vec::new(),
             selected: 0,
             chats: HashMap::new(),
             composer: LineEdit::default(),
-            form: None,
             streaming: None,
             engine_tx,
             engine_rx,
@@ -290,11 +250,41 @@ impl BotHub {
         self.selected = next as usize;
     }
 
-    fn focus(&self) -> Focus {
-        self.form
-            .as_ref()
-            .map(|f| f.focus)
-            .unwrap_or(Focus::Composer)
+    pub fn handle_paste(&mut self, text: &str) {
+        self.composer.insert_str(text);
+    }
+
+    /// Handle one key. Returns true when the hub should quit.
+    pub fn handle_key(&mut self, key: Key) -> bool {
+        let ctrl = key.mods.ctrl;
+        if key.code == KeyCode::Char('q') && ctrl || key.code == KeyCode::Char('c') && ctrl {
+            return true;
+        }
+
+        if key.mods.alt {
+            match key.code {
+                KeyCode::Up => self.select(-1),
+                KeyCode::Down => self.select(1),
+                _ => {}
+            }
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Enter => self.submit(),
+            KeyCode::Backspace => self.composer.backspace(),
+            KeyCode::Delete => self.composer.delete(),
+            KeyCode::Left => self.composer.left(),
+            KeyCode::Right => self.composer.right(),
+            KeyCode::Home => self.composer.home(),
+            KeyCode::End => self.composer.end(),
+            KeyCode::Char('u') if ctrl => {
+                self.composer = LineEdit::default();
+            }
+            KeyCode::Char(c) if !ctrl => self.composer.insert(c),
+            _ => {}
+        }
+        false
     }
 
     /// Route one engine message; returns true when something changed.
@@ -380,207 +370,14 @@ impl BotHub {
         );
     }
 
-    /// Save the create form into the session's save root.
-    pub fn save_form(&mut self) {
-        let Some(form) = &self.form else {
-            return;
-        };
-        let name = form.name.text.trim().to_string();
-        let desc = form.desc.text.trim().to_string();
-        if name.is_empty() {
-            return;
-        }
-        self.form.as_mut().unwrap().focus = Focus::FieldName;
-        let persona = hive_core::persona::Persona::new(
-            name.clone(),
-            desc.clone(),
-            generated_prompt(&name, &desc),
-        );
-        if hive_core::persona::PersonaBook::save(&self.save_root, &persona).is_err() {
-            return;
-        }
-        self.form = None;
-        self.reload_book();
-        if let Some(idx) = self
-            .personas()
-            .iter()
-            .position(|p| p.name == persona.meta.name)
-        {
-            self.selected = idx;
-        }
-    }
-
-    pub fn open_form(&mut self) {
-        if self.form.is_none() {
-            self.form = Some(Form::new());
-        }
-    }
-
-    pub fn close_form(&mut self) {
-        self.form = None;
-    }
-
-    pub fn handle_paste(&mut self, text: &str) {
-        match self.focus() {
-            Focus::Composer => self.composer.insert_str(text),
-            Focus::FieldName => {
-                if let Some(f) = &mut self.form {
-                    f.name.insert_str(&text.replace(['\n', '\r'], " "));
-                }
-            }
-            Focus::FieldDesc => {
-                if let Some(f) = &mut self.form {
-                    f.desc.insert_str(&text.replace(['\n', '\r'], " "));
-                }
-            }
-        }
-    }
-
-    /// Handle one key. Returns true when the hub should quit.
-    pub fn handle_key(&mut self, key: Key) -> bool {
-        let ctrl = key.mods.ctrl;
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('c') if ctrl => return true,
-            KeyCode::Char('n') if ctrl => {
-                if self.form.is_none() {
-                    self.open_form();
-                }
-                return false;
-            }
-            _ => {}
-        }
-
-        if key.mods.alt {
-            match key.code {
-                KeyCode::Up => self.select(-1),
-                KeyCode::Down => self.select(1),
-                _ => {}
-            }
-            return false;
-        }
-
-        if self.form.is_some() {
-            self.handle_form_key(key);
-            return false;
-        }
-
-        match key.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Backspace => self.composer.backspace(),
-            KeyCode::Delete => self.composer.delete(),
-            KeyCode::Left => self.composer.left(),
-            KeyCode::Right => self.composer.right(),
-            KeyCode::Home => self.composer.home(),
-            KeyCode::End => self.composer.end(),
-            KeyCode::Char('u') if ctrl => {
-                self.composer = LineEdit::default();
-            }
-            KeyCode::Char(c) if !ctrl => self.composer.insert(c),
-            _ => {}
-        }
-        false
-    }
-
-    fn handle_form_key(&mut self, key: Key) {
-        match key.code {
-            KeyCode::Esc => self.close_form(),
-            KeyCode::Char('s') if key.mods.ctrl => self.save_form(),
-            KeyCode::Tab => {
-                if let Some(f) = &mut self.form {
-                    f.focus_next();
-                }
-            }
-            KeyCode::Enter => {
-                match self.focus() {
-                    Focus::FieldName => {
-                        if let Some(f) = &mut self.form {
-                            f.focus = Focus::FieldDesc;
-                        }
-                    }
-                    Focus::FieldDesc => self.save_form(),
-                    Focus::Composer => {}
-                }
-            }
-            KeyCode::Backspace => match self.focus() {
-                Focus::FieldName => {
-                    if let Some(f) = &mut self.form {
-                        f.name.backspace();
-                    }
-                }
-                _ => {
-                    if let Some(f) = &mut self.form {
-                        f.desc.backspace();
-                    }
-                }
-            },
-            KeyCode::Delete => match self.focus() {
-                Focus::FieldName => {
-                    if let Some(f) = &mut self.form {
-                        f.name.delete();
-                    }
-                }
-                _ => {
-                    if let Some(f) = &mut self.form {
-                        f.desc.delete();
-                    }
-                }
-            },
-            KeyCode::Left => match self.focus() {
-                Focus::FieldName => {
-                    if let Some(f) = &mut self.form {
-                        f.name.left();
-                    }
-                }
-                _ => {
-                    if let Some(f) = &mut self.form {
-                        f.desc.left();
-                    }
-                }
-            },
-            KeyCode::Right => match self.focus() {
-                Focus::FieldName => {
-                    if let Some(f) = &mut self.form {
-                        f.name.right();
-                    }
-                }
-                _ => {
-                    if let Some(f) = &mut self.form {
-                        f.desc.right();
-                    }
-                }
-            },
-            KeyCode::Char(c) if !key.mods.ctrl => match self.focus() {
-                Focus::FieldName => {
-                    if let Some(f) = &mut self.form {
-                        f.name.insert(c);
-                    }
-                }
-                _ => {
-                    if let Some(f) = &mut self.form {
-                        f.desc.insert(c);
-                    }
-                }
-            },
-            _ => {}
-        }
-    }
-
     // ---- read-only accessors used by the renderer ----
 
     pub fn theme(&self) -> &Theme {
         &self.theme
     }
 
-    pub fn scope_label(&self) -> &str {
-        &self.scope_label
-    }
-
     pub(crate) fn composer(&self) -> &LineEdit {
         &self.composer
-    }
-
-    pub(crate) fn form(&self) -> Option<&Form> {
-        self.form.as_ref()
     }
 
     pub fn is_streaming(&self, name: &str) -> bool {
@@ -676,15 +473,11 @@ mod tests {
     }
 
     fn hub_with_roots(roots: Vec<std::path::PathBuf>) -> BotHub {
-        let mut h = BotHub::new(BotInit {
+        BotHub::new(BotInit {
             model: "m".into(),
             provider: Arc::new(StubProvider),
             roots,
-            save_root: std::env::temp_dir().join("hive-bot-hub-test"),
-            scope_label: "project".into(),
-        });
-        h.save_root = std::env::temp_dir().join("hive-bot-hub-test");
-        h
+        })
     }
 
     #[test]
@@ -773,34 +566,5 @@ mod tests {
         h.submit();
         assert_eq!(h.chat("maya").history.len(), 1, "streaming blocks sends");
         let _ = std::fs::remove_dir_all(&scope);
-    }
-
-    #[test]
-    fn form_save_writes_persona_and_selects_it() {
-        let scope = std::env::temp_dir().join(format!("hive-bot-form-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scope);
-        let mut h = hub_with_roots(vec![scope.clone()]);
-        h.save_root = scope.clone();
-        h.open_form();
-        if let Some(f) = &mut h.form {
-            f.name.insert_str("Maya");
-            f.focus = Focus::FieldDesc;
-            f.desc.insert_str("Personal assistant");
-        }
-        h.save_form();
-        assert!(h.form.is_none());
-        assert_eq!(h.selected_name(), Some("Maya"));
-        let saved = std::fs::read_to_string(scope.join("Maya.md")).unwrap();
-        assert!(saved.contains("name: Maya"));
-        assert!(saved.contains("Personal assistant"));
-        let _ = std::fs::remove_dir_all(&scope);
-    }
-
-    #[test]
-    fn empty_name_blocks_save() {
-        let mut h = hub();
-        h.open_form();
-        h.save_form();
-        assert!(h.form.is_some(), "no name, no save");
     }
 }

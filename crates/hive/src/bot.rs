@@ -17,14 +17,6 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         .map(|b| b.home_dir().join(".hive").join("agents"))
         .unwrap_or_else(|| PathBuf::from(".hive/agents"));
 
-    // Project scope wins when the project actually uses hive (.hive present);
-    // otherwise personas are created globally so they follow you everywhere.
-    let (save_root, scope) = if cwd.join(".hive").exists() {
-        (project_agents.clone(), "project")
-    } else {
-        (global_agents.clone(), "global")
-    };
-
     let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
         cfg.provider.base_url.clone(),
         cfg.secrets.provider_api_key.clone(),
@@ -34,8 +26,6 @@ pub async fn run(cfg: Arc<AppConfig>) -> Result<()> {
         model: cfg.models.default.id().to_string(),
         provider,
         roots: vec![project_agents, global_agents],
-        save_root,
-        scope_label: scope.to_string(),
     };
 
     tokio::task::spawn_blocking(move || hive_tui::bot::run(init)).await??;

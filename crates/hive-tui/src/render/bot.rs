@@ -4,7 +4,7 @@
 
 use comb::{Frame, Line, Modifier, Rect, Span, Style};
 
-use crate::bot::{wrap_text, BotHub, Chat, Focus};
+use crate::bot::{wrap_text, BotHub, Chat};
 use crate::theme::Theme;
 
 /// Pad around chips and fields.
@@ -16,14 +16,9 @@ pub fn draw(f: &mut Frame, hub: &BotHub) {
     let area = f.area();
 
     let rail_w = (area.width * 24 / 100).clamp(16, 30);
-    let form_w = if hub.form().is_some() {
-        Some((area.width * 28 / 100).clamp(20, 36))
-    } else {
-        None
-    };
-    let inner_w = area.width.saturating_sub(RIGHT_MARGIN);
-    let chat_w = inner_w
-        .saturating_sub(rail_w + form_w.unwrap_or(0))
+    let chat_w = area
+        .width
+        .saturating_sub(RIGHT_MARGIN + rail_w)
         .max(10);
 
     // The rail header carries the brand; panels span the full screen height.
@@ -34,17 +29,9 @@ pub fn draw(f: &mut Frame, hub: &BotHub) {
         draw_panel(buf, rail, hub.theme().strip);
         // The canvas reads darker than the side panels, like the mockup.
         draw_panel(buf, chat, hub.theme().code_bg);
-        if let Some(form_w) = form_w {
-            let form = Rect::new(rail_w + chat_w, 0, form_w, area.height);
-            draw_panel(buf, form, hub.theme().strip);
-        }
     }
     draw_rail(f, rail, hub);
     draw_chat(f, chat, hub);
-    if let Some(form_w) = form_w {
-        let form = Rect::new(rail_w + chat_w, 0, form_w, area.height);
-        draw_form(f, form, hub);
-    }
 }
 
 fn draw_panel(buf: &mut comb::Buffer, rect: Rect, bg: comb::Color) {
@@ -123,7 +110,7 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
             rect.x + 1,
             rect.y + 2,
             &Line::from(Span::styled(
-                "No personas yet",
+                "No chats yet",
                 Style::new().fg(theme.faint).add(Modifier::ITALIC),
             )),
             rect.width - 2,
@@ -132,7 +119,16 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
             rect.x + 1,
             rect.y + 3,
             &Line::from(Span::styled(
-                "Ctrl+N to add one",
+                "drop a persona into",
+                Style::new().fg(theme.faint).add(Modifier::ITALIC),
+            )),
+            rect.width - 2,
+        );
+        buf.set_line(
+            rect.x + 1,
+            rect.y + 4,
+            &Line::from(Span::styled(
+                ".hive/agents/Name.md",
                 Style::new().fg(theme.faint).add(Modifier::ITALIC),
             )),
             rect.width - 2,
@@ -187,7 +183,7 @@ fn draw_chat(f: &mut Frame, rect: Rect, hub: &BotHub) {
             rect.x + 2,
             rect.y + rect.height / 2,
             &Line::from(Span::styled(
-                "Select a persona, or Ctrl+N to create one",
+                "Pick a chat on the left, or add a persona file",
                 Style::new().fg(theme.faint).add(Modifier::ITALIC),
             )),
             rect.width - 4,
@@ -359,84 +355,13 @@ fn draw_composer(buf: &mut comb::Buffer, rect: Rect, hub: &BotHub) {
         );
         return;
     }
-    let line = with_caret(&composer.text, composer.caret, hub.form().is_none());
+    let line = with_caret(&composer.text, composer.caret, true);
     buf.set_line(
         rect.x + 1,
         text_y,
         &Line::from(Span::styled(line, Style::new().fg(theme.fg))),
         inner_w as u16,
     );
-}
-
-fn draw_form(f: &mut Frame, rect: Rect, hub: &BotHub) {
-    let Some(form) = hub.form() else {
-        return;
-    };
-    let theme = hub.theme();
-    let buf = f.buffer();
-    let inner_w = rect.width.saturating_sub(2);
-
-    // The mockup pins Close to the panel's top-left corner.
-    chip(buf, rect.x + 1, rect.y, " Close ", theme);
-
-    let mut y = rect.y + 2;
-    buf.set_str(
-        rect.x + 1,
-        y,
-        "Name",
-        Style::new()
-            .fg(if form.focus == Focus::FieldName {
-                theme.fg
-            } else {
-                theme.dim
-            })
-            .add(Modifier::ITALIC),
-    );
-    let name_field = Rect::new(rect.x + 1, y + 1, inner_w, 1);
-    buf.paint(name_field, Style::new().bg(theme.input));
-    let line = with_caret(
-        &form.name.text,
-        form.name.caret,
-        form.focus == Focus::FieldName,
-    );
-    buf.set_line(
-        name_field.x + 1,
-        name_field.y,
-        &Line::from(Span::styled(line, Style::new().fg(theme.fg))),
-        inner_w.saturating_sub(2),
-    );
-
-    y += 3;
-    buf.set_str(
-        rect.x + 1,
-        y,
-        "Description",
-        Style::new()
-            .fg(if form.focus == Focus::FieldDesc {
-                theme.fg
-            } else {
-                theme.dim
-            })
-            .add(Modifier::ITALIC),
-    );
-    let desc_h = 6.min(rect.height.saturating_sub(y + 4));
-    let desc_field = Rect::new(rect.x + 1, y + 1, inner_w, desc_h);
-    buf.paint(desc_field, Style::new().bg(theme.input));
-    let line = with_caret(
-        &form.desc.text,
-        form.desc.caret,
-        form.focus == Focus::FieldDesc,
-    );
-    buf.set_line(
-        desc_field.x + 1,
-        desc_field.y,
-        &Line::from(Span::styled(line, Style::new().fg(theme.fg))),
-        inner_w.saturating_sub(2),
-    );
-
-    if desc_field.bottom() + 2 < rect.bottom() {
-        chip(buf, rect.x + 1, desc_field.bottom() + 2, " Save ", theme);
-    }
 }
 
 /// Text with a block caret spliced in while the field is focused.

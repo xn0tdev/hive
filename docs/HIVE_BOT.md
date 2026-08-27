@@ -6,10 +6,10 @@ its own chat model, and bot-only internal tools.
 
 ## Concept
 
-The user creates their own agents ("personas") inside the TUI: name,
-description of what the agent does and how it works (a short questionnaire).
-One persona usually acts as the manager the human talks to; other personas
-are specialists the manager delegates to.
+The user creates their own agents ("personas") as markdown files dropped into
+the scope's `agents/` dir: name, description of what the agent does and how it
+works, plus an optional role prompt. One persona usually acts as the manager
+the human talks to; other personas are specialists the manager delegates to.
 
 Example flow (illustrative names chosen by the user):
 
@@ -78,9 +78,9 @@ Simple, clean MCP client support for the regular hive agent (not bot):
 
 ## Delivery phases
 
-1. **Groundwork (this phase)** — persona files format + loader/saver in core.
-2. **Bot hub shell** — new TUI view, persona picker, manager chat over a long
-   session.
+1. **Groundwork (done)** — persona files format + loader/saver in core.
+2. **Bot hub shell (done)** — chat rail, persona picker, long-session chat.
+   The in-TUI create form was cut: personas come from markdown files on disk.
 3. **Memory** — memory dirs, bot-only tools, compaction hand-off.
 4. **Channels** — manager->specialist sub-chats, async scheduler, cards UI.
 5. **MCP** — stdio MCP client wired into main hive toolset.
