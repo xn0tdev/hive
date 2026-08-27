@@ -9,12 +9,8 @@ use crate::theme::Theme;
 
 /// Pad around chips and fields.
 const PAD: u16 = 1;
-/// Rows above the panels (outer label row + one blank).
-const TOP: u16 = 2;
 /// Columns of outer background kept right of the panels.
 const RIGHT_MARGIN: u16 = 2;
-/// Rows of outer background kept below the panels.
-const BOTTOM_MARGIN: u16 = 1;
 
 pub fn draw(f: &mut Frame, hub: &BotHub) {
     let area = f.area();
@@ -26,41 +22,27 @@ pub fn draw(f: &mut Frame, hub: &BotHub) {
         None
     };
     let inner_w = area.width.saturating_sub(RIGHT_MARGIN);
-    let height = area
-        .height
-        .saturating_sub(TOP + BOTTOM_MARGIN)
-        .max(1);
     let chat_w = inner_w
         .saturating_sub(rail_w + form_w.unwrap_or(0))
         .max(10);
 
-    // Outer label row.
-    {
-        let buf = f.buffer();
-        buf.set_str(
-            1,
-            0,
-            "Hive Bot",
-            Style::new().fg(hub.theme().dim).add(Modifier::ITALIC),
-        );
-    }
-
-    let rail = Rect::new(0, TOP, rail_w, height);
-    let chat = Rect::new(rail_w, TOP, chat_w, height);
+    // The rail header carries the brand; panels span the full screen height.
+    let rail = Rect::new(0, 0, rail_w, area.height);
+    let chat = Rect::new(rail_w, 0, chat_w, area.height);
     {
         let buf = f.buffer();
         draw_panel(buf, rail, hub.theme().strip);
         // The canvas reads darker than the side panels, like the mockup.
         draw_panel(buf, chat, hub.theme().code_bg);
         if let Some(form_w) = form_w {
-            let form = Rect::new(rail_w + chat_w, TOP, form_w, height);
+            let form = Rect::new(rail_w + chat_w, 0, form_w, area.height);
             draw_panel(buf, form, hub.theme().strip);
         }
     }
     draw_rail(f, rail, hub);
     draw_chat(f, chat, hub);
     if let Some(form_w) = form_w {
-        let form = Rect::new(rail_w + chat_w, TOP, form_w, height);
+        let form = Rect::new(rail_w + chat_w, 0, form_w, area.height);
         draw_form(f, form, hub);
     }
 }
@@ -226,7 +208,7 @@ fn draw_chat(f: &mut Frame, rect: Rect, hub: &BotHub) {
     // The composer strip keeps a margin from the panel edges and sits one
     // blank row above the panel bottom, like the mockup.
     let strip_h = 3;
-    let strip_y = rect.bottom().saturating_sub(BOTTOM_MARGIN + strip_h);
+    let strip_y = rect.bottom().saturating_sub(strip_h + 1);
     let canvas = Rect::new(
         rect.x,
         rect.y + 1,
