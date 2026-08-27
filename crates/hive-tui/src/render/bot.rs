@@ -1,55 +1,75 @@
 //! Rendering for the hive bot hub: persona rail, chat canvas, create form.
-//! Mirrors the approved mockup — flat dark panels, chips instead of borders,
-//! italic for metadata.
+//! Mirrors the approved mockup — the chat canvas sits darker than the side
+//! panels, chips replace borders, italics mark metadata.
 
 use comb::{Frame, Line, Modifier, Rect, Span, Style};
-use hive_core::message::Role;
 
 use crate::bot::{wrap_text, BotHub, Chat, Focus};
 use crate::theme::Theme;
 
 /// Pad around chips and fields.
 const PAD: u16 = 1;
+/// Rows above the panels (outer label row + one blank).
+const TOP: u16 = 2;
+/// Columns of outer background kept right of the panels.
+const RIGHT_MARGIN: u16 = 2;
+/// Rows of outer background kept below the panels.
+const BOTTOM_MARGIN: u16 = 1;
 
 pub fn draw(f: &mut Frame, hub: &BotHub) {
     let area = f.area();
-    let top = 1; // row 0 stays a slim outer label
 
     let rail_w = (area.width * 24 / 100).clamp(16, 30);
     let form_w = if hub.form().is_some() {
-        (area.width * 28 / 100).clamp(20, 36)
+        Some((area.width * 28 / 100).clamp(20, 36))
     } else {
-        0
+        None
     };
-    let chat_w = area.width.saturating_sub(rail_w + form_w);
+    let inner_w = area.width.saturating_sub(RIGHT_MARGIN);
+    let height = area
+        .height
+        .saturating_sub(TOP + BOTTOM_MARGIN)
+        .max(1);
+    let chat_w = inner_w
+        .saturating_sub(rail_w + form_w.unwrap_or(0))
+        .max(10);
 
     // Outer label row.
-    let buf = f.buffer();
-    buf.set_str(
-        1,
-        0,
-        "Hive Bot",
-        Style::new().fg(hub.theme().dim).add(Modifier::ITALIC),
-    );
+    {
+        let buf = f.buffer();
+        buf.set_str(
+            1,
+            0,
+            "Hive Bot",
+            Style::new().fg(hub.theme().dim).add(Modifier::ITALIC),
+        );
+    }
 
-    let rail = Rect::new(0, top, rail_w, area.height.saturating_sub(top));
-    let chat = Rect::new(rail_w, top, chat_w, area.height.saturating_sub(top));
-    draw_panel(f.buffer(), rail, hub.theme());
-    draw_panel(f.buffer(), chat, hub.theme());
+    let rail = Rect::new(0, TOP, rail_w, height);
+    let chat = Rect::new(rail_w, TOP, chat_w, height);
+    {
+        let buf = f.buffer();
+        draw_panel(buf, rail, hub.theme().strip);
+        // The canvas reads darker than the side panels, like the mockup.
+        draw_panel(buf, chat, hub.theme().code_bg);
+        if let Some(form_w) = form_w {
+            let form = Rect::new(rail_w + chat_w, TOP, form_w, height);
+            draw_panel(buf, form, hub.theme().strip);
+        }
+    }
     draw_rail(f, rail, hub);
     draw_chat(f, chat, hub);
-    if hub.form().is_some() {
-        let form = Rect::new(rail_w + chat_w, top, form_w, area.height.saturating_sub(top));
-        draw_panel(f.buffer(), form, hub.theme());
+    if let Some(form_w) = form_w {
+        let form = Rect::new(rail_w + chat_w, TOP, form_w, height);
         draw_form(f, form, hub);
     }
 }
 
-fn draw_panel(buf: &mut comb::Buffer, rect: Rect, theme: &Theme) {
+fn draw_panel(buf: &mut comb::Buffer, rect: Rect, bg: comb::Color) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    buf.paint(rect, Style::new().bg(theme.strip));
+    buf.paint(rect, Style::new().bg(bg));
 }
 
 /// Filled chip like ` Add ` — returns its width so hit-testing can reuse it.
@@ -63,6 +83,42 @@ fn chip(buf: &mut comb::Buffer, x: u16, y: u16, label: &str, theme: &Theme) -> u
     w
 }
 
+/// `Name, preview` on one line, truncating to fit. The name is plain, the
+/// preview is italic metadata.
+fn rail_card_label(
+    name: &str,
+    preview: &str,
+    width: usize,
+    theme: &Theme,
+    selected: bool,
+) -> Line {
+    let name_style = Style::new()
+        .fg(if selected { theme.accent } else { theme.fg })
+        .add(if selected { Modifier::BOLD } else { Modifier::NONE });
+    let meta_style = Style::new()
+        .fg(if selected { theme.dim } else { theme.faint })
+        .add(Modifier::ITALIC);
+
+    if preview.is_empty() {
+        return Line::from(vec![Span::styled(truncate(name, width), name_style)]);
+    }
+
+    // Leave room for `, ` plus at least a few preview chars.
+    let name_max = width.saturating_sub(6).max(width / 2).max(1);
+    let name_cut = truncate(name, name_max);
+    let rest = width.saturating_sub(name_cut.chars().count() + 2);
+    let mut p = truncate(preview, rest);
+    if p.is_empty() {
+        return Line::from(vec![Span::styled(truncate(name, width), name_style)]);
+    }
+    p.insert(0, ',');
+    p.insert(1, ' ');
+    Line::from(vec![
+        Span::styled(name_cut, name_style),
+        Span::styled(p, meta_style),
+    ])
+}
+
 fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
     let theme = hub.theme();
     let buf = f.buffer();
@@ -72,10 +128,7 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
         rect.y,
         &Line::from(vec![
             Span::styled("Hive Bot", Style::new().fg(theme.fg).add(Modifier::BOLD)),
-            Span::styled(
-                " (BETA)",
-                Style::new().fg(theme.dim).add(Modifier::ITALIC),
-            ),
+            Span::styled(" (BETA)", Style::new().fg(theme.dim).add(Modifier::ITALIC)),
         ]),
         rect.width.saturating_sub(10),
     );
@@ -119,26 +172,15 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
 
         let chat = hub.chat_for(&persona.name);
         let preview = chat.preview();
-        buf.set_line(
-            card_x + 1,
-            y,
-            &Line::from(Span::styled(
-                &persona.name,
-                Style::new()
-                    .fg(if selected { theme.accent } else { theme.fg })
-                    .add(if selected { Modifier::BOLD } else { Modifier::NONE }),
-            )),
-            card_w - 2,
+        // Name and preview share the middle row: `Maya, *Ohhh okay…*`.
+        let line = rail_card_label(
+            &persona.name,
+            &preview,
+            card_w.saturating_sub(2) as usize,
+            theme,
+            selected,
         );
-        buf.set_line(
-            card_x + 1,
-            y + 1,
-            &Line::from(Span::styled(
-                preview,
-                Style::new().fg(if selected { theme.dim } else { theme.faint }),
-            )),
-            card_w - 2,
-        );
+        buf.set_line(card_x + 1, y + 1, &line, card_w - 2);
         y += 4;
     }
 }
@@ -159,27 +201,30 @@ fn draw_chat(f: &mut Frame, rect: Rect, hub: &BotHub) {
         return;
     };
 
-    buf.set_str(rect.x + 1, rect.y, name, Style::new().fg(theme.fg));
+    buf.set_str(rect.x + 2, rect.y, name, Style::new().fg(theme.fg));
     if hub.is_streaming(name) {
         buf.set_str(
-            rect.right().saturating_sub(3),
+            rect.right().saturating_sub(4),
             rect.y,
             "…",
             Style::new().fg(theme.dim),
         );
     }
 
-    let composer_y = rect.bottom().saturating_sub(2);
+    // The composer strip keeps a margin from the panel edges and sits one
+    // blank row above the panel bottom, like the mockup.
+    let strip_h = 3;
+    let strip_y = rect.bottom().saturating_sub(BOTTOM_MARGIN + strip_h);
     let canvas = Rect::new(
         rect.x,
         rect.y + 1,
         rect.width,
-        composer_y.saturating_sub(rect.y + 1),
+        strip_y.saturating_sub(rect.y + 1),
     );
     draw_canvas(buf, canvas, hub, name);
     draw_composer(
         buf,
-        Rect::new(rect.x + 1, composer_y, rect.width - 2, 1),
+        Rect::new(rect.x + 2, strip_y, rect.width.saturating_sub(4), strip_h),
         hub,
     );
 }
@@ -204,7 +249,9 @@ fn draw_canvas(buf: &mut comb::Buffer, rect: Rect, hub: &BotHub, name: &str) {
 
     for msg in &chat.history {
         match msg.role {
-            Role::User => push_user_block(&mut rows, &msg.text(), text_width, theme),
+            hive_core::message::Role::User => {
+                push_user_block(&mut rows, &msg.text(), text_width, theme)
+            }
             _ => push_assistant_block(&mut rows, &msg.text(), text_width),
         }
         rows.push(blank_row());
@@ -293,14 +340,13 @@ fn draw_composer(buf: &mut comb::Buffer, rect: Rect, hub: &BotHub) {
     let theme = hub.theme();
     buf.paint(rect, Style::new().bg(theme.input));
     let inner_w = (rect.width - 2) as usize;
+    let text_y = rect.y + rect.height / 2;
 
-    let streaming_here = hub
-        .selected_name()
-        .is_some_and(|n| hub.is_streaming(n));
+    let streaming_here = hub.selected_name().is_some_and(|n| hub.is_streaming(n));
     if streaming_here {
         buf.set_str(
             rect.right().saturating_sub(2),
-            rect.y,
+            text_y,
             "…",
             Style::new().fg(theme.faint),
         );
@@ -310,7 +356,7 @@ fn draw_composer(buf: &mut comb::Buffer, rect: Rect, hub: &BotHub) {
     if composer.text.is_empty() {
         buf.set_line(
             rect.x + 1,
-            rect.y,
+            text_y,
             &Line::from(Span::styled(
                 "Ask hive anything",
                 Style::new().fg(theme.faint).add(Modifier::ITALIC),
@@ -322,7 +368,7 @@ fn draw_composer(buf: &mut comb::Buffer, rect: Rect, hub: &BotHub) {
     let line = with_caret(&composer.text, composer.caret, hub.form().is_none());
     buf.set_line(
         rect.x + 1,
-        rect.y,
+        text_y,
         &Line::from(Span::styled(line, Style::new().fg(theme.fg))),
         inner_w as u16,
     );
@@ -336,13 +382,8 @@ fn draw_form(f: &mut Frame, rect: Rect, hub: &BotHub) {
     let buf = f.buffer();
     let inner_w = rect.width.saturating_sub(2);
 
-    chip(
-        buf,
-        rect.right().saturating_sub(9),
-        rect.y,
-        " Close ",
-        theme,
-    );
+    // The mockup pins Close to the panel's top-left corner.
+    chip(buf, rect.x + 1, rect.y, " Close ", theme);
 
     let mut y = rect.y + 2;
     buf.set_str(
@@ -359,7 +400,11 @@ fn draw_form(f: &mut Frame, rect: Rect, hub: &BotHub) {
     );
     let name_field = Rect::new(rect.x + 1, y + 1, inner_w, 1);
     buf.paint(name_field, Style::new().bg(theme.input));
-    let line = with_caret(&form.name.text, form.name.caret, form.focus == Focus::FieldName);
+    let line = with_caret(
+        &form.name.text,
+        form.name.caret,
+        form.focus == Focus::FieldName,
+    );
     buf.set_line(
         name_field.x + 1,
         name_field.y,
@@ -380,9 +425,14 @@ fn draw_form(f: &mut Frame, rect: Rect, hub: &BotHub) {
             })
             .add(Modifier::ITALIC),
     );
-    let desc_field = Rect::new(rect.x + 1, y + 1, inner_w, 5.min(rect.height.saturating_sub(y + 3)));
+    let desc_h = 6.min(rect.height.saturating_sub(y + 4));
+    let desc_field = Rect::new(rect.x + 1, y + 1, inner_w, desc_h);
     buf.paint(desc_field, Style::new().bg(theme.input));
-    let line = with_caret(&form.desc.text, form.desc.caret, form.focus == Focus::FieldDesc);
+    let line = with_caret(
+        &form.desc.text,
+        form.desc.caret,
+        form.focus == Focus::FieldDesc,
+    );
     buf.set_line(
         desc_field.x + 1,
         desc_field.y,
