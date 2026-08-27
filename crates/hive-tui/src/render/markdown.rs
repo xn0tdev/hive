@@ -194,7 +194,7 @@ impl<'t> Writer<'t> {
                 if !self.text.is_empty() {
                     self.push_blank();
                 }
-                let w = self.wrap_width.min(12).max(6);
+                let w = self.wrap_width.clamp(6, 12);
                 self.push_line(Line::from(Span::styled(
                     "─".repeat(w),
                     Style::default().fg(self.theme.faint),

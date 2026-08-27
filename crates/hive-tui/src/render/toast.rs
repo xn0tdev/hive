@@ -49,7 +49,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) -> bool {
             break;
         }
         y = y.saturating_sub(h);
-        paint_card(f, area, y, max_w, h, msg, fg, bg);
+        if let Some(chip) = layout_chip(area, y, max_w, h, msg, fg) {
+            paint_card(f, &chip, bg);
+        }
     }
     true
 }
@@ -58,18 +60,16 @@ fn chip_h(max_h: u16) -> u16 {
     (1 + PAD_Y * 2).min(max_h)
 }
 
-fn paint_card(
-    f: &mut Frame,
-    area: Rect,
-    y: u16,
-    max_w: u16,
-    h: u16,
-    msg: &str,
+/// One toast card with its on-screen placement.
+struct Chip {
+    rect: Rect,
+    msg: String,
     fg: Color,
-    bg: Color,
-) {
+}
+
+fn layout_chip(area: Rect, y: u16, max_w: u16, h: u16, msg: &str, fg: Color) -> Option<Chip> {
     if h == 0 || max_w == 0 {
-        return;
+        return None;
     }
     let inner = max_w.saturating_sub(PAD_X * 2).max(1) as usize;
     let body = if msg.chars().count() > inner && inner > 1 {
@@ -87,22 +87,29 @@ fn paint_card(
         .saturating_sub(INSET)
         .saturating_sub(w)
         .max(area.x);
-    let rect = Rect::new(x, y, w, h);
+    Some(Chip {
+        rect: Rect::new(x, y, w, h),
+        msg: body,
+        fg,
+    })
+}
+
+fn paint_card(f: &mut Frame, chip: &Chip, bg: Color) {
     let pad = " ".repeat(PAD_X as usize);
-    let text = format!("{pad}{body}");
-    let text_row = if h > PAD_Y { PAD_Y } else { 0 };
+    let text = format!("{pad}{}", chip.msg);
+    let text_row = if chip.rect.height > PAD_Y { PAD_Y } else { 0 };
     let mut lines = Vec::new();
-    for row in 0..h {
+    for row in 0..chip.rect.height {
         if row == text_row {
             lines.push(Line::from(Span::styled(
                 text.clone(),
-                Style::default().fg(fg).bg(bg),
+                Style::default().fg(chip.fg).bg(bg),
             )));
         } else {
             lines.push(Line::from(""));
         }
     }
-    strip_paint::set_lines_on_strip(f.buffer(), rect, &lines, 0, bg);
+    strip_paint::set_lines_on_strip(f.buffer(), chip.rect, &lines, 0, bg);
 }
 
 #[cfg(test)]

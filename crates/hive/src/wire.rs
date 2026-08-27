@@ -11,7 +11,7 @@ use hive_core::config::AppConfig;
 use hive_core::provider::LlmProvider;
 use hive_core::skill::SkillSource;
 use hive_core::{
-    all_tools, new_spawner_in, Agent, AgentBuilder, CompositeSkills, DiskSkills, FollowUpSlot,
+    all_tools, new_spawner_in, AgentBuilder, CompositeSkills, DiskSkills, FollowUpSlot,
     InsideSkills,
 };
 use hive_llm::FireworksProvider;
@@ -19,62 +19,6 @@ use hive_tui::{ModelChoice, SkillChoice, TuiInit};
 
 use crate::config;
 use crate::driver;
-
-pub fn build_agent(cfg: &Arc<AppConfig>, event_tx: hive_core::EventSender) -> Agent {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-    let global_skills = config::config_dir().join("skills");
-    seed_sample_skill(&global_skills);
-    let skill_dirs = vec![global_skills, cwd.join(".hive").join("skills")];
-
-    let provider: Arc<dyn LlmProvider> = Arc::new(FireworksProvider::new(
-        cfg.provider.base_url.clone(),
-        cfg.secrets.provider_api_key.clone(),
-    ));
-    let skills: Arc<dyn SkillSource> = Arc::new(CompositeSkills::new(vec![
-        Box::new(InsideSkills),
-        Box::new(DiskSkills::load(skill_dirs)),
-    ]));
-    let tools = all_tools();
-
-    let builder = AgentBuilder {
-        provider,
-        tools,
-        skills,
-        config: cfg.clone(),
-    };
-
-    let spawner = new_spawner_in(
-        builder.clone(),
-        event_tx.clone(),
-        cfg.agents.max_concurrent,
-        cfg.agents.max_depth,
-        cwd.clone(),
-        None,
-    );
-
-    let default_model = cfg.models.default.id().to_string();
-    builder.build(event_tx, default_model, 0, spawner)
-}
-
-pub fn rebuild_agent_in(agent: &Agent, cwd: &std::path::Path) -> Option<Agent> {
-    let provider = agent.provider_clone();
-    let tools = agent.tools_clone();
-    let skills = agent.skills_clone();
-    let config = agent.config_clone();
-    let spawner = agent.spawner_clone();
-    let events = agent.events_clone();
-    let model = agent.model().to_string();
-
-    let builder = AgentBuilder {
-        provider,
-        tools,
-        skills,
-        config,
-    };
-
-    Some(builder.build_in(events, model, 0, spawner, cwd.to_path_buf()))
-}
 
 pub fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let dir = directories::BaseDirs::new()
