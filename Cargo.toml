@@ -4,7 +4,7 @@ members = ["crates/*", "lib/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.1"
+version = "0.2.5"
 license = "MIT"
 authors = ["gotlib"]
 repository = "https://github.com/xn0tdev/hive"
@@ -39,10 +39,10 @@ strip-ansi-escapes = "0.2.1"
 
 # Local path + version so `cargo publish` can resolve crates.io deps.
 # `comb-tui` on crates.io; Rust crate name stays `comb`.
-comb = { package = "comb-tui", path = "lib/comb", version = "0.2.1" }
-hive-core = { path = "crates/hive-core", version = "0.2.1" }
-hive-llm = { path = "crates/hive-llm", version = "0.2.1" }
-hive-tui = { path = "crates/hive-tui", version = "0.2.1" }
+comb = { package = "comb-tui", path = "lib/comb", version = "0.2.5" }
+hive-core = { path = "crates/hive-core", version = "0.2.5" }
+hive-llm = { path = "crates/hive-llm", version = "0.2.5" }
+hive-tui = { path = "crates/hive-tui", version = "0.2.5" }
 
 [profile.release]
 lto = "thin"
