@@ -138,12 +138,12 @@ async fn parallel_results_keep_their_original_call_ids() {
     let (events, _) = tokio::sync::mpsc::unbounded_channel();
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(DelayedParallelTool {
-            name: "verify_project",
+            name: "read_file",
             delay_ms: 30,
             output: "slow result",
         }),
         Arc::new(DelayedParallelTool {
-            name: "spawn_subagent",
+            name: "grep",
             delay_ms: 0,
             output: "fast result",
         }),
@@ -158,12 +158,12 @@ async fn parallel_results_keep_their_original_call_ids() {
     let calls = vec![
         ToolCall {
             id: "slow".into(),
-            name: "verify_project".into(),
+            name: "read_file".into(),
             arguments: "{}".into(),
         },
         ToolCall {
             id: "fast".into(),
-            name: "spawn_subagent".into(),
+            name: "grep".into(),
             arguments: "{}".into(),
         },
     ];
@@ -229,6 +229,35 @@ fn interrupted_calls_are_closed_in_history() {
     assert!(results
         .iter()
         .all(|message| message.text().contains("turn interrupted")));
+}
+
+#[test]
+fn make_hides_orchestrator_tools_multitask_shows_them() {
+    let (events, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut agent = builder().build(events, "test".into(), 0, noop_spawner());
+    let make = tool_names(&agent);
+    for name in [
+        "spawn_subagent",
+        "agent_observe",
+        "agent_message",
+        "agent_wait",
+        "agent_close",
+    ] {
+        assert!(
+            !make.iter().any(|t| t == name),
+            "{name} must not appear in MAKE"
+        );
+    }
+    agent.set_mode(AgentMode::Multitask);
+    let multi = tool_names(&agent);
+    for name in ["spawn_subagent", "agent_wait", "agent_close"] {
+        assert!(
+            multi.iter().any(|t| t == name),
+            "{name} missing from MULTITASK"
+        );
+    }
+    assert!(!multi.iter().any(|t| t == "run_shell"));
+    assert!(!multi.iter().any(|t| t == "write_file"));
 }
 
 fn tool_names(agent: &Agent) -> Vec<String> {

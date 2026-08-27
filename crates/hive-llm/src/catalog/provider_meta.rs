@@ -5,6 +5,7 @@ const KNOWN: &[(&str, &str, Option<&str>)] = &[
     ("api.fireworks.ai", "Fireworks", Some("fireworks-ai")),
     ("openrouter.ai", "OpenRouter", Some("openrouter")),
     ("api.openai.com", "OpenAI", Some("openai")),
+    ("api.anthropic.com", "Anthropic", Some("anthropic")),
     ("api.groq.com", "Groq", Some("groq")),
     ("api.deepseek.com", "DeepSeek", Some("deepseek")),
     ("api.together.xyz", "Together", Some("togetherai")),
@@ -67,6 +68,18 @@ mod tests {
         assert_eq!(
             provider_label_for_base("https://openrouter.ai/api/v1"),
             "OpenRouter"
+        );
+    }
+
+    #[test]
+    fn anthropic_label_and_hint() {
+        assert_eq!(
+            provider_label_for_base("https://api.anthropic.com/v1"),
+            "Anthropic"
+        );
+        assert_eq!(
+            models_dev_hint_for_base("https://api.anthropic.com/v1"),
+            Some("anthropic")
         );
     }
 }

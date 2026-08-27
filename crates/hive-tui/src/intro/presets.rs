@@ -38,6 +38,14 @@ pub const PRESETS: &[ProviderPreset] = &[
         is_custom: false,
     },
     ProviderPreset {
+        label: "Anthropic",
+        description: "Claude via Anthropic's OpenAI-compatible API. Paste an Anthropic key.",
+        base_url: "https://api.anthropic.com/v1",
+        api_key_env: "ANTHROPIC_API_KEY",
+        models_dev_hint: Some("anthropic"),
+        is_custom: false,
+    },
+    ProviderPreset {
         label: "Groq",
         description: "Low-latency inference for Llama, GPT-OSS, and more. Best when snappy tool loops matter.",
         base_url: "https://api.groq.com/openai/v1",
@@ -154,5 +162,20 @@ mod tests {
     #[test]
     fn custom_is_last() {
         assert!(PRESETS.last().is_some_and(|p| p.is_custom));
+    }
+
+    #[test]
+    fn anthropic_preset() {
+        let p = PRESETS
+            .iter()
+            .find(|p| p.label == "Anthropic")
+            .expect("Anthropic preset");
+        assert_eq!(p.base_url, "https://api.anthropic.com/v1");
+        assert_eq!(p.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(p.models_dev_hint, Some("anthropic"));
+        assert!(!p.is_custom);
+        let openai = PRESETS.iter().position(|p| p.label == "OpenAI").unwrap();
+        let anthropic = PRESETS.iter().position(|p| p.label == "Anthropic").unwrap();
+        assert_eq!(anthropic, openai + 1, "Anthropic sits next to OpenAI");
     }
 }

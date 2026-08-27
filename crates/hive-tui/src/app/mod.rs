@@ -276,7 +276,7 @@ pub struct App {
     pub(crate) palette: Option<PaletteState>,
     /// Centered About overlay (HIVE wordmark + version + tagline).
     pub(crate) about_open: bool,
-    /// Configure chat / sidebar overlay.
+    /// Settings overlay (chat / sidebar / tools / landing).
     pub(crate) settings: Option<SettingsState>,
     /// `/goal` overlay (editable objective + time limit).
     pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
@@ -306,7 +306,7 @@ pub struct App {
     pub(crate) quit_requested: bool,
     /// Cached relative file paths for `@` mentions (lazy).
     pub(crate) file_index: Option<Vec<String>>,
-    /// Short-lived Info toast (corner, not the chat).
+    /// Short-lived Info toast (bottom-right chip, not the chat).
     pub(crate) flash_msg: Option<(String, std::time::Instant)>,
     /// Short-lived Error toast, stacked above Info when both are up.
     pub(crate) error_flash: Option<(String, std::time::Instant)>,
@@ -417,7 +417,7 @@ pub struct App {
 
 /// How long the ctrl+c confirmation window lives.
 pub const FLASH_MS: u128 = 1500;
-/// Bottom toast lifetime (model/provider status, Ctrl+C, etc.).
+/// Toast lifetime (Copied, New chat, Ctrl+C, etc.).
 pub const TOAST_MS: u128 = 2_000;
 /// Keep the completed task state long enough to acknowledge it without
 /// leaving permanent progress chrome in the transcript/sidebar.

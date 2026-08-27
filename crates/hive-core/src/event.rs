@@ -20,7 +20,10 @@ pub enum SubagentLine {
     /// A tool the subagent invoked.
     Tool {
         name: String,
-        detail: String,
+        /// Arguments preview (kept after the tool finishes).
+        args: String,
+        /// Result summary; empty while running.
+        summary: String,
         /// `None` while running; `Some` when finished.
         ok: Option<bool>,
     },

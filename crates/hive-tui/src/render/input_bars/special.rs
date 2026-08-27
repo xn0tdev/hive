@@ -198,17 +198,28 @@ mod tests {
         });
         a.open_subagent_view("v1".into());
 
-        let (buf, cursor) =
-            render_with_cursor(Size::new(80, 24), |f| crate::render::draw(f, &mut a));
+        let size = Size::new(80, 24);
+        let (buf, cursor) = render_with_cursor(size, |f| crate::render::draw(f, &mut a));
         assert!(cursor.is_none(), "back control must not show a caret");
         assert!(a.back_hit.is_some(), "back hit target recorded");
         let text = buf.text();
         assert!(text.contains("← back"), "{text}");
         assert!(text.contains("esc"), "{text}");
+        let last = size.height - 1;
+        let mut bottom = String::new();
+        for y in last.saturating_sub(1)..=last {
+            for x in 0..size.width {
+                bottom.push(buf.get(x, y).map(|c| c.ch).unwrap_or(' '));
+            }
+        }
+        assert!(
+            !bottom.contains("128.0k") && !bottom.contains("/tmp"),
+            "no statusline under back: {bottom:?}"
+        );
     }
 
     #[test]
-    fn plan_toast_sits_in_the_transcript_corner() {
+    fn plan_toast_sits_in_the_bottom_right() {
         use hive_core::event::AgentEvent;
 
         let mut a = app();
@@ -223,8 +234,8 @@ mod tests {
         let (buf, _) = render_with_cursor(size, |f| crate::render::draw(f, &mut a));
         let last = size.height - 1;
         let text = buf.text();
-        assert!(text.contains("Info"), "kind label: {text}");
         assert!(text.contains("Ctrl+C again to quit"), "{text}");
+        assert!(!text.contains("Info"), "no kind label: {text}");
 
         // Not on the footer row — that stays clean.
         let mut footer = String::new();
@@ -236,26 +247,28 @@ mod tests {
             "toast left the last row: {footer:?}"
         );
 
-        // Find the Info line: right-aligned, no fill.
         let mut found = false;
-        for y in 0..size.height {
+        for y in (0..size.height).rev() {
             let mut row = String::new();
             for x in 0..size.width {
                 row.push(buf.get(x, y).map(|c| c.ch).unwrap_or(' '));
             }
-            if let Some(at) = row.find("Info") {
+            if let Some(at) = row.find("Ctrl+C") {
                 found = true;
                 let cell = buf.get(at as u16, y).unwrap();
-                assert_eq!(cell.style.bg, None, "no toast fill");
-                let trimmed = row.trim_end();
+                assert_eq!(cell.style.bg, Some(a.theme.strip), "filled chip: {row:?}");
                 assert!(
-                    trimmed.ends_with("quit"),
-                    "right-aligned in the column: {row:?}"
+                    at > size.width as usize / 2,
+                    "bottom-right, not the left edge: {row:?}"
+                );
+                assert!(
+                    y >= size.height / 2,
+                    "lower half, not the top: y={y} {row:?}"
                 );
                 break;
             }
         }
-        assert!(found, "Info toast row missing");
+        assert!(found, "notification missing from the bottom-right");
 
         // The InputZone (back / MARK / SEND) is raised to the chat Input height:
         // its strip band ends two rows above the bottom (same reserve as chat).

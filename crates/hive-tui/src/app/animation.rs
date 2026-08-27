@@ -7,6 +7,10 @@ impl App {
         spinner::frame(self.spinner)
     }
 
+    pub fn spinner_glyph(&self) -> char {
+        spinner::glyph(self.spinner)
+    }
+
     /// Advance clocks and retire one-shot visual state. Returns true when a
     /// final repaint is needed (for example, to erase an expired toast).
     pub fn tick(&mut self) -> bool {
@@ -141,8 +145,12 @@ impl App {
         let Some((lx, ly)) = crate::render::wordmark::hit_cell(logo, col, row) else {
             return false;
         };
-        self.logo_bonk = Some(LogoBonk::fresh(lx, ly));
-        crate::sound::play_bonk();
+        if self.ui.logo_animation {
+            self.logo_bonk = Some(LogoBonk::fresh(lx, ly));
+        }
+        if self.ui.sound {
+            crate::sound::play_bonk();
+        }
         true
     }
 
@@ -193,5 +201,53 @@ fn live_toast(slot: &Option<(String, std::time::Instant)>) -> Option<&str> {
     match slot {
         Some((msg, at)) if at.elapsed().as_millis() < TOAST_MS => Some(msg.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::wordmark;
+    use crate::TuiInit;
+    use comb::Rect;
+
+    fn app() -> App {
+        App::new(TuiInit {
+            model: "m".into(),
+            model_display: "m".into(),
+            model_choices: Vec::new(),
+            skills: Vec::new(),
+            connections: Vec::new(),
+            active_connection: String::new(),
+            cwd: "/tmp".into(),
+            theme: "gray".into(),
+            version: "0.1.0".into(),
+            ui: Default::default(),
+            context_window: 128_000,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        })
+    }
+
+    fn with_logo(app: &mut App) {
+        app.logo_hit = Some(Rect::new(0, 0, wordmark::WIDTH, wordmark::HEIGHT));
+        app.ui.sound = false;
+    }
+
+    #[test]
+    fn logo_click_ripples_when_animation_is_on() {
+        let mut a = app();
+        with_logo(&mut a);
+        assert!(a.bonk_logo_at(0, 0));
+        assert!(a.logo_bonk.is_some());
+    }
+
+    #[test]
+    fn logo_click_skips_ripple_when_animation_is_off() {
+        let mut a = app();
+        with_logo(&mut a);
+        a.ui.logo_animation = false;
+        assert!(a.bonk_logo_at(0, 0));
+        assert!(a.logo_bonk.is_none());
     }
 }

@@ -293,10 +293,18 @@ impl Agent {
     }
 }
 
-/// Tools that are safe to run concurrently — they don't mutate the session
-/// or agent state, just spawn work and return a report.
+/// Read-only tools that are safe to run concurrently.
 pub(super) fn is_parallel_tool(name: &str) -> bool {
-    matches!(name, "spawn_subagent" | "verify_project")
+    matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "glob"
+            | "grep"
+            | "web_search"
+            | "web_get_contents"
+            | "read_skill"
+    )
 }
 
 /// A short, human-friendly summary of a tool call — the one argument that
@@ -315,10 +323,8 @@ pub fn tool_args_preview(name: &str, arguments: &str) -> String {
         "terminal_read" | "terminal_write" | "terminal_stop" => s("session_id"),
         "web_search" => s("query"),
         "read_skill" => s("name"),
-        "spawn_subagent" | "spawn_swarm" => s("task").or_else(|| s("prompt")),
-        "verify_project" => s("prompt")
-            .or_else(|| s("task"))
-            .or_else(|| Some("project check".into())),
+        "spawn_subagent" => s("task").or_else(|| s("prompt")),
+        "agent_observe" | "agent_message" | "agent_wait" | "agent_close" => s("id"),
         "web_get_contents" => v
             .get("urls")
             .and_then(|u| u.as_array())

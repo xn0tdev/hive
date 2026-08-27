@@ -11,7 +11,7 @@ Hive wasn’t built as a product launch. It started as a personal agent — some
 - **Feels like a real coding agent** — plan / make / multitask, tools, subagents, skills, context compact when the window fills up.
 - **Native TUI** — fast redraws, keyboard-first, runs where you already work.
 - **Rust end-to-end** — one binary, low overhead, no Node runtime in the loop.
-- **Your providers** — OpenAI-compatible endpoints (Fireworks, OpenRouter, …). First run walks you through setup; `/connect` and `/model` later.
+- **Your providers** — OpenAI-compatible endpoints (Fireworks, OpenAI, Anthropic, OpenRouter, …). First run walks you through setup; `/connect` and `/model` later.
 - **Yours to bend** — MIT, small crates, clear seams. Fork it, patch it, keep the keys on your machine.
 
 ## Install
@@ -71,7 +71,7 @@ crates/hive-tui   → the UI you stare at
 crates/hive       → binary (package name: hive-agent)
 ```
 
-One process, streaming completions, tools in a tight loop. Multitask can fan out into git worktrees; `/compact` (and auto-compact) keeps the task while shrinking history.
+One process, streaming completions, tools in a tight loop. Multitask starts background worker jobs (hidden git worktrees, auto-merge on close). `/compact` keeps a recent tail while shrinking older history.
 
 ## License
 

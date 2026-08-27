@@ -74,9 +74,9 @@ pub fn integrate(repo: &Path, id: &str) -> Result<String, String> {
             .output();
         return Err(format!(
             "merge conflict or failure for `{branch}`:\n{stdout}\n{stderr}\n\
-The merge was rolled back and the main checkout is clean. The work is kept on \
-branch `{branch}` (worker id `{id}`) — resolve it there or in MAKE mode, then \
-retry `integrate_worktree`."
+The merge was rolled back and the main checkout is clean. The worker slot stays \
+open (id `{id}`). Message the worker to fix the overlapping files, or close with \
+discard=true."
         ));
     }
 

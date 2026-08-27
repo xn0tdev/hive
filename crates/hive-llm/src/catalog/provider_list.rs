@@ -41,9 +41,7 @@ struct ModelEntry {
 pub async fn list_provider_models(base_url: &str, api_key: &str) -> Result<Vec<RemoteModel>> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/models");
-    let resp = super::http::client()
-        .get(&url)
-        .bearer_auth(api_key)
+    let resp = crate::auth::with_auth(super::http::client().get(&url), api_key, base_url)
         .send()
         .await
         .map_err(|e| CatalogError::Http(e.to_string()))?;

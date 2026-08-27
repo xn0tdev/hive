@@ -307,6 +307,10 @@ impl Agent {
         self.vision_capable
     }
 
+    pub fn mode(&self) -> AgentMode {
+        self.mode
+    }
+
     /// Swap the LLM HTTP client (e.g. after `/connect` switches provider).
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
@@ -349,15 +353,13 @@ impl Agent {
     }
 
     fn active_tool_specs(&self) -> Vec<Arc<ToolSpec>> {
-        // Subagents always get the full MAKE tool set (no swarm fan-out, and no
-        // self mode-switching — only the top-level agent owns the session mode).
+        use super::mode::is_orchestrator_tool;
         if self.depth > 0 {
             return self
                 .tool_specs
                 .iter()
                 .filter(|t| {
-                    t.name.as_str() != "spawn_swarm"
-                        && t.name.as_str() != "integrate_worktree"
+                    !is_orchestrator_tool(&t.name)
                         && t.name.as_str() != "switch_mode"
                         && !is_terminal_tool(&t.name)
                 })
@@ -369,8 +371,7 @@ impl Agent {
                 .tool_specs
                 .iter()
                 .filter(|t| {
-                    t.name.as_str() != "spawn_swarm"
-                        && t.name.as_str() != "integrate_worktree"
+                    !is_orchestrator_tool(&t.name)
                         && (self.terminal.is_some() || !is_terminal_tool(&t.name))
                 })
                 .cloned()
@@ -432,6 +433,7 @@ impl Agent {
         if let Some(terminal) = &self.terminal {
             terminal.shutdown();
         }
+        self.spawner.shutdown();
         self.session.reset();
         self.last_prompt_tokens = 0;
         self.loop_detector = LoopDetector::default();
@@ -487,7 +489,18 @@ impl Agent {
             after: 0,
         });
 
-        let transcript = format_transcript(&self.session.messages);
+        let mut split = super::compact::tail_start(&self.session.messages);
+        if force && split <= 1 && self.session.messages.len() > 2 {
+            split = self.session.messages.len();
+        }
+        let old = &self.session.messages[1..split];
+        if old.is_empty() {
+            if force {
+                return Err("nothing to compact yet".into());
+            }
+            return Ok(());
+        }
+        let transcript = format_transcript(old);
         if transcript.trim().is_empty() {
             if force {
                 return Err("nothing to compact yet".into());
@@ -521,8 +534,9 @@ impl Agent {
         }
 
         let system = self.session.system().to_string();
+        let recent = self.session.messages[split..].to_vec();
         self.session
-            .replace_messages(compacted_messages(&system, &summary));
+            .replace_messages(compacted_messages(&system, &summary, recent));
         let after = estimate_tokens(&self.session.messages);
         self.last_prompt_tokens = after;
 
@@ -553,20 +567,32 @@ impl Agent {
         push_user_input(&mut self.session, input);
 
         let mut final_text = String::new();
+        let mut rounds: u64 = 0;
+        let max_rounds = if self.depth == 0 {
+            self.config.agent.max_turns
+        } else {
+            self.config.agent.max_turns_subagent
+        };
 
         loop {
+            rounds += 1;
+            if max_rounds > 0 && rounds > max_rounds {
+                self.emit(AgentEvent::Notice(format!(
+                    "Stopped after {max_rounds} tool rounds."
+                )));
+                break;
+            }
+
             if interrupt.load(Ordering::Relaxed) {
                 self.emit(AgentEvent::Notice("Interrupted.".to_string()));
                 break;
             }
 
             // Mid-turn safe point: tool results (if any) are already in history.
-            if self.depth == 0 {
-                if let Some(fu) = take_follow_up(&follow_up) {
-                    push_user_input(&mut self.session, fu);
-                }
-                self.maybe_auto_compact().await;
+            if let Some(fu) = take_follow_up(&follow_up) {
+                push_user_input(&mut self.session, fu);
             }
+            self.maybe_auto_compact().await;
 
             let tools = self.active_tool_specs();
             let req = ChatRequest {
@@ -628,19 +654,16 @@ impl Agent {
                 if assistant_text.trim().is_empty() {
                     break;
                 }
-                // Final reply — but a double-Enter follow-up means continue.
-                if self.depth == 0 {
-                    if let Some(fu) = take_follow_up(&follow_up) {
-                        push_user_input(&mut self.session, fu);
-                        continue;
-                    }
+                // Final reply — but a follow-up means continue.
+                if let Some(fu) = take_follow_up(&follow_up) {
+                    push_user_input(&mut self.session, fu);
+                    continue;
                 }
                 break;
             }
 
-            // Delegate tools (spawn_subagent, verify_project) run concurrently
-            // when the model returns several in one batch; everything else stays
-            // sequential so side-effects (mode switch, file writes) stay ordered.
+            // Delegate tools that only spawn work stay concurrent; read-only
+            // file/search/web calls run together. Writes and shell stay ordered.
             let mut i = 0;
             let mut loop_redirects = Vec::new();
             while i < tool_calls.len() {
@@ -702,10 +725,8 @@ impl Agent {
         }
 
         // Don't drop a staged follow-up if we exited on interrupt/error.
-        if self.depth == 0 {
-            if let Some(fu) = take_follow_up(&follow_up) {
-                push_user_input(&mut self.session, fu);
-            }
+        if let Some(fu) = take_follow_up(&follow_up) {
+            push_user_input(&mut self.session, fu);
         }
 
         if interrupt.load(Ordering::Relaxed) {

@@ -130,7 +130,10 @@ pub(super) fn clean_selected_text(text: &str) -> String {
 
 /// Tools whose activity belongs in a Subagent transcript card, not a tool row.
 pub(super) fn is_subagent_tool(name: &str) -> bool {
-    matches!(name, "verify_project" | "spawn_subagent" | "spawn_swarm")
+    matches!(
+        name,
+        "spawn_subagent" | "agent_observe" | "agent_message" | "agent_wait" | "agent_close"
+    )
 }
 
 pub(super) fn is_plan_write(name: &str, args_preview: &str) -> bool {

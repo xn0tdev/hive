@@ -220,8 +220,11 @@ fn tool_verb(name: &str, running: bool) -> (&'static str, bool) {
             },
             false,
         ),
-        "spawn_subagent" | "spawn_swarm" => (if running { "Spawning" } else { "Spawned" }, false),
-        "verify_project" => (if running { "Checking" } else { "Checked" }, false),
+        "spawn_subagent" => (if running { "Spawning" } else { "Spawned" }, false),
+        "agent_observe" => (if running { "Observing" } else { "Observed" }, false),
+        "agent_message" => (if running { "Messaging" } else { "Messaged" }, false),
+        "agent_wait" => (if running { "Waiting" } else { "Waited" }, false),
+        "agent_close" => (if running { "Closing" } else { "Closed" }, false),
         _ => (if running { "Running" } else { "Ran" }, false),
     }
 }

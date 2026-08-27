@@ -110,6 +110,14 @@ pub fn plan_mode_check(name: &str, path: Option<&str>, cwd: &Path) -> Result<(),
     Ok(())
 }
 
+/// Job-control tools — MULTITASK parent only.
+pub fn is_orchestrator_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_subagent" | "agent_observe" | "agent_message" | "agent_wait" | "agent_close"
+    )
+}
+
 /// Tools the orchestrator may call in MULTITASK mode (no project edits/shell).
 pub fn multitask_mode_tool_allowed(name: &str) -> bool {
     matches!(
@@ -122,8 +130,10 @@ pub fn multitask_mode_tool_allowed(name: &str) -> bool {
             | "web_get_contents"
             | "read_skill"
             | "spawn_subagent"
-            | "spawn_swarm"
-            | "integrate_worktree"
+            | "agent_observe"
+            | "agent_message"
+            | "agent_wait"
+            | "agent_close"
             | "switch_mode"
     )
 }
@@ -249,9 +259,11 @@ mod tests {
         assert!(multitask_mode_check("write_file").is_err());
         assert!(multitask_mode_check("edit_file").is_err());
         assert!(multitask_mode_check("verify_project").is_err());
-        assert!(multitask_mode_check("spawn_swarm").is_ok());
+        assert!(multitask_mode_check("spawn_swarm").is_err());
         assert!(multitask_mode_check("spawn_subagent").is_ok());
-        assert!(multitask_mode_check("integrate_worktree").is_ok());
+        assert!(multitask_mode_check("agent_observe").is_ok());
+        assert!(multitask_mode_check("agent_close").is_ok());
+        assert!(multitask_mode_check("integrate_worktree").is_err());
         assert!(multitask_mode_check("read_file").is_ok());
     }
 

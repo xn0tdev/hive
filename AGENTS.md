@@ -6,7 +6,7 @@ Notes for humans and agents working on this repo.
 
 | What | Name |
 |------|------|
-| GitHub repo | `xn0tdev/hive` |
+| GitHub repo | `sqweeet/hive` |
 | crates.io binary package | **`hive-agent`** (`hive` is taken) |
 | Installed command | **`hive`** (`[[bin]] name = "hive"`) |
 | TUI engine (crates.io) | **`comb-tui`** (`use comb::`) — separate repo `xn0tdev/comb` |

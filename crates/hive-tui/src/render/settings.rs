@@ -1,8 +1,9 @@
-//! Settings overlay: one list with Chat / Sidebar / Tools sections.
+//! Settings overlay: one open list, grouped into Chat / Sidebar / Tools.
+//! Headers are labels only — no tabs, no nested pages.
 
 #[cfg(test)]
 use comb::ModalLayout;
-use comb::{Buffer, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Line, Rect, Span, Style};
 
 use crate::app::settings::{SettingsItem, SettingsRow, ROWS};
 use crate::app::App;
@@ -41,44 +42,34 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App) {
                 );
             }
             SettingsRow::Header(label) => {
-                let line = Line::from(Span::styled(
-                    (*label).to_string(),
-                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
-                ));
-                crate::render::strip_paint::set_line_on_strip(
+                crate::render::strip_paint::section_header(
                     buf,
                     g.content.x,
                     y,
-                    &line,
                     g.content.width,
+                    label,
+                    theme,
                     panel,
                 );
             }
             SettingsRow::Item(item) => {
                 let sel = i == st.selected;
                 let bg = if sel { theme.sel_bg } else { panel };
-                let fg = if sel { theme.sel_fg } else { theme.fg };
-                let dim = if sel { theme.sel_fg } else { theme.dim };
-                let mark = if sel { "› " } else { "  " };
+                let name_fg = if sel { theme.sel_fg } else { theme.fg };
+                let value_fg = if sel { theme.sel_fg } else { theme.dim };
                 let (label, value) = item_cells(*item, app);
-                let left = format!("{mark}{label}");
-                let gap = g
-                    .content
-                    .width
-                    .saturating_sub(left.chars().count() as u16)
-                    .saturating_sub(value.chars().count() as u16);
-                let mut style_left = Style::default().fg(fg);
-                if sel {
-                    style_left = style_left.add(Modifier::BOLD);
-                }
+                let avail = g.content.width as usize;
+                let gap = avail
+                    .saturating_sub(label.chars().count())
+                    .saturating_sub(value.chars().count());
                 crate::render::strip_paint::set_line_on_strip(
                     buf,
                     g.content.x,
                     y,
                     &Line::from(vec![
-                        Span::styled(left, style_left),
-                        Span::styled(" ".repeat(gap as usize), Style::default()),
-                        Span::styled(value, Style::default().fg(dim)),
+                        Span::styled(label, Style::default().fg(name_fg).bg(bg)),
+                        Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+                        Span::styled(value, Style::default().fg(value_fg).bg(bg)),
                     ]),
                     g.content.width,
                     bg,
@@ -110,6 +101,8 @@ fn item_cells(item: SettingsItem, app: &App) -> (String, String) {
         SettingsItem::SidebarWidth => ("Width".into(), format!("{} cols", app.ui.sidebar_width)),
         SettingsItem::ShowToolCards => ("Completed tools".into(), on_off(app.ui.show_tool_cards)),
         SettingsItem::ToolRevert => ("Revert file".into(), on_off(app.ui.tool_revert)),
+        SettingsItem::LogoAnimation => ("Logo animation".into(), on_off(app.ui.logo_animation)),
+        SettingsItem::Sound => ("Sound".into(), on_off(app.ui.sound)),
     }
 }
 
@@ -124,9 +117,10 @@ fn on_off(v: bool) -> String {
 fn overlay() -> Panel<'static> {
     Panel::new(
         "Settings",
-        "enter toggle  ·  esc",
+        "esc",
         PAD_Y * 2 + CHROME_ROWS + ROWS.len() as u16,
     )
+    .width_ratio(1, 2)
     .width_bounds(MIN_W, MAX_W)
     .padding(PAD_X, PAD_Y)
 }
@@ -168,15 +162,33 @@ mod tests {
     }
 
     #[test]
-    fn one_screen_lists_every_category() {
+    fn open_list_groups_chat_sidebar_and_tools() {
         let mut a = app();
         a.open_settings();
         let shown = text(&mut a);
         assert!(shown.contains("Chat"), "{shown}");
         assert!(shown.contains("Sidebar"), "{shown}");
         assert!(shown.contains("Tools"), "{shown}");
+        assert!(shown.contains("Landing"), "{shown}");
         assert!(shown.contains("Always show thoughts"), "{shown}");
+        assert!(shown.contains("Collapse sections"), "{shown}");
         assert!(shown.contains("Revert file"), "{shown}");
+        assert!(shown.contains("Logo animation"), "{shown}");
+        assert!(shown.contains("Sound"), "{shown}");
+        assert!(!shown.contains("enter toggle"), "no button chrome: {shown}");
+        assert!(
+            !shown.contains('›'),
+            "selection is the highlight bar: {shown}"
+        );
+
+        let chat = shown.find("Chat").expect("Chat");
+        let sidebar = shown.find("Sidebar").expect("Sidebar");
+        let tools = shown.find("Tools").expect("Tools");
+        let landing = shown.find("Landing").expect("Landing");
+        assert!(
+            chat < sidebar && sidebar < tools && tools < landing,
+            "groups top to bottom: {shown}"
+        );
     }
 
     #[test]

@@ -6,8 +6,14 @@ use hive_core::event::SubagentStatus;
 
 use crate::app::state::SubagentCard;
 use crate::app::App;
+use crate::render::spinner;
 use crate::render::tools::strip::{soft_bg_line, soft_bg_pad};
 use crate::render::tools::tool_card::format_tool_secs;
+
+/// Rows: pad, title (spinner), status, pad.
+pub(crate) const TITLE_ROW: usize = 1;
+/// Display column of the running spinner on the title row (`"  {icon} …"`).
+pub(crate) const SPINNER_COL: u16 = 2;
 
 /// Flat subagent card in the main transcript: title + duration, status under.
 /// Click navigates into the dedicated subagent chat view (not inline expand).
@@ -26,7 +32,9 @@ pub(crate) fn subagent_card_lines(
         theme.strip
     };
     let (icon, icon_fg) = match card.status {
-        SubagentStatus::Running => (app.spinner_char().to_string(), theme.accent),
+        // Placeholder only — `paint_running_subagent_spinners` writes the live
+        // frame over this cell so 10 FPS ticks do not rebuild the transcript.
+        SubagentStatus::Running => (spinner::PLACEHOLDER.to_string(), theme.accent),
         SubagentStatus::Done => ("✓".to_string(), theme.ok),
         SubagentStatus::Failed => ("✗".to_string(), theme.err),
     };

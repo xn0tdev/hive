@@ -55,15 +55,16 @@ api_key_env = "PERPLEXITY_API_KEY"
 base_url = "https://api.perplexity.ai"
 model = "sonar"
 
-[swarm]
-# Keep the default bounded; raise it only when the machine and provider can
-# handle the extra parallel processes and requests.
-max_concurrent = 8
-max_depth = 2
+[agents]
+# Occupied job slots (running + finished until closed). Hard cap is 6.
+max_concurrent = 3
+max_depth = 1
 
 [agent]
 context_window = 256000
 workspace_only = true
+max_turns = 80
+max_turns_subagent = 40
 
 [ui]
 theme = "gray"
@@ -412,9 +413,9 @@ api_key_env = "PERPLEXITY_API_KEY"
 {pplx_key}base_url = "https://api.perplexity.ai"
 model = "sonar"
 
-[swarm]
-max_concurrent = 200
-max_depth = 2
+[agents]
+max_concurrent = 3
+max_depth = 1
 
 [ui]
 theme = "gray"
@@ -500,6 +501,11 @@ fn apply_ui_fields(
         "show_tool_cards".into(),
         toml::Value::Boolean(ui.show_tool_cards),
     );
+    ui_table.insert(
+        "logo_animation".into(),
+        toml::Value::Boolean(ui.logo_animation),
+    );
+    ui_table.insert("sound".into(), toml::Value::Boolean(ui.sound));
 }
 
 pub fn patch_ui(ui: &hive_core::config::UiConfig) -> Result<()> {
@@ -940,6 +946,8 @@ mod tests {
             show_work_summary: false,
             tool_revert: false,
             show_tool_cards: false,
+            logo_animation: false,
+            sound: false,
         };
 
         let mut table = toml::map::Map::new();
@@ -954,6 +962,8 @@ mod tests {
         assert!(!round.show_work_summary, "work summary must persist");
         assert!(!round.tool_revert, "revert toggle must persist");
         assert!(!round.show_tool_cards, "completed tools must persist");
+        assert!(!round.logo_animation, "logo animation must persist");
+        assert!(!round.sound, "sound must persist");
     }
 
     #[test]

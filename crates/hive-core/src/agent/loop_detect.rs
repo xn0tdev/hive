@@ -1,9 +1,13 @@
-//! Loop detection: catches when the agent repeats the same tool call
-//! (same name + same arguments) too many times in a row, signalling it is
-//! stuck. The turn loop uses this to inject a redirect, compact, or give up.
+//! Loop detection: consecutive identical calls, or the same call dominating
+//! a recent window (A→B→A→B still trips).
+
+use std::collections::VecDeque;
 
 /// Number of identical consecutive tool calls that triggers a loop.
 pub const LOOP_THRESHOLD: usize = 10;
+/// Same (name, args) this many times inside the recent window also triggers.
+pub const WINDOW_THRESHOLD: usize = 4;
+const WINDOW_SIZE: usize = 16;
 const MAX_REDIRECT_ARGS_CHARS: usize = 240;
 
 /// Tracks recent tool calls to detect repetition.
@@ -13,11 +17,11 @@ pub struct LoopDetector {
     last: Option<(String, String)>,
     /// How many times that exact call has repeated consecutively.
     streak: usize,
+    recent: VecDeque<(String, String)>,
 }
 
 impl LoopDetector {
-    /// Record a tool call. Returns `true` if this completes a loop (the streak
-    /// just reached [`LOOP_THRESHOLD`]).
+    /// Record a tool call. Returns `true` if this completes a loop.
     pub fn record(&mut self, name: &str, arguments: &str) -> bool {
         let key = (name.to_string(), arguments.to_string());
         match &self.last {
@@ -25,29 +29,33 @@ impl LoopDetector {
                 self.streak += 1;
             }
             _ => {
-                self.last = Some(key);
+                self.last = Some(key.clone());
                 self.streak = 1;
             }
         }
-        self.streak >= LOOP_THRESHOLD
+        self.recent.push_back(key.clone());
+        while self.recent.len() > WINDOW_SIZE {
+            self.recent.pop_front();
+        }
+        let window_hits = self.recent.iter().filter(|k| **k == key).count();
+        self.streak >= LOOP_THRESHOLD || window_hits >= WINDOW_THRESHOLD
     }
 
     /// Reset the streak (call this after a redirect so the detector starts fresh).
     pub fn reset_streak(&mut self) {
         self.last = None;
         self.streak = 0;
+        self.recent.clear();
     }
 }
 
 /// The redirect message injected into the conversation when a loop is detected.
-/// Short and direct — tells the agent what happened and to try a different approach.
 pub fn redirect_message(tool: &str, args: &str) -> String {
     let args = truncate_args(args);
     format!(
-        "You are stuck: `{tool}` called {n} times with the same arguments ({args}). \
+        "You are stuck: `{tool}` called with the same arguments ({args}) too many times. \
 Stop repeating it. Re-read the situation and try a different approach. \
 If you cannot proceed, explain the blocker.",
-        n = LOOP_THRESHOLD,
     )
 }
 
@@ -67,11 +75,19 @@ mod tests {
     #[test]
     fn detects_repeated_calls() {
         let mut d = LoopDetector::default();
-        // 9 repeats don't trigger.
-        for _ in 0..9 {
+        for _ in 0..3 {
             assert!(!d.record("read_file", r#"{"path":"a.rs"}"#));
         }
-        // 10th identical call triggers.
+        assert!(d.record("read_file", r#"{"path":"a.rs"}"#));
+    }
+
+    #[test]
+    fn window_catches_alternating_repeats() {
+        let mut d = LoopDetector::default();
+        for _ in 0..3 {
+            assert!(!d.record("read_file", r#"{"path":"a.rs"}"#));
+            assert!(!d.record("read_file", r#"{"path":"b.rs"}"#));
+        }
         assert!(d.record("read_file", r#"{"path":"a.rs"}"#));
     }
 
@@ -80,7 +96,6 @@ mod tests {
         let mut d = LoopDetector::default();
         d.record("read_file", r#"{"path":"a.rs"}"#);
         d.record("read_file", r#"{"path":"a.rs"}"#);
-        // Different args → streak resets.
         assert!(!d.record("read_file", r#"{"path":"b.rs"}"#));
         assert_eq!(d.streak, 1);
     }
@@ -99,7 +114,6 @@ mod tests {
         let msg = redirect_message("read_file", r#"{"path":"a.rs"}"#);
         assert!(msg.contains("read_file"), "{msg}");
         assert!(msg.contains("different approach"), "{msg}");
-        assert!(msg.contains("10"), "{msg}");
     }
 
     #[test]

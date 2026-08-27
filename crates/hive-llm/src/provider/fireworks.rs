@@ -80,7 +80,8 @@ impl FireworksProvider {
         req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
-        let body = build_request(&req);
+        let mut body = build_request(&req);
+        body.max_tokens = crate::auth::default_max_tokens(&self.base_url, body.max_tokens);
         let resp = self.post(&body).await?;
         let mut stream = resp.bytes_stream().eventsource();
         let mut acc = Accumulator::new();
@@ -139,14 +140,15 @@ impl FireworksProvider {
     }
 
     async fn post<T: serde::Serialize + ?Sized>(&self, body: &T) -> Result<reqwest::Response> {
-        let resp = self
-            .client
-            .post(self.endpoint())
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
-            .await
-            .map_err(|error| CoreError::Http(error.to_string()))?;
+        let resp = crate::auth::with_auth(
+            self.client.post(self.endpoint()),
+            &self.api_key,
+            &self.base_url,
+        )
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| CoreError::Http(error.to_string()))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -187,6 +189,7 @@ mod tests {
         for base_url in [
             "https://api.fireworks.ai/inference/v1",
             "https://openrouter.ai/api/v1",
+            "https://api.anthropic.com/v1",
             "http://localhost:11434/v1",
             "https://api.openai.com.example.test/v1",
         ] {

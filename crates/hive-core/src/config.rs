@@ -167,19 +167,30 @@ impl Default for PerplexityConfig {
     }
 }
 
+/// Hard ceiling on occupied subagent slots (running or finished-not-closed).
+pub const MAX_AGENT_SLOTS: usize = 6;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct SwarmConfig {
+pub struct AgentsConfig {
+    /// Occupied job slots (running + finished until `agent_close`). Capped at [`MAX_AGENT_SLOTS`].
     pub max_concurrent: usize,
+    /// Nested spawn depth. Workers are depth 1 and cannot spawn further when this is 1.
     pub max_depth: usize,
 }
 
-impl Default for SwarmConfig {
+impl Default for AgentsConfig {
     fn default() -> Self {
-        SwarmConfig {
-            max_concurrent: 8,
-            max_depth: 2,
+        AgentsConfig {
+            max_concurrent: 3,
+            max_depth: 1,
         }
+    }
+}
+
+impl AgentsConfig {
+    pub fn slot_limit(&self) -> usize {
+        self.max_concurrent.clamp(1, MAX_AGENT_SLOTS)
     }
 }
 
@@ -252,6 +263,12 @@ pub struct UiConfig {
     /// tools stay visible even when this is off.
     #[serde(default = "default_true")]
     pub show_tool_cards: bool,
+    /// Ripple on the landing HIVE wordmark when you click it.
+    #[serde(default = "default_true")]
+    pub logo_animation: bool,
+    /// Play the click sample with the logo bonk.
+    #[serde(default = "default_true")]
+    pub sound: bool,
 }
 
 fn default_true() -> bool {
@@ -274,6 +291,8 @@ impl Default for UiConfig {
             show_work_summary: true,
             tool_revert: true,
             show_tool_cards: true,
+            logo_animation: true,
+            sound: true,
         }
     }
 }
@@ -326,6 +345,20 @@ pub struct AgentConfig {
     /// explicit; it is not a substitute for an OS-level shell sandbox.
     #[serde(default = "default_true")]
     pub workspace_only: bool,
+    /// Max model rounds per user turn (0 = unlimited). Stops a runaway tool loop.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u64,
+    /// Max model rounds for a subagent job (0 = unlimited).
+    #[serde(default = "default_max_turns_subagent")]
+    pub max_turns_subagent: u64,
+}
+
+fn default_max_turns() -> u64 {
+    80
+}
+
+fn default_max_turns_subagent() -> u64 {
+    40
 }
 
 impl Default for AgentConfig {
@@ -333,6 +366,8 @@ impl Default for AgentConfig {
         AgentConfig {
             context_window: DEFAULT_CONTEXT_WINDOW,
             workspace_only: true,
+            max_turns: default_max_turns(),
+            max_turns_subagent: default_max_turns_subagent(),
         }
     }
 }
@@ -345,7 +380,9 @@ pub struct AppConfig {
     pub search: SearchConfig,
     pub exa: ExaConfig,
     pub perplexity: PerplexityConfig,
-    pub swarm: SwarmConfig,
+    /// Subagent job slots. TOML `[agents]` or legacy `[swarm]`.
+    #[serde(default, alias = "swarm")]
+    pub agents: AgentsConfig,
     pub ui: UiConfig,
     /// Agent loop settings (context window / compact).
     #[serde(default)]

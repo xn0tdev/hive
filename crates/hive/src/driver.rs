@@ -14,7 +14,8 @@ use hive_core::config::{AppConfig, ModelRef, ModelRole};
 use hive_core::event::{AgentEvent, CatalogModel, EventSender};
 use hive_core::message::Message;
 use hive_core::provider::{ChatRequest, Delta, LlmProvider};
-use hive_core::{Agent, FollowUpSlot, TerminalHandle, UserInput};
+use hive_core::spawner::JobWake;
+use hive_core::{Agent, AgentMode, FollowUpSlot, TerminalHandle, UserInput};
 use hive_llm::catalog::{
     enrich_models, fetch_models_dev, list_provider_models, merge_catalog_models,
     models_dev_hint_for_base, provider_label_for_base, ModelCard,
@@ -31,6 +32,7 @@ pub struct DriverShared {
     pub interrupt: Arc<AtomicBool>,
     pub follow_up: FollowUpSlot,
     pub session_id: SessionSlot,
+    pub job_rx: UnboundedReceiver<JobWake>,
 }
 
 pub async fn run(
@@ -48,18 +50,36 @@ pub async fn run(
         interrupt,
         follow_up,
         session_id: session_slot,
+        mut job_rx,
     } = shared;
     let mut pending = VecDeque::new();
     let mut session: Option<ActiveSession> = None;
     // Autosave failures repeat every turn; say it once instead of nagging.
     let mut autosave_warned = false;
+    let mut jobs_open = true;
     'commands: loop {
         let cmd = match pending.pop_front() {
             Some(command) => command,
-            None => match input_rx.recv().await {
-                Some(command) => command,
-                None => break,
-            },
+            None => {
+                tokio::select! {
+                    cmd = input_rx.recv() => match cmd {
+                        Some(command) => command,
+                        None => break,
+                    },
+                    wake = job_rx.recv(), if jobs_open => match wake {
+                        Some(w) if agent.mode() == AgentMode::Multitask => InputCommand::User {
+                            text: format!("Subagent `{}` finished.\n{}", w.id, w.summary),
+                            images: Vec::new(),
+                            mode: AgentMode::Multitask,
+                        },
+                        Some(_) => continue,
+                        None => {
+                            jobs_open = false;
+                            continue;
+                        }
+                    },
+                }
+            }
         };
         let cmd = match handle_terminal_command(cmd, &terminal, &events).await {
             Ok(()) => continue,
@@ -90,6 +110,9 @@ pub async fn run(
                 {
                     break 'commands;
                 }
+                // Wakes that arrived during this turn were for the parent to
+                // handle via agent_wait. Drop them so we don't start a twin turn.
+                while job_rx.try_recv().is_ok() {}
                 // Auto-save after each turn so a crash never loses a transcript.
                 autosave(
                     &agent,

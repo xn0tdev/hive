@@ -47,9 +47,10 @@ pub fn build_agent(cfg: &Arc<AppConfig>, event_tx: hive_core::EventSender) -> Ag
     let spawner = new_spawner_in(
         builder.clone(),
         event_tx.clone(),
-        cfg.swarm.max_concurrent,
-        cfg.swarm.max_depth,
+        cfg.agents.max_concurrent,
+        cfg.agents.max_depth,
         cwd.clone(),
+        None,
     );
 
     let default_model = cfg.models.default.id().to_string();
@@ -154,12 +155,14 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         config: cfg.clone(),
     };
 
+    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
     let spawner = new_spawner_in(
         builder.clone(),
         event_tx.clone(),
-        cfg.swarm.max_concurrent,
-        cfg.swarm.max_depth,
+        cfg.agents.max_concurrent,
+        cfg.agents.max_depth,
         cwd.clone(),
+        Some(job_tx),
     );
 
     let default_model = cfg.models.default.id().to_string();
@@ -253,6 +256,7 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         interrupt: interrupt.clone(),
         follow_up: follow_up.clone(),
         session_id: session_id.clone(),
+        job_rx,
     };
     let driver_cfg = cfg.clone();
     let driver_events = event_tx.clone();

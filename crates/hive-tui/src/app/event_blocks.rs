@@ -399,10 +399,10 @@ impl App {
                     }
                     SubagentLine::Tool {
                         name,
-                        detail,
+                        args,
+                        summary,
                         ok: Some(ok),
                     } => {
-                        // Prefer updating the matching in-flight tool row.
                         let open = card.lines.iter_mut().rev().find(|l| {
                             matches!(
                                 l,
@@ -410,19 +410,24 @@ impl App {
                             )
                         });
                         if let Some(SubagentLine::Tool {
-                            detail: d,
+                            args: a,
+                            summary: s,
                             ok: running,
                             ..
                         }) = open
                         {
-                            if !detail.is_empty() {
-                                *d = detail;
+                            if a.is_empty() && !args.is_empty() {
+                                *a = args;
+                            }
+                            if !summary.is_empty() {
+                                *s = summary;
                             }
                             *running = Some(ok);
                         } else {
                             card.lines.push(SubagentLine::Tool {
                                 name,
-                                detail,
+                                args,
+                                summary,
                                 ok: Some(ok),
                             });
                         }

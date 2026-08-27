@@ -224,7 +224,7 @@ fn draw_modes(buf: &mut Buffer, area: Rect, theme: &Theme, bg: Color) -> Option<
     );
     y += 1;
     for line in wrap(
-        "Orchestrator — splits work into parallel subagents in git worktrees, then merges.",
+        "Orchestrator — starts background workers, watches their tools, messages them, closes slots.",
         area.width as usize,
     ) {
         put(

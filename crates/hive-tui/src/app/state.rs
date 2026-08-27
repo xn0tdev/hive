@@ -217,7 +217,7 @@ impl Thought {
     }
 }
 
-/// Inline transcript card for a subagent (e.g. `verify_project`).
+/// Inline transcript card for a subagent job.
 /// Flat like a Thought row — no bordered panel. Click opens a dedicated chat view.
 #[derive(Clone)]
 pub struct SubagentCard {
@@ -249,7 +249,7 @@ impl SubagentCard {
             return self.detail.as_str();
         }
         match self.status {
-            SubagentStatus::Running => "cargo check · review",
+            SubagentStatus::Running => "working",
             SubagentStatus::Done => "done",
             SubagentStatus::Failed => "failed",
         }
@@ -285,6 +285,8 @@ pub struct AssistantResponseRow {
     pub block: usize,
     pub response_row: usize,
     pub text: String,
+    /// Screen columns from the transcript origin to the selectable text.
+    pub x_off: u16,
     pub join_before: AssistantRowJoin,
 }
 
@@ -467,7 +469,7 @@ pub enum Block {
     Tool(ToolCard),
     /// Persistent interactive terminal session.
     Terminal(Box<TerminalCard>),
-    /// Subagent status + expandable conversation (verify_project, etc.).
+    /// Subagent status + expandable conversation.
     Subagent(SubagentCard),
     /// Workspace plan card (`.hive/Plan.md`).
     Plan(PlanCard),

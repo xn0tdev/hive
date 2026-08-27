@@ -31,6 +31,17 @@ pub fn layout_plan_body(body: &str, width: usize, theme: &Theme) -> (Vec<Line>, 
                 start: line_start,
                 end: line_start,
             });
+        } else if let Some((title_off, title)) = strip_atx_heading(text) {
+            let style = Style::default().fg(theme.heading).add(Modifier::BOLD);
+            for (rel, seg) in wrap_segments(title, content_w) {
+                let abs_start = line_start + title_off + rel;
+                let abs_end = abs_start + seg.len();
+                lines.push(Line::from(vec![Span::raw("  "), Span::styled(seg, style)]));
+                spans.push(PlanRowSpan {
+                    start: abs_start,
+                    end: abs_end,
+                });
+            }
         } else {
             let style = line_style(text, theme);
             for (rel, seg) in wrap_segments(text, content_w) {
@@ -60,13 +71,27 @@ pub fn layout_plan_body(body: &str, width: usize, theme: &Theme) -> (Vec<Line>, 
 
 fn line_style(text: &str, theme: &Theme) -> Style {
     let t = text.trim_start();
-    if t.starts_with('#') {
-        Style::default().fg(theme.heading).add(Modifier::BOLD)
-    } else if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
+    if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") {
         Style::default().fg(theme.fg)
     } else {
         Style::default().fg(theme.dim)
     }
+}
+
+/// ATX heading → (byte offset of the title in `text`, title slice).
+fn strip_atx_heading(text: &str) -> Option<(usize, &str)> {
+    let rest = text.trim_start();
+    let lead = text.len() - rest.len();
+    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let after = &rest[hashes..];
+    let title = after.trim_start_matches([' ', '\t']);
+    if title.is_empty() {
+        return None;
+    }
+    Some((lead + hashes + (after.len() - title.len()), title))
 }
 
 /// Wrap `text` into display-width chunks; each entry is `(byte_offset_in_text, chunk)`.
@@ -276,6 +301,25 @@ mod tests {
         let (lines, spans) = layout_plan_body("", 40, &theme);
         assert_eq!(lines.len(), 1);
         assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn headings_drop_hash_markers() {
+        let theme = Theme::gray();
+        let (lines, _) = layout_plan_body("# Plan\n\n## Ship it\n", 40, &theme);
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Plan"), "{text}");
+        assert!(text.contains("Ship it"), "{text}");
+        assert!(!text.contains('#'), "no ATX markers in the preview: {text}");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::app::{App, MdRows};
 use crate::render::tools::{
     compacted_card_lines, format_tool_secs, goal_card_lines, loop_detected_card_lines,
     mode_switch_card_lines, plan_card_lines, subagent_card_lines, terminal_card_lines,
-    todo_card_lines, tool_lines, work_summary_card_lines,
+    todo_card_lines, tool_lines, work_summary_card_lines, SPINNER_COL, TITLE_ROW,
 };
 use crate::render::{markdown, wrap};
 
@@ -22,6 +22,8 @@ struct BuiltAssistantRow {
     block: usize,
     response_row: usize,
     text: String,
+    /// Screen columns from the transcript origin to the selectable text.
+    x_off: u16,
     join_before: AssistantRowJoin,
 }
 
@@ -100,6 +102,7 @@ impl From<BuiltAssistantRow> for AssistantResponseRow {
             block: row.block,
             response_row: row.response_row,
             text: row.text,
+            x_off: row.x_off,
             join_before: row.join_before,
         }
     }
@@ -155,7 +158,7 @@ fn draw_layout(
                 block: row.block,
                 response_row: row.response_row,
                 screen_row: target.y + (row.line_idx - scroll) as u16,
-                x: target.x.saturating_add(2),
+                x: target.x.saturating_add(row.x_off),
                 text: row.text.clone(),
                 join_before: row.join_before,
             });
@@ -164,21 +167,32 @@ fn draw_layout(
 
     buf.set_lines(target, lines, scroll);
     paint_live_thought_shimmer(buf, app, heads, scroll, target);
+    paint_running_subagent_spinners(buf, app, heads, scroll, target);
     paint_assistant_selection(buf, app);
     app.transcript_hit = Some(target);
 }
 
-fn assistant_line_text(line: &Line) -> String {
+fn assistant_line_meta(line: &Line) -> (u16, String) {
     let rendered: String = line
         .spans
         .iter()
         .map(|span| span.content.as_str())
         .collect();
-    rendered
+    let rest = rendered
         .strip_prefix("  ")
         .or_else(|| rendered.strip_prefix("│ "))
-        .unwrap_or(rendered.as_str())
-        .to_string()
+        .unwrap_or(rendered.as_str());
+    if markdown::code_line_marker(line).is_some() {
+        if let Some(inner) = rest.strip_prefix("│ ") {
+            let inner = inner
+                .strip_suffix(" │")
+                .or_else(|| inner.strip_suffix('│'))
+                .unwrap_or(inner);
+            return (4, inner.trim_end().to_string());
+        }
+        return (2, rest.trim_end().to_string());
+    }
+    (2, rest.trim_end().to_string())
 }
 
 fn paint_assistant_selection(buf: &mut Buffer, app: &App) {
@@ -231,6 +245,40 @@ fn paint_live_thought_shimmer(
         let spans = shimmer_spans(label, app.spinner, &app.theme);
         let w = label.chars().count() as u16;
         buf.set_line(x, y, &Line::from(spans), w);
+    }
+}
+
+/// Overlay the live braille frame on running subagent cards without rebuilding
+/// the transcript cache. Duration labels still refresh on the 1s epoch.
+fn paint_running_subagent_spinners(
+    buf: &mut Buffer,
+    app: &App,
+    heads: &[(usize, usize)],
+    scroll: usize,
+    target: Rect,
+) {
+    let view_end = scroll + target.height as usize;
+    let ch = app.spinner_glyph();
+    let style = Style::default().fg(app.theme.accent);
+    let mut painted = Vec::new();
+    for &(line_idx, block_idx) in heads {
+        if painted.contains(&block_idx) {
+            continue;
+        }
+        let Some(UiBlock::Subagent(card)) = app.blocks.get(block_idx) else {
+            continue;
+        };
+        if card.status != SubagentStatus::Running {
+            continue;
+        }
+        painted.push(block_idx);
+        let title_idx = line_idx.saturating_add(TITLE_ROW);
+        if title_idx < scroll || title_idx >= view_end {
+            continue;
+        }
+        let y = target.y + (title_idx - scroll) as u16;
+        let x = target.x.saturating_add(SPINNER_COL);
+        buf.set(x, y, ch, style);
     }
 }
 
@@ -399,7 +447,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 let theme = app.theme.clone();
                 let mut wrapped = if streaming {
                     let body = markdown::plain(&text, &theme);
-                    indent(wrap::wrap_lines(body, content_w))
+                    indent(wrap::wrap_lines(body, content_w), width)
                 } else {
                     let rows = app.md_cache.rows(&text, content_w, || {
                         let body = markdown::render(&text, &theme, content_w);
@@ -413,17 +461,22 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                             })
                             .collect();
                         MdRows {
-                            lines: indent(wrapped.into_iter().map(|row| row.line).collect()),
+                            lines: indent(
+                                wrapped.into_iter().map(|row| row.line).collect(),
+                                width,
+                            ),
                             joins,
                         }
                     });
                     let start = out.len();
                     for (response_row, line) in rows.lines.iter().enumerate() {
+                        let (x_off, text) = assistant_line_meta(line);
                         assistant_rows.push(BuiltAssistantRow {
                             line_idx: start + response_row,
                             block: i,
                             response_row,
-                            text: assistant_line_text(line),
+                            text,
+                            x_off,
                             join_before: rows
                                 .joins
                                 .get(response_row)
@@ -741,22 +794,32 @@ fn subagent_chat_lines(card: &SubagentCard, app: &mut App, width: usize) -> Vec<
                 let theme = theme.clone();
                 let wrapped = app.md_cache.lines(&t, content_w, || {
                     let body = markdown::render(&t, &theme, content_w);
-                    indent(wrap::wrap_lines(body, content_w))
+                    indent(wrap::wrap_lines(body, content_w), width)
                 });
                 out.extend(wrapped);
                 out.push(Line::from(""));
             }
-            SubagentLine::Tool { name, detail, ok } => {
+            SubagentLine::Tool {
+                name,
+                args,
+                summary,
+                ok,
+            } => {
                 let status = match ok {
                     None => ToolStatus::Running,
                     Some(true) => ToolStatus::Ok,
                     Some(false) => ToolStatus::Err,
                 };
+                let args_line = if !args.is_empty() {
+                    args.clone()
+                } else {
+                    summary.clone()
+                };
                 let tool = ToolCard {
                     id: String::new(),
                     name: name.clone(),
-                    args: detail.clone(),
-                    output: String::new(),
+                    args: args_line,
+                    output: summary.clone(),
                     status,
                     started: std::time::Instant::now(),
                     elapsed_ms: Some(0),
@@ -1029,22 +1092,17 @@ fn style_user_line(text: &str, theme: &crate::theme::Theme, bg: Color) -> Vec<Sp
     spans
 }
 
-fn indent(lines: Vec<Line>) -> Vec<Line> {
+fn indent(lines: Vec<Line>, _width: usize) -> Vec<Line> {
     lines
         .into_iter()
         .map(|mut l| {
-            let code_marker = markdown::code_line_marker(&l);
-            if code_marker.is_some() {
-                l.spans.remove(0);
+            if markdown::code_line_marker(&l).is_some() {
+                l.spans.insert(1, Span::raw("  "));
+                return l;
             }
-            let pad = match code_marker {
-                Some(marker) => {
-                    Span::styled("│ ", Style::default().fg(marker.fg.unwrap_or(Color::Reset)))
-                }
-                None => match indent_fill_bg(&l) {
-                    Some(bg) => Span::styled("  ", Style::default().bg(bg)),
-                    None => Span::raw("  "),
-                },
+            let pad = match indent_fill_bg(&l) {
+                Some(bg) => Span::styled("  ", Style::default().bg(bg)),
+                None => Span::raw("  "),
             };
             l.spans.insert(0, pad);
             l
@@ -1168,6 +1226,59 @@ mod tests {
         assert_eq!(
             thinking_hits, 1,
             "Thinking belongs on the header only: {text}"
+        );
+    }
+
+    #[test]
+    fn running_subagent_spinner_overlays_without_rebuild() {
+        use comb::{render, Size};
+        use hive_core::event::AgentEvent;
+
+        let mut a = app();
+        a.apply(AgentEvent::SubagentSpawned {
+            id: "v1".into(),
+            label: "Checking project".into(),
+            prompt: "go".into(),
+        });
+        a.spinner = 0;
+        let _ = render(Size::new(80, 24), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        let builds = a.transcript_cache.builds;
+        assert!(builds >= 1);
+
+        a.spinner = 3;
+        let buf = render(Size::new(80, 24), |frame| {
+            crate::render::draw(frame, &mut a)
+        });
+        assert_eq!(
+            a.transcript_cache.builds, builds,
+            "card spinner must overlay the cached title, not rebuild history"
+        );
+
+        let ch = crate::render::spinner::glyph(3);
+        let text = buf.text();
+        assert!(text.contains(ch), "live spinner frame missing: {text}");
+        assert!(text.contains("Checking project"), "{text}");
+
+        let mut found = None;
+        for y in 0..buf.height {
+            for x in 0..buf.width {
+                if buf.get(x, y).is_some_and(|cell| cell.ch == ch) {
+                    found = Some((x, y));
+                }
+            }
+        }
+        let (x, y) = found.expect("spinner cell");
+        assert_eq!(
+            buf.get(x, y).unwrap().style.bg,
+            Some(a.theme.strip),
+            "overlay must keep the card strip background"
+        );
+        assert_eq!(
+            buf.get(x, y).unwrap().style.fg,
+            Some(a.theme.accent),
+            "overlay keeps the running accent"
         );
     }
 
@@ -1580,7 +1691,7 @@ mod tests {
 
         let t = tool_text(&mut a, 72);
         assert!(t.contains("Checking project"), "{t}");
-        assert!(t.contains("cargo check · review"), "{t}");
+        assert!(t.contains("working"), "{t}");
         assert!(
             !t.contains('╭') && !t.contains('╯'),
             "no border chrome: {t}"
@@ -1664,7 +1775,8 @@ mod tests {
             id: "v1".into(),
             line: SubagentLine::Tool {
                 name: "run_shell".into(),
-                detail: "cargo check".into(),
+                args: "cargo check".into(),
+                summary: "ok".into(),
                 ok: Some(true),
             },
         });
@@ -1740,14 +1852,14 @@ mod tests {
         let mut a = app();
         a.apply(AgentEvent::ToolStarted {
             id: "t1".into(),
-            name: "verify_project".into(),
+            name: "spawn_subagent".into(),
             args_preview: "project check".into(),
         });
         assert!(
             !a.blocks
                 .iter()
-                .any(|b| matches!(b, Block::Tool(c) if c.name == "verify_project")),
-            "verify_project must not appear as a transcript tool card"
+                .any(|b| matches!(b, Block::Tool(c) if c.name == "spawn_subagent")),
+            "spawn_subagent must not appear as a transcript tool card"
         );
         a.apply(AgentEvent::SubagentSpawned {
             id: "v1".into(),
@@ -1768,7 +1880,7 @@ mod tests {
         let md = "Want me to auto-fix the trivial ones (`useless_format`, `manual_contains`, `unnecessary_unwrap`)?";
         let body = markdown::render(md, &theme, 58);
         let wrapped = crate::render::wrap::wrap_lines(body, 58);
-        let indented = super::indent(wrapped);
+        let indented = super::indent(wrapped, 60);
         // Continuation rows that start with a chip must keep a plain gutter —
         // inheriting code_bg from the first span was the crooked gray pad.
         for line in &indented {
@@ -1783,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_code_fence_is_a_clean_rail_and_copies_without_it() {
+    fn assistant_code_fence_is_a_box_and_copies_without_chrome() {
         use crate::app::state::Block;
         use comb::{render, Size};
 
@@ -1803,10 +1915,9 @@ mod tests {
             .expect("code row");
 
         assert_eq!(hit.text, "function nav(user, amount) {}");
-        assert_eq!(
-            buf.get(hit.x - 2, hit.screen_row).map(|cell| cell.ch),
-            Some('│')
-        );
+        let rail = buf.get(hit.x - 2, hit.screen_row).expect("box rail");
+        assert_eq!(rail.ch, '│');
+        assert_ne!(rail.style.bg, Some(a.theme.code_bg));
         let keyword = comb::HighlightTheme::dark().keyword.fg;
         assert_eq!(
             buf.get(hit.x, hit.screen_row)
@@ -1819,7 +1930,13 @@ mod tests {
                 buf.get(x, hit.screen_row)
                     .is_some_and(|cell| cell.style.bg != Some(a.theme.code_bg))
             }),
-            "the code body must not be painted as a rectangular slab"
+            "inside the box stays on the terminal surface"
+        );
+        assert!(
+            a.assistant_row_hits
+                .iter()
+                .any(|hit| hit.text.contains("JavaScript")),
+            "language caption on the frame"
         );
 
         assert!(a.start_assistant_selection(hit.x, hit.screen_row));

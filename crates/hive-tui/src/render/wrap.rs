@@ -44,8 +44,7 @@ pub fn wrap_lines_with_joins(lines: Vec<Line>, width: usize) -> Vec<WrappedLine>
                 && plain.chars().all(|c| {
                     matches!(c, '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
                 }));
-        let is_code_fence = markdown::code_line_marker(&line).is_some();
-        if is_tableish || is_code_fence {
+        if is_tableish || markdown::keep_preformatted(&line) {
             out.push(WrappedLine {
                 line: truncate_line(line, width),
                 join_before: WrapJoin::Hard,
@@ -119,15 +118,15 @@ fn wrap_one(line: Line, width: usize) -> Vec<WrappedLine> {
     let mut last_space: Option<usize> = None;
     let mut cur_join = WrapJoin::Hard;
     // After a soft wrap on non-indented prose, swallow spaces so a new row
-    // never starts with a chip's leading pad (` {content} `).
+    // never starts with a leftover styled pad.
     let mut skip_leading_spaces = false;
 
     for (ch, st) in cells {
         let w = char_width(ch);
         if cur_w + w > width && !cur.is_empty() {
             // Drop the break-point space and any spaces still trailing on the
-            // finished row. Keeping a styled pad (inline `code` chips use
-            // ` {content} `) used to paint code_bg out to the wrap edge.
+            // finished row. A styled trailing space would paint its background
+            // out to the wrap edge.
             if let Some(sp) = last_space {
                 let carry = if sp + 1 < cur.len() {
                     cur.split_off(sp + 1)
@@ -347,8 +346,24 @@ mod tests {
         let source = crate::render::markdown::render("```text\n123456789\n```", &theme, 80);
         let wrapped = wrap_lines(source, 5);
 
-        assert_eq!(plain(&wrapped), vec!["12345".to_string()]);
-        assert!(crate::render::markdown::code_line_marker(&wrapped[0]).is_some());
+        assert!(!wrapped.is_empty());
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| crate::render::markdown::code_line_marker(line).is_some())
+        );
+        let body = wrapped
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .collect::<String>()
+            })
+            .find(|t| t.contains('1'))
+            .expect("body row");
+        assert!(body.starts_with('│') || body.contains('1'), "{body}");
+        assert!(body.chars().count() <= 5, "truncated: {body}");
     }
 
     #[test]

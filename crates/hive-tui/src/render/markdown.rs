@@ -53,23 +53,23 @@ struct MdStyles {
 
 impl MdStyles {
     fn new(theme: &Theme) -> Self {
-        let bold = Style::default().fg(theme.heading).add(Modifier::BOLD);
+        let h1 = Style::default().fg(theme.heading).add(Modifier::BOLD);
+        let h3 = Style::default().fg(theme.fg).add(Modifier::BOLD);
+        let quiet = Style::default().fg(theme.dim).add(Modifier::ITALIC);
         let italic = Style::default().fg(theme.fg).add(Modifier::ITALIC);
-        let bi = Style::default()
-            .fg(theme.heading)
-            .add(Modifier::BOLD | Modifier::ITALIC);
         Self {
-            h: [bold, bold, bi, italic, italic, italic],
-            code: Style::default().fg(theme.tool).bg(theme.code_bg),
+            h: [h1, h1, h3, italic, quiet, quiet],
+            // Tokens in a sentence — brighter, no chip. Gray boxes around
+            // `$/cancel_request` and friends read as junk in running text.
+            code: Style::default().fg(theme.accent),
             emphasis: italic,
-            strong: bold,
-            strikethrough: Style::default().fg(theme.fg).add(Modifier::DIM),
+            strong: h1,
+            strikethrough: Style::default().fg(theme.dim).add(Modifier::DIM),
             link: Style::default().fg(theme.tool).add(Modifier::UNDERLINE),
             blockquote: Style::default().fg(theme.dim),
-            list_marker: Style::default().fg(theme.accent),
-            // Zero-width marker carried through wrapping. The transcript turns
-            // it into a quiet left rail, so fenced blocks do not need a large
-            // content-sized background slab.
+            list_marker: Style::default().fg(theme.dim),
+            // Zero-width marker carried through wrapping. The fence itself is
+            // a box like a table; this span is only semantic (copy / wrap).
             code_marker: Style::default().fg(theme.faint).bg(theme.code_bg),
         }
     }
@@ -194,7 +194,7 @@ impl<'t> Writer<'t> {
                 if !self.text.is_empty() {
                     self.push_blank();
                 }
-                let w = self.wrap_width.min(48);
+                let w = self.wrap_width.min(12).max(6);
                 self.push_line(Line::from(Span::styled(
                     "─".repeat(w),
                     Style::default().fg(self.theme.faint),
@@ -301,8 +301,6 @@ impl<'t> Writer<'t> {
         }
         let idx = (level as usize).saturating_sub(1).min(5);
         let hs = self.styles.h[idx];
-        let prefix = format!("{} ", "#".repeat(level as usize));
-        self.current.push(Span::styled(prefix, hs));
         self.inline_styles.push(hs);
         self.needs_newline = false;
     }
@@ -405,19 +403,18 @@ impl<'t> Writer<'t> {
     }
 
     fn end_codeblock(&mut self) {
-        let lang = self
-            .code_lang
-            .take()
+        let raw = self.code_lang.take();
+        let lang = raw
             .as_deref()
             .map(highlight::lang_from_info)
             .unwrap_or_default();
+        let label = fence_lang_label(raw.as_deref());
         let code = std::mem::take(&mut self.code_buf);
         if !code.is_empty() {
             let ht = self.code_highlight_theme();
-            for line in highlight::highlight(&code, lang, &ht) {
-                let mut spans = vec![Span::styled(String::new(), self.styles.code_marker)];
-                spans.extend(line.spans);
-                self.push_line(Line::from(spans));
+            let highlighted = highlight::highlight(&code, lang, &ht);
+            for line in self.render_code_fence(&highlighted, label.as_deref()) {
+                self.push_line(line);
             }
         }
         self.in_code_block = false;
@@ -464,17 +461,12 @@ impl<'t> Writer<'t> {
     }
 
     fn code(&mut self, c: CowStr) {
+        let span = Span::styled(c.to_string(), self.styles.code);
         if self.in_table_cell() {
-            self.push_span_to_cell(Span::styled(c.to_string(), self.styles.code));
+            self.push_span_to_cell(span);
             return;
         }
-        // Inline code chip: apply code_bg.
-        let content = c.to_string();
-        if content.trim().is_empty() {
-            self.current.push(Span::styled("  ", self.styles.code));
-        } else {
-            self.current.push(Span::styled(content, self.styles.code));
-        }
+        self.current.push(span);
     }
 
     fn soft_break(&mut self) {
@@ -626,14 +618,6 @@ impl<'t> Writer<'t> {
 
         // Natural column widths.
         let mut natural = vec![1usize; cols];
-        for cell in &header {
-            for (i, _) in cell.lines.iter().enumerate().take(cols) {
-                if i < cols {
-                    natural[i] = natural[i].max(cell.display_width()).max(1);
-                }
-            }
-        }
-        // Actually measure per-column.
         for (ci, _) in header.iter().enumerate().take(cols) {
             natural[ci] = natural[ci].max(header[ci].display_width()).max(1);
         }
@@ -663,25 +647,117 @@ impl<'t> Writer<'t> {
 
         let mut out = Vec::new();
 
-        // Top border.
         out.push(border(&widths, '┌', '┬', '┐'));
-
-        // Header row.
         out.extend(self.render_table_row(&header, &widths, &t.alignments, head_st));
         out.push(border(&widths, '├', '┼', '┤'));
-
-        // Body rows.
         for (ri, row) in t.rows.iter().enumerate() {
             out.extend(self.render_table_row(row, &widths, &t.alignments, body_st));
             if ri + 1 < t.rows.len() {
                 out.push(border(&widths, '├', '┼', '┤'));
             }
         }
-
-        // Bottom border.
         out.push(border(&widths, '└', '┴', '┘'));
 
         out
+    }
+
+    fn render_code_fence(&self, body: &[Line], label: Option<&str>) -> Vec<Line> {
+        let chrome = Style::default().fg(self.theme.dim);
+        let chrome_w = 2 + 2 * TABLE_PAD;
+        let mut inner = body
+            .iter()
+            .map(|l| spans_width(&l.spans))
+            .max()
+            .unwrap_or(0);
+        if let Some(label) = label {
+            inner = inner.max(label.width().saturating_add(1));
+        }
+        let budget = self.wrap_width.saturating_sub(chrome_w).max(1);
+        let inner = inner.min(budget).max(1);
+
+        let mut out = Vec::with_capacity(body.len() + 2);
+        out.push(self.mark_code(self.code_top_border(inner, label, chrome)));
+        for line in body {
+            out.push(self.mark_code(self.code_body_row(line, inner, chrome)));
+        }
+        out.push(self.mark_code(self.code_bottom_border(inner, chrome)));
+        out
+    }
+
+    fn code_top_border(&self, inner: usize, label: Option<&str>, chrome: Style) -> Line {
+        let mid = inner + 2 * TABLE_PAD;
+        let total = mid + 2;
+        if let Some(label) = label.filter(|s| !s.is_empty()) {
+            let caption = Style::default().fg(self.theme.heading);
+            let mut spans = vec![
+                Span::styled("┌─ ".to_string(), chrome),
+                Span::styled(label.to_string(), caption),
+                Span::styled(" ".to_string(), chrome),
+            ];
+            let used = 3 + label.width() + 1;
+            let rest = total.saturating_sub(used);
+            if rest > 1 {
+                spans.push(Span::styled("─".repeat(rest - 1), chrome));
+            }
+            spans.push(Span::styled("┐".to_string(), chrome));
+            Line::from(spans)
+        } else {
+            let mut s = String::from("┌");
+            s.push_str(&"─".repeat(mid));
+            s.push('┐');
+            Line::from(Span::styled(s, chrome))
+        }
+    }
+
+    fn code_bottom_border(&self, inner: usize, chrome: Style) -> Line {
+        let mut s = String::from("└");
+        s.push_str(&"─".repeat(inner + 2 * TABLE_PAD));
+        s.push('┘');
+        Line::from(Span::styled(s, chrome))
+    }
+
+    fn code_body_row(&self, line: &Line, inner: usize, chrome: Style) -> Line {
+        let mut spans = vec![
+            Span::styled("│".to_string(), chrome),
+            Span::styled(" ".repeat(TABLE_PAD), chrome),
+        ];
+        let mut w = 0usize;
+        for s in &line.spans {
+            if w >= inner {
+                break;
+            }
+            let sw = s.content.width();
+            if w + sw <= inner {
+                spans.push(s.clone());
+                w += sw;
+                continue;
+            }
+            let mut buf = String::new();
+            for ch in s.content.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw > inner {
+                    break;
+                }
+                buf.push(ch);
+                w += cw;
+            }
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf, s.style));
+            }
+            break;
+        }
+        if w < inner {
+            spans.push(Span::styled(" ".repeat(inner - w), chrome));
+        }
+        spans.push(Span::styled(" ".repeat(TABLE_PAD), chrome));
+        spans.push(Span::styled("│".to_string(), chrome));
+        Line::from(spans)
+    }
+
+    fn mark_code(&self, line: Line) -> Line {
+        let mut spans = vec![Span::styled(String::new(), self.styles.code_marker)];
+        spans.extend(line.spans);
+        Line::from(spans)
     }
 
     fn render_table_row(
@@ -800,6 +876,43 @@ pub(crate) fn code_line_marker(line: &Line) -> Option<Style> {
         .first()
         .filter(|span| span.content.is_empty() && span.style.bg.is_some())
         .map(|span| span.style)
+}
+
+pub(crate) fn keep_preformatted(line: &Line) -> bool {
+    code_line_marker(line).is_some()
+}
+
+fn fence_lang_label(raw: Option<&str>) -> Option<String> {
+    let token = raw?
+        .split([',', ' ', '\t'])
+        .next()?
+        .trim();
+    if token.is_empty() {
+        return None;
+    }
+    match token.to_ascii_lowercase().as_str() {
+        "text" | "plain" | "plaintext" => None,
+        "rs" | "rust" => Some("Rust".into()),
+        "js" | "mjs" | "cjs" | "javascript" | "jsx" => Some("JavaScript".into()),
+        "ts" | "mts" | "cts" | "typescript" | "tsx" => Some("TypeScript".into()),
+        "json" | "jsonc" => Some("JSON".into()),
+        "sh" | "bash" | "shell" | "zsh" | "fish" => Some("Shell".into()),
+        "toml" => Some("TOML".into()),
+        "yaml" | "yml" => Some("YAML".into()),
+        "py" | "python" => Some("Python".into()),
+        "md" | "markdown" => Some("Markdown".into()),
+        "go" => Some("Go".into()),
+        "rb" | "ruby" => Some("Ruby".into()),
+        "css" => Some("CSS".into()),
+        "html" | "htm" => Some("HTML".into()),
+        "sql" => Some("SQL".into()),
+        "c" => Some("C".into()),
+        "cpp" | "c++" | "cxx" => Some("C++".into()),
+        other => {
+            let mut chars = other.chars();
+            chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        }
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -925,6 +1038,10 @@ mod tests {
             !t.contains("| Build"),
             "raw markdown pipes must not appear: {t}"
         );
+        assert!(
+            t.contains('┌') && t.contains('│') && t.contains('└'),
+            "box grid: {t}"
+        );
     }
 
     #[test]
@@ -959,7 +1076,14 @@ mod tests {
             &theme,
             80,
         );
-        let line = &out[0];
+        let line = out
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content == "function")
+            })
+            .expect("highlighted source row");
         let style = |text: &str| {
             line.spans
                 .iter()
@@ -973,14 +1097,24 @@ mod tests {
         assert_eq!(style("42"), palette.number);
         assert_eq!(style("\"ok\""), palette.string);
         assert_ne!(palette.keyword.fg, Some(theme.accent));
+        assert!(
+            text(&out).contains("JavaScript"),
+            "language sits on the box: {}",
+            text(&out)
+        );
     }
 
     #[test]
-    fn fenced_code_uses_a_marker_instead_of_a_background_slab() {
+    fn fenced_code_is_a_box_with_a_language_caption() {
         let theme = Theme::gray();
         let out = render("```rust\nfn main() {\n    work();\n}\n```", &theme, 80);
+        let t = text(&out);
 
-        assert_eq!(out.len(), 3);
+        assert!(out.len() >= 5, "frame + body: {t}");
+        assert!(t.contains("Rust"), "language in the corner: {t}");
+        assert!(t.contains('┌') && t.contains('└') && t.contains('│'), "{t}");
+        assert!(t.contains("fn main() {"));
+        assert!(t.contains("    work();"));
         for line in &out {
             let marker = code_line_marker(line).expect("preformatted row marker");
             assert_eq!(marker.fg, Some(theme.faint));
@@ -989,17 +1123,34 @@ mod tests {
                     .iter()
                     .skip(1)
                     .all(|span| span.style.bg.is_none()),
-                "code tokens should sit on the terminal surface: {line:?}"
+                "no custom fill inside the box: {line:?}"
             );
         }
-        assert_eq!(text(&out), "fn main() {\n    work();\n}");
+    }
+
+    #[test]
+    fn inline_code_is_a_token_not_a_chip() {
+        let theme = Theme::gray();
+        let out = render("call `$/cancel_request` then `interrupt`", &theme, 80);
+        let t = text(&out);
+        assert_eq!(t, "call $/cancel_request then interrupt");
+        for span in out.iter().flat_map(|line| &line.spans) {
+            if span.content.contains("cancel") || span.content == "interrupt" {
+                assert_eq!(span.style.bg, None, "no chip behind {span:?}");
+                assert_eq!(span.style.fg, Some(theme.accent));
+            }
+        }
     }
 
     #[test]
     fn unlabeled_fence_keeps_diagram_rows_preformatted() {
         let out = render("```\nClient\n  │\n  ▼\nService\n```", &Theme::gray(), 80);
 
-        assert_eq!(text(&out), "Client\n  │\n  ▼\nService");
+        let t = text(&out);
+        assert!(t.contains("Client"));
+        assert!(t.contains("Service"));
+        assert!(t.contains('┌') && t.contains('└'));
+        assert!(!t.contains("Text"), "generic fences stay unlabeled: {t}");
         assert!(out.iter().all(|line| code_line_marker(line).is_some()));
     }
 
@@ -1009,6 +1160,10 @@ mod tests {
         let t = text(&out);
         assert!(t.contains("code"), "heading content: {t}");
         assert!(!t.contains('`'), "backticks must be stripped: {t}");
+        assert!(
+            !t.contains('#'),
+            "heading markers stay in the source, not the chat: {t}"
+        );
     }
 
     #[test]

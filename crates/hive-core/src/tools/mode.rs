@@ -29,7 +29,7 @@ feature that deserves an agreed plan before any code changes: call \
 with `write_plan`. Prefer this over diving straight into a sprawling change. \
 For small, clear tasks just implement — do not switch. `plan` is planning only \
 (no project edits); `make` is the full coding agent; `multitask` orchestrates \
-parallel subagents."
+background worker jobs."
     }
 
     fn parameters(&self) -> Value {

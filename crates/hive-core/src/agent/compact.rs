@@ -167,8 +167,8 @@ Transcript:
     vec![system, user]
 }
 
-/// Replace history with system + one continuity user message.
-pub fn compacted_messages(system: &str, summary: &str) -> Vec<Message> {
+/// Replace history with system + continuity brief + the recent unsummarized tail.
+pub fn compacted_messages(system: &str, summary: &str, recent: Vec<Message>) -> Vec<Message> {
     let summary = summary.trim();
     let body = format!(
         "# Session context (compacted)\n\n{summary}\n\n\
@@ -176,7 +176,7 @@ Continue from **State** / **Next** above. \
 Do not mention compaction or summarization. \
 Act as if you already had the full history and keep working."
     );
-    vec![
+    let mut out = vec![
         Message::system(system.to_string()),
         Message {
             role: Role::User,
@@ -186,7 +186,26 @@ Act as if you already had the full history and keep working."
             name: None,
             provider_items: Vec::new(),
         },
-    ]
+    ];
+    out.extend(recent);
+    out
+}
+
+/// Index where the kept tail starts (after the system message). Tool-result
+/// groups stay attached to their assistant call so the next request stays valid.
+pub fn tail_start(messages: &[Message]) -> usize {
+    const KEEP_RECENT: usize = 12;
+    if messages.len() <= KEEP_RECENT + 1 {
+        return 1;
+    }
+    let mut i = messages.len().saturating_sub(KEEP_RECENT);
+    if i < 1 {
+        i = 1;
+    }
+    while i > 1 && matches!(messages[i].role, Role::Tool) {
+        i -= 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -218,13 +237,41 @@ mod tests {
     }
 
     #[test]
-    fn compacted_history_is_system_plus_one_user() {
-        let msgs = compacted_messages("sys", "## Goal\nShip it\n## Next\nKeep going");
-        assert_eq!(msgs.len(), 2);
+    fn compacted_history_keeps_the_recent_tail() {
+        let recent = vec![Message::user("still going")];
+        let msgs = compacted_messages("sys", "## Goal\nShip it\n## Next\nKeep going", recent);
+        assert!(msgs.len() >= 3);
         assert!(matches!(msgs[0].role, Role::System));
         assert!(matches!(msgs[1].role, Role::User));
         assert!(msgs[1].text().contains("Ship it"));
         assert!(msgs[1].text().contains("Do not mention compaction"));
+        assert_eq!(msgs[2].text(), "still going");
+    }
+
+    #[test]
+    fn tail_start_does_not_split_tool_results() {
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user("a"),
+            Message::assistant("b"),
+            Message::user("c"),
+            Message::assistant("d"),
+            {
+                let mut m = Message::assistant("");
+                m.tool_calls.push(ToolCall {
+                    id: "1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                });
+                m
+            },
+            Message::tool_result("1", "read_file", "ok"),
+        ];
+        let start = tail_start(&msgs);
+        assert!(
+            start == msgs.len() || !matches!(msgs[start].role, Role::Tool),
+            "tail must not start on a tool result"
+        );
     }
 
     #[test]

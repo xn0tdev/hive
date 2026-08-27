@@ -60,9 +60,9 @@ When the plan is ready, say so briefly and stop. Do not begin the work.\n\n",
         );
     } else if mode == AgentMode::Multitask && !subagent {
         p.push_str(
-            "- You orchestrate — do not implement features yourself.\n\
-- Split independent work into clear tasks, spawn the workers in one call, and \
-integrate every branch when they finish. Don't stop half way.\n\
+            "- You orchestrate workers — do not implement features yourself.\n\
+- Spawn independent jobs with `paths` so they cannot collide, wait once, \
+close each worker when you have the result.\n\
 - Only ask the user when blocked on a real ambiguity tools cannot resolve.\n\n",
         );
     } else {
@@ -172,12 +172,9 @@ Stay in the assigned scope; do not expand into orchestrator-level work.\n\n",
     } else if mode == AgentMode::Make {
         p.push_str("## Subagents\n");
         p.push_str(
-            "You do the work yourself. When helpful you may launch a helper:\n\
-- `verify_project`: ready checker. Pass a freeform `prompt` you author \
-(what to check, scope, how to report).\n\
-- `spawn_subagent`: one focused worker. Pass a self-contained `task` prompt you author.\n\
-Fan-out (`spawn_swarm`) is unavailable in MAKE — switch to MULTITASK for parallel workers.\n\
-Prefer doing work yourself unless an independent check clearly helps.\n\n",
+            "You do the work yourself. Fan-out workers are unavailable in MAKE — \
+switch to MULTITASK to run parallel jobs.\n\
+Prefer doing work yourself unless the task is clearly several independent pieces.\n\n",
         );
         p.push_str("## Existing plan\n");
         p.push_str(&format!(
@@ -215,25 +212,18 @@ tasks, do NOT switch — just implement.\n\n",
     } else if mode == AgentMode::Multitask {
         p.push_str("## MULTITASK mode\n");
         p.push_str(
-            "You are the orchestrator. You do NOT implement code yourself — you run \
-this loop to the end without stopping to check in between steps.\n\
-1. Look before splitting: read/search tools are available, use them to find the \
-files each task will touch.\n\
-2. Split into tasks that touch *different* files. Overlapping tasks conflict at \
-merge time, and merging is the expensive part. Two well-separated tasks beat five \
-tangled ones; a job that can't be split is one `spawn_subagent`, not a swarm.\n\
-3. Call `spawn_swarm` with the task list (`spawn_subagent` for a single worker). \
-Each task string is the worker's entire brief — it sees none of this conversation, \
-so state the goal, the files, the constraints, and what \"done\" means.\n\
-4. Workers run in isolated git worktrees, in parallel. One call spawns them all; \
-don't spawn them one at a time and wait between.\n\
-5. When results come back, call `integrate_worktree` once per worker id from the \
-results. Do this for every worker — work left unintegrated is work thrown away.\n\
-6. A conflict rolls the merge back and keeps the branch. Say which worker and which \
-files conflicted; don't retry the same merge blindly.\n\
-7. Then `switch_mode` to `make` and verify the merged result — you cannot build or \
-test from here, and unverified merges are not finished work.\n\
-Forbidden for you: `write_file`, `edit_file`, `delete_path`, `run_shell`, `verify_project`.\n\n",
+            "You are the orchestrator. You do NOT implement code yourself.\n\
+1. Look before splitting: read/search to see which files each job will touch.\n\
+2. Split into jobs that touch *different* files. Pass those files as `paths` \
+on `spawn_subagent`. Overlap is rejected.\n\
+3. Spawn several jobs in one turn — each returns an id immediately. \
+The task string is the worker's entire brief — it sees none of this conversation.\n\
+4. Call `agent_wait` with `on: \"all\"` (or a single id). Do not poll.\n\
+5. `agent_observe` only when you need to steer; `agent_message` to correct a worker.\n\
+6. `agent_close` every id when you have the result (merges automatically). \
+Unclosed workers occupy slots (3 by default, max 6).\n\
+7. Then `switch_mode` to `make` and verify the merged result.\n\
+Forbidden for you: `write_file`, `edit_file`, `delete_path`, `run_shell`.\n\n",
         );
         p.push_str("## Existing plan\n");
         p.push_str(&format!(
@@ -263,8 +253,11 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = build_system_prompt(&dir, no_skills().as_ref(), false, AgentMode::Multitask);
 
-        assert!(p.contains("spawn_swarm"), "{p}");
-        assert!(p.contains("integrate_worktree"), "{p}");
+        assert!(p.contains("spawn_subagent"), "{p}");
+        assert!(p.contains("agent_wait"), "{p}");
+        assert!(p.contains("agent_close"), "{p}");
+        assert!(!p.contains("spawn_swarm"), "{p}");
+        assert!(!p.contains("integrate_worktree"), "{p}");
         assert!(p.contains("different* files"), "warns about overlap: {p}");
         assert!(
             p.contains("switch_mode") && p.contains("verify"),

@@ -122,8 +122,17 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    // Landing: toast on the screen bottom (away from the centered input).
-    toast::draw(f, area, app);
+    // Landing: notification chip above the input, bottom-right of that band.
+    toast::draw(
+        f,
+        Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            input_top.saturating_sub(area.y).max(1),
+        ),
+        app,
+    );
 
     draw_palette(f, area, app);
     draw_about(f, area, app);
@@ -176,10 +185,10 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         input_height(app, inner_w)
     };
 
-    // Manual vertical layout, bottom-anchored. Plan view hides the status
-    // footer (model/cwd) — only back + MAKE matter there — but keeps the same
-    // 2-row bottom reserve as chat so the InputZone (back / MARK / SEND) lands
-    // at the exact height of the chat Input, with toasts on the very last row.
+    // Manual vertical layout, bottom-anchored. Plan / terminal / subagent
+    // hide the status footer (model/cwd) — only the special bar matters —
+    // but keep the same 2-row bottom reserve as chat so that bar lands at
+    // the exact height of the chat Input.
     let footer_h: u16 = 2;
     let footer_y = area.bottom().saturating_sub(footer_h);
     let follow_h: u16 = if !special && app.has_follow_up() {
@@ -206,7 +215,6 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     } else if app.in_subagent_view() {
         app.input_hit = None;
         input_bars::draw_back(f, band(input_y, input_h), app);
-        footer::draw(f.buffer(), band(footer_y, 2), app);
     } else {
         app.back_hit = None;
         app.make_hit = None;
@@ -252,8 +260,19 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    // Corner of the transcript — gray text, never on the composer/footer.
-    toast::draw(f, transcript, app);
+    // Bottom-right of the chat column, above the composer / back bar.
+    let toast_w = area.width.saturating_sub(side_w);
+    let toast_bottom = if follow_h > 0 { follow_y } else { input_y };
+    toast::draw(
+        f,
+        Rect::new(
+            area.x,
+            area.y,
+            toast_w.max(8),
+            toast_bottom.saturating_sub(area.y).max(1),
+        ),
+        app,
+    );
 
     draw_palette(f, area, app);
     draw_about(f, area, app);

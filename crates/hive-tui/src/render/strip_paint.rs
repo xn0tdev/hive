@@ -10,10 +10,33 @@
 //! a strip-bg base style — every glyph and space is patched, and the remainder
 //! of each row is cleared to that bg.
 
-use comb::{Buffer, Color, Line, Rect, Style};
+use comb::{Buffer, Color, Line, Modifier, Rect, Span, Style};
+
+use crate::theme::Theme;
 
 fn base(bg: Color) -> Style {
     Style::default().bg(bg)
+}
+
+/// Group label (Chat / Suggested / …) — same look in Settings and Ctrl+P.
+/// Dim + italic so it reads as a caption, not a faded item and not a button.
+pub fn section_header(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    label: &str,
+    theme: &Theme,
+    panel: Color,
+) {
+    let line = Line::from(Span::styled(
+        label.to_string(),
+        Style::default()
+            .fg(theme.dim)
+            .bg(panel)
+            .add(Modifier::ITALIC),
+    ));
+    set_line_on_strip(buf, x, y, &line, width, panel);
 }
 
 /// Draw a line onto a strip/panel row. Spaces and the cleared remainder keep

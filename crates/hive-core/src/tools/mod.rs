@@ -22,7 +22,7 @@ mod todo;
 mod web;
 
 /// Build fresh instances of every registered tool, sorted by name.
-/// Mode gating (MAKE hides `spawn_swarm` / `integrate_worktree`) happens in the agent.
+/// Mode gating (MAKE hides orchestrator job tools) happens in the agent.
 pub fn all_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = inventory::iter::<ToolRegistration>()
         .map(|r| (r.make)())
@@ -148,10 +148,13 @@ mod tests {
     fn all_tools_offers_delegate_suite() {
         let tools = all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"verify_project"));
         assert!(names.contains(&"spawn_subagent"));
-        assert!(names.contains(&"spawn_swarm"));
-        assert!(names.contains(&"integrate_worktree"));
+        assert!(names.contains(&"agent_observe"));
+        assert!(names.contains(&"agent_wait"));
+        assert!(names.contains(&"agent_close"));
+        assert!(!names.contains(&"spawn_swarm"));
+        assert!(!names.contains(&"integrate_worktree"));
+        assert!(!names.contains(&"verify_project"));
         assert!(names.contains(&"write_plan"));
         assert!(names.contains(&"delete_path"));
         assert!(names.contains(&"switch_mode"));

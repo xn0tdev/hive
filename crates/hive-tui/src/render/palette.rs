@@ -267,12 +267,14 @@ fn draw_command_list(
                 buf.paint(Rect::new(area.x, y, area.width, 1), panel_style);
             }
             PaletteRow::Header(cat) => {
-                let line = Line::from(Span::styled(
-                    cat.label().to_string(),
-                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
-                ));
-                crate::render::strip_paint::set_line_on_strip(
-                    buf, area.x, y, &line, area.width, panel,
+                crate::render::strip_paint::section_header(
+                    buf,
+                    area.x,
+                    y,
+                    area.width,
+                    cat.label(),
+                    theme,
+                    panel,
                 );
             }
             PaletteRow::Command(cmd) => {
@@ -387,12 +389,8 @@ fn draw_model_list(
         };
         match item {
             ModelRow::Header(label) => {
-                let line = Line::from(Span::styled(
-                    (*label).to_string(),
-                    Style::default().fg(theme.fg).bg(panel).add(Modifier::BOLD),
-                ));
-                crate::render::strip_paint::set_line_on_strip(
-                    buf, area.x, y, &line, area.width, panel,
+                crate::render::strip_paint::section_header(
+                    buf, area.x, y, area.width, label, theme, panel,
                 );
             }
             ModelRow::Model(choice) => {
@@ -685,6 +683,21 @@ mod tests {
             }
         }
         let (hx, hy) = header_y.expect("Suggested header");
+        let header = buf.get(hx, hy).unwrap();
+        let theme = crate::theme::Theme::from_name("gray");
+        assert_eq!(
+            header.style.fg,
+            Some(theme.dim),
+            "category labels are captions, not faded grey"
+        );
+        assert!(
+            header.style.mods.contains(Modifier::ITALIC),
+            "category labels are italic captions"
+        );
+        assert!(
+            !header.style.mods.contains(Modifier::BOLD),
+            "category labels are not buttons"
+        );
         // Cell after the label should still be panel strip, not default/reset.
         let after = buf.get(hx + "Suggested".len() as u16 + 2, hy).unwrap();
         assert_eq!(after.style.bg, Some(panel_bg()), "header trailing bg");

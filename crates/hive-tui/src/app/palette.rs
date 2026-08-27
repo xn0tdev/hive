@@ -657,6 +657,10 @@ mod tests {
         assert_eq!(rows.len(), offered_count());
         assert!(rows.iter().all(|r| matches!(r, ConnectRow::Preset(_))));
         assert!(preset_labels(&rows).contains(&"Fireworks"));
+        assert!(
+            preset_labels(&rows).contains(&"Anthropic"),
+            "Anthropic is a first-class preset"
+        );
     }
 
     #[test]

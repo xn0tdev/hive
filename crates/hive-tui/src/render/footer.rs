@@ -64,19 +64,9 @@ pub fn cwd_line(app: &crate::app::App) -> Line {
     ))
 }
 
-pub fn draw(buf: &mut Buffer, area: Rect, app: &crate::app::App) {
-    if area.height < 2 {
-        return;
-    }
-    buf.paint(area, Style::default());
-    buf.set_line(area.x, area.y, &model_line(app), area.width);
-    draw_working(buf, Rect::new(area.x, area.y, area.width, 1), app, 0);
-    buf.set_line(area.x, area.y + 1, &cwd_line(app), area.width);
-}
-
 /// Model + cwd under the input; MAKE/PLAN on the model row (right).
-/// Working cubes sit just left of the chip. Toasts are drawn separately
-/// (centered), so they never replace the chip.
+/// Working cubes sit just left of the chip. Toasts are a separate bottom-right
+/// chip, so they never replace the mode chip.
 pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
     if area.height < 2 {
         return;

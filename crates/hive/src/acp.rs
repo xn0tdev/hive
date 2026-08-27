@@ -167,7 +167,7 @@ fn modes_state() -> Value {
         "availableModes": [
             {"id": "make", "name": "Make", "description": "Full coding agent"},
             {"id": "plan", "name": "Plan", "description": "Research and plan only — no project edits or shell"},
-            {"id": "multitask", "name": "Multitask", "description": "Orchestrate parallel subagents"}
+            {"id": "multitask", "name": "Multitask", "description": "Orchestrate background worker jobs"}
         ]
     })
 }

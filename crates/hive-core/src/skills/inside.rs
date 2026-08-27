@@ -12,14 +12,13 @@ struct Inside {
 
 const WORKFLOW: &str = r#"---
 name: workflow
-description: Phased pipeline for multi-step work — plan, batch subagents by category, track, integrate, verify.
+description: Phased pipeline for multi-step work — plan, spawn jobs, wait, close, verify.
 ---
 
 # Workflow
 
-A phased pipeline. Work flows through stages; each stage fans out subagents
-in bounded batches, waits for results, then feeds them into the next stage.
-Never dump 30 agents at once — the machine and the TUI must stay responsive.
+A phased pipeline. The MULTITASK parent starts workers as background jobs,
+waits once, then closes them. Never dump 30 agents at once.
 
 ## Phases
 
@@ -28,78 +27,47 @@ Read/search the codebase. Never plan blind.
 
 ### 2. Plan
 Call `write_plan` — one-line summary + markdown body (steps, files per step,
-risks, verification). The plan is the source of truth for splitting work.
+risks, verification).
 
 ### 3. Set tasks
-Call `set_todos` with the concrete steps. The user sees a live progress bar.
+Call `set_todos` with the concrete steps.
 
-### 4. Categorize & batch
-Split the plan into **categories** (independent groups of work):
+### 4. Spawn jobs
+Each independent piece is one `spawn_subagent` with:
+- `task` — the worker's entire brief (it sees none of this conversation)
+- `paths` — files it will edit (overlap is rejected)
 
-- **Implement** — code changes (each worker touches different files)
-- **Verify** — independent checkers (build, lint, test, review)
-- **Research** — read-only exploration (API shapes, docs, dependencies)
-
-For each category, spawn a **batch** of workers:
-
-```
-spawn_swarm([task_1, task_2, ..., task_N])
-```
+Spawn several in one turn. They return ids immediately.
 
 Rules:
-- Max 6–8 workers per batch. The runtime caps concurrency at 8.
-  If you have 20 tasks, run them in 3 batches of ~7, not one of 20.
+- Default 3 slots, hard max 6. Close finished workers before starting more.
 - Workers in the same batch must touch DIFFERENT files.
-- Wait for the batch to finish before starting the next one.
-  Results from batch N inform batch N+1.
-- A job that can't be split is one `spawn_subagent`, not a swarm.
+- A job that can't be split is one worker, not five vague ones.
 
-### 5. Integrate
-After each implement batch returns:
-- Call `integrate_worktree` for every worker id. Every one.
-- A conflict rolls back the merge — report which worker/files, don't retry blindly.
-- Mark the corresponding todos done.
+### 5. Wait
+Call `agent_wait` with `on: "all"` (or a single id). Do not poll `agent_observe`.
+Observe only when you need to steer; `agent_message` to correct a worker.
 
-### 6. Verify
-Spawn a verify batch (1–3 workers):
-- One runs build + tests + lint.
-- One does a code review pass (optional for small changes).
-- Fix what broke. Do not declare victory over a red check.
+### 6. Close
+`agent_close` every id. That merges the worker's changes. Always close —
+an unfinished slot still counts. Conflicts stay on the slot; message the
+worker or close with `discard: true`.
 
-### 7. Clear
-Call `set_todos` with an empty list. Give a short summary.
+### 7. Verify
+`switch_mode` to make. Build, test, fix. Then `set_todos` with an empty list.
 
 ## Writing worker briefs
 
-Each worker sees NOTHING of your conversation. Its task string is its
-entire world. Include:
+Each worker sees NOTHING of your conversation. Include:
 - Goal (what "done" looks like)
 - Files to touch (exact paths)
 - Constraints (style, libs, don't touch X)
 - Self-verification (run this command, expect this output)
-
-## Concurrency & resource rules
-
-- The runtime semaphore caps concurrent agents (default 8). Respect it.
-- Batch size ≤ 8. Smaller batches (3–5) are safer for file-conflict risk.
-- Between batches: integrate, update todos, assess, then spawn next batch.
-- Never spawn a batch while the previous one is still running.
-- The TUI renders each subagent card. 30 cards at once = lag. Keep it sane.
-- Prefer 3 focused workers over 10 vague ones.
-
-## Tracking rules
-
-- One `set_todos` call replaces the whole list — pass every task each time.
-- Mark done only when actually finished (integrated + verified).
-- Discover a new step mid-flight? Add it before doing it.
-- Task unnecessary? Remove it, don't mark it done.
-- Don't narrate the progress bar. Just call the tool and work.
 "#;
 
 const INSIDE_SKILLS: &[Inside] = &[Inside {
     name: "workflow",
-    description:
-        "How to structure work — plan, fan out subagents, track progress, integrate, verify.",
+    description: "How to structure work — plan, spawn jobs, wait, close, verify.",
     content: WORKFLOW,
 }];
 

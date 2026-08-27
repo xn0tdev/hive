@@ -8,6 +8,7 @@
 //! - `provider/` — the concrete client(s).
 //! - [`catalog`] — `GET /models` listing + models.dev enrichment (setup / picker).
 
+mod auth;
 pub mod catalog;
 mod provider;
 mod stream;

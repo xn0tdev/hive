@@ -1,4 +1,5 @@
-//! In-TUI settings: one list, section headers like Ctrl+P.
+//! In-TUI settings: one open list, grouped by Chat / Sidebar / Tools.
+//! No tabs, no nested pages — headers are labels, not buttons.
 
 use super::App;
 
@@ -15,6 +16,8 @@ pub enum SettingsItem {
     SidebarWidth,
     ShowToolCards,
     ToolRevert,
+    LogoAnimation,
+    Sound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +53,10 @@ pub const ROWS: &[SettingsRow] = &[
     SettingsRow::Header("Tools"),
     SettingsRow::Item(SettingsItem::ShowToolCards),
     SettingsRow::Item(SettingsItem::ToolRevert),
+    SettingsRow::Spacer,
+    SettingsRow::Header("Landing"),
+    SettingsRow::Item(SettingsItem::LogoAnimation),
+    SettingsRow::Item(SettingsItem::Sound),
 ];
 
 #[derive(Debug, Clone)]
@@ -128,6 +135,14 @@ pub fn activate(app: &mut App) -> bool {
             app.ui.tool_revert = !app.ui.tool_revert;
             true
         }
+        SettingsItem::LogoAnimation => {
+            app.ui.logo_animation = !app.ui.logo_animation;
+            true
+        }
+        SettingsItem::Sound => {
+            app.ui.sound = !app.ui.sound;
+            true
+        }
     }
 }
 
@@ -163,7 +178,7 @@ mod tests {
     fn arrows_wrap_past_the_ends() {
         let mut st = SettingsState::root();
         st.move_up();
-        assert_eq!(st.item(), Some(SettingsItem::ToolRevert));
+        assert_eq!(st.item(), Some(SettingsItem::Sound));
         st.move_down();
         assert_eq!(st.item(), Some(SettingsItem::Thoughts));
     }

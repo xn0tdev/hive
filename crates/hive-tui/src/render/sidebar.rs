@@ -78,6 +78,8 @@ pub const MIN_TERM_WIDTH: u16 = 110;
 pub const MIN_WIDTH: u16 = 24;
 /// Widest panel — leave room for the chat column.
 pub const MAX_WIDTH: u16 = 56;
+/// Empty cells between body text and the panel's right edge.
+const PAD_RIGHT: usize = 2;
 const REFRESH: Duration = Duration::from_secs(2);
 const GIT_TIMEOUT: Duration = Duration::from_millis(750);
 
@@ -357,7 +359,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     buf.paint(area, Style::default());
     let theme = &app.theme;
     let snap = &app.project;
-    let w = area.width as usize;
+    let panel_w = area.width as usize;
+    let w = panel_w.saturating_sub(PAD_RIGHT);
 
     // Invisible drag handle on the left edge — stretch the panel left/right.
     app.sidebar_resize_hit = Some(Rect {
@@ -372,7 +375,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let can_hide = app.ui.sidebar_mode == SidebarMode::Auto;
     let hide = if can_hide { "›" } else { "" };
     let title = "Project";
-    let pad = w.saturating_sub(title.chars().count() + hide.chars().count());
+    let pad = panel_w.saturating_sub(title.chars().count() + hide.chars().count());
     buf.set_line(
         area.x,
         area.y,
@@ -739,14 +742,12 @@ fn file_line(f: &ChangedFile, app: &App, width: usize, stat_w: usize) -> Line {
 
     // Every path here starts with the same directories, so cutting the front
     // leaves a column of identical prefixes. Keep the end.
-    let name = truncate_start(&f.path, width.saturating_sub(stat_w + 2));
-    // One cell of air on the right — the counts shouldn't touch the edge.
-    let gap = width.saturating_sub(name.chars().count() + own_w + 1);
+    let name = truncate_start(&f.path, width.saturating_sub(stat_w + 1));
+    let gap = width.saturating_sub(name.chars().count() + own_w);
 
     let mut spans = vec![Span::styled(name, Style::default().fg(fg))];
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(stat);
-    spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
@@ -770,7 +771,7 @@ fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
     let theme = &app.theme;
     let tokens = format_token_count(card.usage.total_tokens);
     let tokens_w = tokens.chars().count();
-    let name_budget = width.saturating_sub(tokens_w.saturating_add(2));
+    let name_budget = width.saturating_sub(tokens_w.saturating_add(1));
     let label = if card.label.trim().is_empty() {
         "subagent"
     } else {
@@ -796,7 +797,6 @@ fn agent_line(card: &SubagentCard, app: &App, width: usize) -> Line {
         Span::styled(name, Style::default().fg(name_fg)),
         Span::raw(" ".repeat(pad.saturating_add(1))),
         Span::styled(tokens, Style::default().fg(theme.faint)),
-        Span::raw(" "),
     ])
 }
 
@@ -809,7 +809,7 @@ fn terminal_line(card: &TerminalCard, app: &App, width: usize) -> Line {
         TerminalProcessState::Failed { .. } => "fail".into(),
     };
     let meta_w = meta.chars().count();
-    let name_budget = width.saturating_sub(meta_w.saturating_add(2));
+    let name_budget = width.saturating_sub(meta_w.saturating_add(1));
     let label = if card.command.trim().is_empty() {
         "terminal"
     } else {
@@ -837,7 +837,6 @@ fn terminal_line(card: &TerminalCard, app: &App, width: usize) -> Line {
         Span::styled(name, Style::default().fg(name_fg)),
         Span::raw(" ".repeat(pad.saturating_add(1))),
         Span::styled(meta, Style::default().fg(theme.faint)),
-        Span::raw(" "),
     ])
 }
 
@@ -1067,14 +1066,16 @@ mod tests {
         draw(&mut buf, Rect::new(0, 0, w, 20), &mut app);
 
         // The header keeps its `›` flush — it's the panel's edge control, not
-        // a data column.
+        // a data column. Body rows keep PAD_RIGHT empty cells.
         for row in buf.text().lines().skip(1).filter(|l| !l.trim().is_empty()) {
             let chars: Vec<char> = row.chars().collect();
-            assert_eq!(
-                chars.get(w as usize - 1).copied(),
-                Some(' '),
-                "nothing may touch the right edge: {row:?}"
-            );
+            for i in 1..=PAD_RIGHT {
+                assert_eq!(
+                    chars.get(w as usize - i).copied(),
+                    Some(' '),
+                    "nothing may touch the right edge: {row:?}"
+                );
+            }
         }
     }
 
