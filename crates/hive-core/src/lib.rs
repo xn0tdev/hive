@@ -6,11 +6,13 @@
 //! - [`tools`] — filesystem, shell, web, skill, delegate
 //! - [`swarm`] — background subagent jobs
 //! - [`skills`] — disk-backed `SKILL.md` loader
+//! - [`persona`] — user-created agent personas as markdown files
 
 pub mod config;
 pub mod error;
 pub mod event;
 pub mod message;
+pub mod persona;
 pub mod provider;
 pub mod skill;
 pub mod spawner;
