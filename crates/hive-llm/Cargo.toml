@@ -23,3 +23,4 @@ eventsource-stream = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }

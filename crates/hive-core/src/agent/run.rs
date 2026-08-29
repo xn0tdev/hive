@@ -588,6 +588,26 @@ impl Agent {
             }
 
             if tool_calls.is_empty() {
+                // The model ran out of context mid-answer. Compact once and
+                // keep going; if compaction cannot help, stop with a clear
+                // error instead of looping on truncated output.
+                if outcome.finish_reason == "length" {
+                    match self.compact_inner(true).await {
+                        Ok(()) => {
+                            self.emit(AgentEvent::Notice(
+                                "context window overflowed — compacted history and continuing"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                        Err(error) => {
+                            self.emit(AgentEvent::Error(format!(
+                                "context window overflowed and compaction could not recover: {error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
                 if assistant_text.trim().is_empty() {
                     break;
                 }

@@ -333,3 +333,56 @@ async fn turn_stops_at_the_round_cap() {
     }
     assert!(stopped, "expected a round-cap Notice event");
 }
+
+/// Always answers with `finish_reason: "length"` — the model ran out of
+/// context mid-answer.
+struct OverflowProvider;
+
+#[async_trait]
+impl LlmProvider for OverflowProvider {
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest<'_>,
+        on_delta: &mut (dyn FnMut(Delta) + Send),
+    ) -> Result<ChatOutcome> {
+        on_delta(Delta::Text("truncated answer".to_string()));
+        Ok(ChatOutcome {
+            message: Message::assistant("truncated answer"),
+            usage: Usage::default(),
+            finish_reason: "length".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn context_overflow_ends_the_turn_instead_of_looping() {
+    let builder = AgentBuilder {
+        provider: Arc::new(OverflowProvider),
+        tools: Vec::new(),
+        skills: no_skills(),
+        config: Arc::new(AppConfig::default()),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut agent = builder.build(tx, "test-model".into(), 0, noop_spawner());
+    let result = agent
+        .run_turn(
+            UserInput::from("hi"),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+    // Compaction needs at least a few messages; a short session cannot
+    // compact, so the turn must surface a clear error and end — no loop.
+    assert_eq!(result, "truncated answer");
+
+    let mut saw_overflow = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Error(msg) = ev {
+            if msg.contains("overflowed") && msg.contains("compaction") {
+                saw_overflow = true;
+            }
+        }
+    }
+    assert!(saw_overflow, "expected a context-overflow error event");
+}

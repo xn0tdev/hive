@@ -27,6 +27,45 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// the connection used to hang the turn forever; this ends it instead.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Transient failures are retried only before the first token lands — once
+/// output starts streaming, retrying would duplicate it in the UI.
+const MAX_ATTEMPTS: usize = 3;
+
+/// Base delay for the first retry; doubles per attempt, capped.
+const RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(750);
+const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// True for errors worth retrying: network-level failures and well-known
+/// transient HTTP statuses (408, 429, 5xx).
+fn is_retryable(error: &CoreError) -> bool {
+    match error {
+        // Connection reset, timeout, closed socket, TLS hiccup.
+        CoreError::Http(_) => true,
+        // API failures carry the status code up front ("429 Too Many ..." or
+        // "503: <body>"). Parse the leading digit run; anything that does not
+        // start with a plausible status is not retried.
+        CoreError::Api(msg) => msg
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .is_some_and(|code| code == 408 || code == 429 || (500..600).contains(&code)),
+        _ => false,
+    }
+}
+
+/// Exponential backoff with time-based jitter (no rand dependency).
+fn retry_delay(attempt: usize) -> std::time::Duration {
+    let base = RETRY_BASE
+        .saturating_mul(2u32.pow(attempt.saturating_sub(1) as u32))
+        .min(RETRY_CAP);
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis() as u64)
+        .unwrap_or(0)
+        % (base.as_millis() as u64 / 2 + 1);
+    base.saturating_sub(std::time::Duration::from_millis(jitter))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiFlavor {
     ChatCompletions,
@@ -77,10 +116,11 @@ impl FireworksProvider {
 
     async fn chat_completions_stream(
         &self,
-        req: ChatRequest<'_>,
+        req: &ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
+        saw_delta: &mut bool,
     ) -> Result<ChatOutcome> {
-        let mut body = build_request(&req);
+        let mut body = build_request(req);
         body.max_tokens = crate::auth::default_max_tokens(&self.base_url, body.max_tokens);
         let resp = self.post(&body).await?;
         let mut stream = resp.bytes_stream().eventsource();
@@ -99,6 +139,7 @@ impl FireworksProvider {
                 }
             };
             for delta in acc.push_chunk(chunk) {
+                *saw_delta = true;
                 on_delta(delta);
             }
         }
@@ -108,10 +149,11 @@ impl FireworksProvider {
 
     async fn responses_stream(
         &self,
-        req: ChatRequest<'_>,
+        req: &ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
+        saw_delta: &mut bool,
     ) -> Result<ChatOutcome> {
-        let body = build_responses_request(&req);
+        let body = build_responses_request(req);
         let resp = self.post(&body).await?;
         let mut stream = resp.bytes_stream().eventsource();
         let mut acc = ResponsesAccumulator::new();
@@ -132,6 +174,7 @@ impl FireworksProvider {
                 }
             };
             for delta in acc.push_event(event).map_err(CoreError::Api)? {
+                *saw_delta = true;
                 on_delta(delta);
             }
         }
@@ -166,9 +209,35 @@ impl LlmProvider for FireworksProvider {
         req: ChatRequest<'_>,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<ChatOutcome> {
-        match self.api_flavor() {
-            ApiFlavor::ChatCompletions => self.chat_completions_stream(req, on_delta).await,
-            ApiFlavor::Responses => self.responses_stream(req, on_delta).await,
+        let flavor = self.api_flavor();
+        let mut attempt: usize = 0;
+        loop {
+            attempt += 1;
+            let mut saw_delta = false;
+            let outcome = match flavor {
+                ApiFlavor::ChatCompletions => {
+                    self.chat_completions_stream(&req, on_delta, &mut saw_delta)
+                        .await
+                }
+                ApiFlavor::Responses => {
+                    self.responses_stream(&req, on_delta, &mut saw_delta).await
+                }
+            };
+            match outcome {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) if attempt < MAX_ATTEMPTS && !saw_delta && is_retryable(&error) => {
+                    let delay = retry_delay(attempt);
+                    tracing::warn!(
+                        target: "hive::provider",
+                        attempt,
+                        ?error,
+                        delay_ms = delay.as_millis(),
+                        "transient provider error before first token; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 }
@@ -197,5 +266,30 @@ mod tests {
             assert_eq!(provider.api_flavor(), ApiFlavor::ChatCompletions);
             assert_eq!(provider.endpoint(), format!("{base_url}/chat/completions"));
         }
+    }
+
+    #[test]
+    fn retry_classifies_transient_errors() {
+        assert!(is_retryable(&CoreError::Http("connection reset".into())));
+        assert!(is_retryable(&CoreError::Api("429 Too Many Requests".into())));
+        assert!(is_retryable(&CoreError::Api("503 Service Unavailable".into())));
+        assert!(is_retryable(&CoreError::Api("408: upstream timeout".into())));
+        assert!(!is_retryable(&CoreError::Api("404 Not Found".into())));
+        assert!(!is_retryable(&CoreError::Api("401 Unauthorized".into())));
+        assert!(!is_retryable(&CoreError::Api("no status here".into())));
+        assert!(!is_retryable(&CoreError::Parse("bad json".into())));
+    }
+
+    #[test]
+    fn retry_delay_grows_and_stays_capped() {
+        let first = retry_delay(1);
+        let second = retry_delay(2);
+        let third = retry_delay(3);
+        // Base 750ms doubling with ±50% jitter; attempt 3 is 1500–3000ms.
+        assert!((375..=750).contains(&first.as_millis()));
+        assert!((750..=1500).contains(&second.as_millis()));
+        assert!((1500..=3000).contains(&third.as_millis()));
+        // Attempt 5 would be 12s — the cap at 8s must hold.
+        assert!(retry_delay(5) <= RETRY_CAP);
     }
 }
