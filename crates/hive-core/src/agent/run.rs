@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::AppConfig;
-use crate::event::{AgentEvent, EventSender};
+use crate::event::{AgentEvent, EventSender, ToolBatchCall};
 use crate::message::{ContentPart, ImageSource, Message, ToolCall};
 use crate::provider::{ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
 use crate::skill::SkillSource;
@@ -18,13 +18,17 @@ use super::compact::{
     compacted_messages, estimate_tokens, format_transcript, should_compact, summarize_request,
     MIN_MESSAGES_TO_COMPACT,
 };
-use super::loop_detect::{redirect_message, LoopDetector};
+
 use super::mode::{
     multitask_mode_check, multitask_mode_tool_allowed, plan_mode_check, plan_mode_tool_allowed,
     plan_path, plan_summary, AgentMode, PLAN_REL_PATH,
 };
 use super::prompt::build_system_prompt;
 use super::session::Session;
+
+/// Hard backstop for a single turn: if the model keeps issuing tool calls
+/// past this many rounds, the turn is stopped. Esc remains the manual escape.
+pub const MAX_ROUNDS: u64 = 64;
 
 /// Input for a single user turn: text plus any attached images.
 pub struct UserInput {
@@ -173,14 +177,12 @@ impl AgentBuilder {
             cwd,
             mode,
             last_prompt_tokens: 0,
-            loop_detector: LoopDetector::default(),
-            goal: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 /// One conversational agent: a provider, a tool set, and a running session.
-/// Drives the YOLO loop and emits events for a frontend to render.
+/// Drives the agent loop and emits events for a frontend to render.
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -199,40 +201,6 @@ pub struct Agent {
     mode: AgentMode,
     /// Prompt tokens from the most recent chat request (for auto-compact).
     last_prompt_tokens: u64,
-    /// Detects repeated tool calls so the agent can break out of loops.
-    loop_detector: LoopDetector,
-    /// Active goal for the autonomous loop (None = no goal).
-    goal: Arc<Mutex<Option<GoalState>>>,
-}
-
-/// Persistent goal state for the autonomous agent loop.
-#[derive(Debug, Clone)]
-pub struct GoalState {
-    pub objective: String,
-    pub deadline: Option<std::time::Instant>,
-    pub paused: bool,
-}
-
-impl GoalState {
-    /// Remaining seconds until the deadline (0 if no deadline or expired).
-    pub fn remaining_secs(&self) -> u64 {
-        self.deadline
-            .map(|d| {
-                let now = std::time::Instant::now();
-                if d > now {
-                    d.duration_since(now).as_secs()
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0)
-    }
-
-    /// True when the deadline has passed.
-    pub fn expired(&self) -> bool {
-        self.deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-    }
 }
 
 impl Agent {
@@ -247,56 +215,6 @@ impl Agent {
     pub fn set_context_window(&mut self, window: u64) {
         let cfg = Arc::make_mut(&mut self.config);
         cfg.agent.context_window = window;
-    }
-
-    // ── Goal / autonomous loop ──────────────────────────────────────────
-
-    /// Set a goal for the autonomous loop. `deadline = None` means no timer —
-    /// the agent keeps working until the user stops it.
-    pub fn set_goal(&self, objective: String, deadline: Option<std::time::Instant>) {
-        if let Ok(mut g) = self.goal.lock() {
-            *g = Some(GoalState {
-                objective,
-                deadline,
-                paused: false,
-            });
-        }
-    }
-
-    pub fn stop_goal(&self) {
-        if let Ok(mut g) = self.goal.lock() {
-            *g = None;
-        }
-    }
-
-    pub fn pause_goal(&self) {
-        if let Ok(mut g) = self.goal.lock() {
-            if let Some(gs) = g.as_mut() {
-                gs.paused = true;
-            }
-        }
-    }
-
-    pub fn resume_goal(&self) {
-        if let Ok(mut g) = self.goal.lock() {
-            if let Some(gs) = g.as_mut() {
-                gs.paused = false;
-            }
-        }
-    }
-
-    /// True when a goal is active, not paused, and not expired.
-    pub fn goal_active(&self) -> bool {
-        self.goal
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|gs| !gs.paused && !gs.expired()))
-            .unwrap_or(false)
-    }
-
-    /// Snapshot of the current goal (if any).
-    pub fn goal_snapshot(&self) -> Option<GoalState> {
-        self.goal.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn set_vision_capable(&mut self, capable: bool) {
@@ -426,7 +344,6 @@ impl Agent {
         // Approximate the restored context so the gauge and auto-compact aren't
         // blind until the next response reports real prompt tokens.
         self.last_prompt_tokens = estimate_tokens(&self.session.messages);
-        self.loop_detector = LoopDetector::default();
     }
 
     pub fn reset(&mut self) {
@@ -436,7 +353,6 @@ impl Agent {
         self.spawner.shutdown();
         self.session.reset();
         self.last_prompt_tokens = 0;
-        self.loop_detector = LoopDetector::default();
     }
 
     fn context_window(&self) -> u64 {
@@ -547,9 +463,9 @@ impl Agent {
         Ok(())
     }
 
-    /// Run one user turn to completion: stream the model, execute any tool calls
-    /// (immediately, no confirmation), and repeat until the model stops calling
-    /// tools. Returns the final assistant text.
+    /// Run one user turn to completion: stream the model, execute any tool calls,
+    /// and repeat until the model stops calling tools or the round cap trips.
+    /// Returns the final assistant text.
     ///
     /// `follow_up`: optional mid-turn inject from the TUI (second Enter). Applied
     /// before the next model call — after the current tool batch finishes.
@@ -568,23 +484,20 @@ impl Agent {
 
         let mut final_text = String::new();
         let mut rounds: u64 = 0;
-        let max_rounds = if self.depth == 0 {
-            self.config.agent.max_turns
-        } else {
-            self.config.agent.max_turns_subagent
-        };
 
         loop {
             rounds += 1;
-            if max_rounds > 0 && rounds > max_rounds {
-                self.emit(AgentEvent::Notice(format!(
-                    "Stopped after {max_rounds} tool rounds."
-                )));
-                break;
-            }
 
             if interrupt.load(Ordering::Relaxed) {
                 self.emit(AgentEvent::Notice("Interrupted.".to_string()));
+                break;
+            }
+
+            // Hard backstop: stop a turn that will not converge on its own.
+            if rounds > MAX_ROUNDS {
+                self.emit(AgentEvent::Notice(format!(
+                    "stopped after {MAX_ROUNDS} rounds — the turn was not converging; press Esc or rephrase the request"
+                )));
                 break;
             }
 
@@ -606,15 +519,20 @@ impl Agent {
             self.emit(AgentEvent::AssistantStarted);
 
             let events = self.events.clone();
-            let saw_reasoning = Arc::new(AtomicBool::new(false));
-            let saw_reasoning_cb = saw_reasoning.clone();
-            let mut on_delta = move |d: Delta| match d {
-                Delta::Text(t) => {
-                    let _ = events.send(AgentEvent::AssistantTextDelta(t));
+            let first_delta_at = Arc::new(Mutex::new(None::<Instant>));
+            let first_delta_cb = first_delta_at.clone();
+            let model_started = Instant::now();
+            let mut on_delta = move |d: Delta| {
+                if let Ok(mut first) = first_delta_cb.lock() {
+                    first.get_or_insert_with(Instant::now);
                 }
-                Delta::Reasoning(r) => {
-                    saw_reasoning_cb.store(true, Ordering::Relaxed);
-                    let _ = events.send(AgentEvent::ReasoningDelta(r));
+                match d {
+                    Delta::Text(t) => {
+                        let _ = events.send(AgentEvent::AssistantTextDelta(t));
+                    }
+                    Delta::Reasoning(r) => {
+                        let _ = events.send(AgentEvent::ReasoningDelta(r));
+                    }
                 }
             };
 
@@ -643,6 +561,25 @@ impl Agent {
 
             let assistant_text = outcome.message.text();
             let tool_calls = outcome.message.tool_calls.clone();
+            let parallel_batch_size = largest_parallel_batch(&tool_calls);
+            let model_elapsed = model_started.elapsed();
+            let first_delta_ms = first_delta_at
+                .lock()
+                .ok()
+                .and_then(|first| first.map(|at| at.duration_since(model_started).as_millis()));
+            tracing::info!(
+                target: "hive::agent_metrics",
+                round = rounds,
+                depth = self.depth,
+                model = %self.model,
+                model_ms = model_elapsed.as_millis(),
+                first_delta_ms = first_delta_ms.unwrap_or(model_elapsed.as_millis()),
+                prompt_tokens = outcome.usage.prompt_tokens,
+                completion_tokens = outcome.usage.completion_tokens,
+                tool_calls = tool_calls.len(),
+                parallel_batch_size,
+                "model round completed"
+            );
             self.session.push(outcome.message);
 
             if !assistant_text.trim().is_empty() {
@@ -665,7 +602,6 @@ impl Agent {
             // Delegate tools that only spawn work stay concurrent; read-only
             // file/search/web calls run together. Writes and shell stay ordered.
             let mut i = 0;
-            let mut loop_redirects = Vec::new();
             while i < tool_calls.len() {
                 if interrupt.load(Ordering::Relaxed) {
                     self.emit(AgentEvent::Notice("Interrupted.".to_string()));
@@ -684,39 +620,44 @@ impl Agent {
                     let batch = &tool_calls[start..i];
                     if batch.len() == 1 {
                         let call = &batch[0];
-                        if self.detect_repeated_tool_call(call, &mut loop_redirects) {
-                            self.finish_unrun_tool_calls(
-                                batch,
-                                "identical call repeated too many times",
-                            );
-                        } else {
-                            self.run_tool(&call.id, &call.name, &call.arguments, &interrupt)
-                                .await;
-                        }
-                    } else {
-                        self.run_tools_parallel(batch, &interrupt, &mut loop_redirects)
+                        self.run_tool(&call.id, &call.name, &call.arguments, &interrupt)
                             .await;
+                    } else {
+                        let batch_id = format!("explore-{rounds}-{start}");
+                        let calls = batch
+                            .iter()
+                            .map(|call| ToolBatchCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                args_preview: tool_args_preview(&call.name, &call.arguments),
+                            })
+                            .collect();
+                        self.emit(AgentEvent::ToolBatchStarted {
+                            id: batch_id.clone(),
+                            calls,
+                        });
+                        let batch_started = Instant::now();
+                        let failed = self.run_tools_parallel(batch, &interrupt).await;
+                        let elapsed_ms = batch_started.elapsed().as_millis();
+                        tracing::info!(
+                            target: "hive::agent_metrics",
+                            batch = %batch_id,
+                            tools = batch.len(),
+                            failed,
+                            elapsed_ms,
+                            "parallel tool batch completed"
+                        );
+                        self.emit(AgentEvent::ToolBatchFinished {
+                            id: batch_id,
+                            elapsed_ms,
+                            failed,
+                        });
                     }
                 } else {
-                    if self.detect_repeated_tool_call(tc, &mut loop_redirects) {
-                        self.finish_unrun_tool_calls(
-                            std::slice::from_ref(tc),
-                            "identical call repeated too many times",
-                        );
-                        i += 1;
-                        continue;
-                    }
                     self.run_tool(&tc.id, &tc.name, &tc.arguments, &interrupt)
                         .await;
                     i += 1;
                 }
-            }
-
-            // Tool results must remain adjacent to the assistant tool-call
-            // message. Inject loop guidance only after every call has a result.
-            if !loop_redirects.is_empty() {
-                self.session
-                    .push(Message::user(loop_redirects.join("\n\n")));
             }
 
             if interrupt.load(Ordering::Relaxed) {
@@ -737,29 +678,7 @@ impl Agent {
             }
         }
 
-        // Goal loop: instead of TurnFinished, emit a goal event so the driver
-        // can start the next turn automatically.
-        if self.depth == 0 {
-            if let Some(gs) = self.goal_snapshot() {
-                if gs.expired() {
-                    self.emit(AgentEvent::GoalExpired {
-                        objective: gs.objective.clone(),
-                    });
-                    self.stop_goal();
-                } else if !gs.paused && !interrupt.load(Ordering::Relaxed) {
-                    self.emit(AgentEvent::GoalContinue {
-                        objective: gs.objective.clone(),
-                        remaining_secs: gs.remaining_secs(),
-                    });
-                } else {
-                    self.emit(AgentEvent::TurnFinished);
-                }
-            } else {
-                self.emit(AgentEvent::TurnFinished);
-            }
-        } else {
-            self.emit(AgentEvent::TurnFinished);
-        }
+        self.emit(AgentEvent::TurnFinished);
         final_text
     }
 
@@ -771,6 +690,20 @@ impl Agent {
         self.run_turn(UserInput::from(prompt.into()), interrupt, follow_up)
             .await
     }
+}
+
+fn largest_parallel_batch(calls: &[ToolCall]) -> usize {
+    let mut largest = 0;
+    let mut current = 0;
+    for call in calls {
+        if is_parallel_tool(&call.name) {
+            current += 1;
+            largest = largest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    largest
 }
 
 #[path = "tool_dispatch.rs"]

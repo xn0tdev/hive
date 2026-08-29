@@ -1,6 +1,6 @@
 use super::*;
 use crate::TuiInit;
-use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus};
+use hive_core::event::{AgentEvent, SubagentLine, SubagentStatus, ToolBatchCall};
 use hive_core::{TerminalController, TerminalProcessState};
 
 fn app() -> App {
@@ -168,16 +168,6 @@ fn deadline_only_state_does_not_request_fast_animation() {
     a.flash("saved");
     assert!(a.animation_interval().is_none());
     assert!(a.next_visual_deadline().is_some());
-
-    a.apply(AgentEvent::GoalSet {
-        objective: "wait".into(),
-        deadline: None,
-    });
-    a.running = false;
-    assert_eq!(
-        a.animation_interval(),
-        Some(std::time::Duration::from_secs(1))
-    );
 }
 
 #[test]
@@ -304,20 +294,6 @@ fn mode_switched_updates_chip_and_adds_card() {
     let text = buf.text();
     assert!(text.contains("Switched to Plan Mode"), "{text}");
     assert!(text.contains("large multi-part"), "{text}");
-}
-
-#[test]
-fn loop_detected_adds_card_and_flash() {
-    let mut a = app();
-    assert!(a.apply(AgentEvent::LoopDetected {
-        tool: "read_file".into(),
-    }));
-    assert!(matches!(a.blocks.last(), Some(Block::LoopDetected(_))));
-
-    let buf = comb::render(comb::Size::new(120, 40), |f| crate::render::draw(f, &mut a));
-    let text = buf.text();
-    assert!(text.contains("Loop detected"), "{text}");
-    assert!(text.contains("restarting task"), "{text}");
 }
 
 #[test]
@@ -486,6 +462,93 @@ fn tool_output_truncation_preserves_utf8_boundaries() {
     };
     assert!(card.output.len() <= 8000);
     assert!(card.output.is_char_boundary(0));
+}
+
+#[test]
+fn parallel_batch_routes_child_events_without_singleton_cards() {
+    let mut a = app();
+    a.apply(AgentEvent::ToolBatchStarted {
+        id: "batch-1".into(),
+        calls: vec![
+            ToolBatchCall {
+                id: "read-1".into(),
+                name: "read_file".into(),
+                args_preview: "src/a.rs".into(),
+            },
+            ToolBatchCall {
+                id: "search-1".into(),
+                name: "grep".into(),
+                args_preview: "needle".into(),
+            },
+        ],
+    });
+    for (id, name, args) in [
+        ("read-1", "read_file", "src/a.rs"),
+        ("search-1", "grep", "needle"),
+    ] {
+        a.apply(AgentEvent::ToolStarted {
+            id: id.into(),
+            name: name.into(),
+            args_preview: args.into(),
+        });
+    }
+    a.apply(AgentEvent::ToolOutput {
+        id: "search-1".into(),
+        chunk: "src/a.rs:10:needle".into(),
+    });
+    a.apply(AgentEvent::ToolFinished {
+        id: "read-1".into(),
+        name: "read_file".into(),
+        ok: true,
+        summary: "ok".into(),
+    });
+    a.apply(AgentEvent::ToolFinished {
+        id: "search-1".into(),
+        name: "grep".into(),
+        ok: false,
+        summary: "failed".into(),
+    });
+    a.apply(AgentEvent::ToolBatchFinished {
+        id: "batch-1".into(),
+        elapsed_ms: 42,
+        failed: 1,
+    });
+
+    assert_eq!(
+        a.blocks
+            .iter()
+            .filter(|block| matches!(block, Block::Tool(_)))
+            .count(),
+        0
+    );
+    let group = a
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Explore(group) => Some(group),
+            _ => None,
+        })
+        .expect("explore group");
+    assert_eq!(group.elapsed_ms, Some(42));
+    assert_eq!(group.failed, 1);
+    assert!(group.details_open);
+    assert_eq!(group.tools[1].status, ToolStatus::Err);
+    assert!(group.tools[1].output.contains("needle"));
+}
+
+#[test]
+fn singleton_tool_stays_a_regular_card() {
+    let mut a = app();
+    a.apply(AgentEvent::ToolStarted {
+        id: "read-1".into(),
+        name: "read_file".into(),
+        args_preview: "src/a.rs".into(),
+    });
+    assert!(a.blocks.iter().any(|block| matches!(block, Block::Tool(_))));
+    assert!(!a
+        .blocks
+        .iter()
+        .any(|block| matches!(block, Block::Explore(_))));
 }
 
 #[test]
@@ -1069,6 +1132,7 @@ fn pending_dispatch_recall_restores_input_and_removes_block() {
         mode: AgentMode::Make,
         composer: "test prompt".into(),
         attaches: Vec::new(),
+        pasted: Vec::new(),
         submitted_at: std::time::Instant::now(),
     });
     a.push_user("test prompt".into());

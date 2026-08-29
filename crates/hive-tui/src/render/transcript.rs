@@ -11,8 +11,8 @@ use crate::app::state::{
 };
 use crate::app::{App, MdRows};
 use crate::render::tools::{
-    compacted_card_lines, format_tool_secs, goal_card_lines, loop_detected_card_lines,
-    mode_switch_card_lines, plan_card_lines, subagent_card_lines, terminal_card_lines,
+    compacted_card_lines, explore_card_lines, format_tool_secs, mode_switch_card_lines,
+    plan_card_lines, subagent_card_lines, terminal_card_lines,
     todo_card_lines, tool_lines, work_summary_card_lines, SPINNER_COL, TITLE_ROW,
 };
 use crate::render::{markdown, wrap};
@@ -111,6 +111,7 @@ impl From<BuiltAssistantRow> for AssistantResponseRow {
 fn transcript_has_moving_blocks(app: &App) -> bool {
     app.blocks.iter().any(|block| match block {
         UiBlock::Tool(card) => card.status == ToolStatus::Running,
+        UiBlock::Explore(card) => card.running(),
         UiBlock::Subagent(card) => card.status == SubagentStatus::Running,
         UiBlock::Plan(card) => card.status == crate::app::state::PlanStatus::Writing,
         UiBlock::Terminal(card) => {
@@ -121,7 +122,6 @@ fn transcript_has_moving_blocks(app: &App) -> bool {
             streaming: true, ..
         } => true,
         UiBlock::Compacted(card) => card.before.is_none(),
-        UiBlock::Goal(_) => app.goal.as_ref().is_some_and(|goal| !goal.paused),
         _ => false,
     })
 }
@@ -399,6 +399,10 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             || matches!(
                 &app.blocks[i],
                 UiBlock::Tool(card) if !app.ui.show_tool_cards && card.status == ToolStatus::Ok
+            )
+            || matches!(
+                &app.blocks[i],
+                UiBlock::Explore(card) if !app.ui.show_tool_cards && card.failed == 0 && !card.running()
             );
         if hidden {
             continue;
@@ -411,7 +415,11 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
             let curr = &app.blocks[i];
             let tight = matches!(
                 (prev, curr),
-                (UiBlock::Tool(_), UiBlock::Tool(_)) | (UiBlock::Notice(_), UiBlock::Notice(_))
+                (UiBlock::Tool(_), UiBlock::Tool(_))
+                    | (UiBlock::Tool(_), UiBlock::Explore(_))
+                    | (UiBlock::Explore(_), UiBlock::Tool(_))
+                    | (UiBlock::Explore(_), UiBlock::Explore(_))
+                    | (UiBlock::Notice(_), UiBlock::Notice(_))
             );
             if !tight {
                 out.push(Line::from(""));
@@ -461,10 +469,7 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                             })
                             .collect();
                         MdRows {
-                            lines: indent(
-                                wrapped.into_iter().map(|row| row.line).collect(),
-                                width,
-                            ),
+                            lines: indent(wrapped.into_iter().map(|row| row.line).collect(), width),
                             joins,
                         }
                     });
@@ -599,12 +604,16 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                     heads.push((line_idx, i));
                 }
             }
+            UiBlock::Explore(card) => {
+                let card = card.clone();
+                let hovered = app.hover_block == Some(i);
+                let start = out.len();
+                out.extend(explore_card_lines(&card, app, width, hovered));
+                heads.push((start, i));
+            }
             UiBlock::ModeSwitch(card) => {
                 let card = card.clone();
                 out.extend(mode_switch_card_lines(&card, app, width));
-            }
-            UiBlock::LoopDetected(_) => {
-                out.extend(loop_detected_card_lines(app, width));
             }
             UiBlock::Compacted(card) => {
                 let card = card.clone();
@@ -618,23 +627,6 @@ fn build(app: &mut App, width: usize) -> (Vec<Line>, Vec<(usize, usize)>, Vec<Bu
                 for line_idx in start..out.len() {
                     heads.push((line_idx, i));
                 }
-            }
-            UiBlock::Goal(card) => {
-                let card = card.clone();
-                out.extend(goal_card_lines(&card, app, width));
-            }
-            UiBlock::GoalCircle(n) => {
-                let line_color = comb::Color::Rgb(0x40, 0x40, 0x40);
-                let text = format!(" Circle {} ", n);
-                let text_w = text.chars().count();
-                let fill = width.saturating_sub(text_w);
-                let left = fill / 2;
-                let right = fill.saturating_sub(left);
-                out.push(Line::from(vec![
-                    Span::styled("─".repeat(left), Style::default().fg(line_color)),
-                    Span::styled(text, Style::default().fg(app.theme.dim)),
-                    Span::styled("─".repeat(right), Style::default().fg(line_color)),
-                ]));
             }
             UiBlock::Todos(items) => {
                 let items = items.clone();
@@ -1030,10 +1022,13 @@ fn user_lines(text: &str, app: &App, width: usize, hovered: bool) -> Vec<Line> {
     out.extend(wrapped.into_iter().map(|line| {
         let mut used = 2usize;
         let mut spans = vec![Span::styled("  ", body)];
-        // Re-tint the content spans onto the strip background.
+        // Re-tint the content spans onto the strip background, keeping
+        // `[ pasted text N ]` tokens dimmed inside the message.
         for s in line.spans {
-            used += s.width();
-            spans.push(Span::styled(s.content, s.style.bg(bg)));
+            for span in app.pasted_token_spans(&s.content, s.style.bg(bg), bg) {
+                used += span.width();
+                spans.push(span);
+            }
         }
         if width > used {
             spans.push(Span::styled(" ".repeat(width - used), body));
@@ -1310,28 +1305,6 @@ mod tests {
             1,
             "label must not stamp every sentence: {text}"
         );
-    }
-
-    #[test]
-    fn active_goal_deadline_refreshes_cached_transcript_once_per_second() {
-        use comb::{render, Size};
-        use hive_core::event::AgentEvent;
-
-        let mut a = app();
-        a.apply(AgentEvent::GoalSet {
-            objective: "keep working".into(),
-            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
-        });
-        a.running = false;
-        let _ = render(Size::new(100, 30), |frame| {
-            crate::render::draw(frame, &mut a)
-        });
-        let builds = a.transcript_cache.builds;
-        a.spinner += 10;
-        let _ = render(Size::new(100, 30), |frame| {
-            crate::render::draw(frame, &mut a)
-        });
-        assert_eq!(a.transcript_cache.builds, builds + 1);
     }
 
     #[test]
@@ -1978,6 +1951,79 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn explored_group_renders_collapsed_running_completed_and_failed_states() {
+        use hive_core::event::{AgentEvent, ToolBatchCall};
+
+        let mut a = app();
+        a.apply(AgentEvent::ToolBatchStarted {
+            id: "explore-1".into(),
+            calls: vec![
+                ToolBatchCall {
+                    id: "read-1".into(),
+                    name: "read_file".into(),
+                    args_preview: "src/main.rs".into(),
+                },
+                ToolBatchCall {
+                    id: "search-1".into(),
+                    name: "grep".into(),
+                    args_preview: "AgentEvent".into(),
+                },
+                ToolBatchCall {
+                    id: "dir-1".into(),
+                    name: "list_dir".into(),
+                    args_preview: "src".into(),
+                },
+            ],
+        });
+        let running = tool_text(&mut a, 90);
+        assert!(
+            running.contains("Exploring · 1 file · 1 search · 1 directory"),
+            "{running}"
+        );
+        assert!(!running.contains("src/main.rs"), "{running}");
+
+        a.activate_expandable_at(
+            a.blocks
+                .iter()
+                .position(|block| matches!(block, crate::app::state::Block::Explore(_)))
+                .expect("explore block"),
+        );
+        let open = tool_text(&mut a, 90);
+        assert!(open.contains("├─"), "{open}");
+        assert!(open.contains("└─"), "{open}");
+        assert!(open.contains("src/main.rs"), "{open}");
+
+        for (id, name, ok) in [
+            ("read-1", "read_file", true),
+            ("search-1", "grep", true),
+            ("dir-1", "list_dir", true),
+        ] {
+            a.apply(AgentEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                ok,
+                summary: String::new(),
+            });
+        }
+        a.apply(AgentEvent::ToolBatchFinished {
+            id: "explore-1".into(),
+            elapsed_ms: 1_200,
+            failed: 0,
+        });
+        let completed = tool_text(&mut a, 90);
+        assert!(completed.contains("Explored"), "{completed}");
+        assert!(completed.contains("1.2s"), "{completed}");
+
+        a.apply(AgentEvent::ToolBatchFinished {
+            id: "explore-1".into(),
+            elapsed_ms: 1_200,
+            failed: 1,
+        });
+        let failed = tool_text(&mut a, 90);
+        assert!(failed.contains("1 failed"), "{failed}");
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub(super) fn handle_paste(
         });
         return true;
     }
-    if app.about_open() || app.settings_open() || app.goal_overlay_open() || app.recap_open() {
+    if app.about_open() || app.settings_open() || app.recap_open() {
         return false;
     }
     if app.palette_open() {
@@ -48,6 +48,20 @@ pub(super) fn handle_paste(
     if let Some(leftover) = app.try_attach_pasted_path(text) {
         if leftover.is_empty() {
             app.flash(format!("Attached {}", app.attachment_tags_line()));
+            app.reset_menu();
+            return true;
+        }
+    }
+
+    if crate::app::pasted::is_large_paste(text) {
+        // Normalize like insert_str does, but keep as an inline token instead
+        // of dumping the text into the composer.
+        let normalized = crate::app::input::normalize_paste(text);
+        if !normalized.is_empty() {
+            let token = app.add_pasted_block(normalized);
+            app.input.insert_str(&format!("{token} "));
+            app.flash(format!("Pasted {token}"));
+            app.prompt_history.reset();
             app.reset_menu();
             return true;
         }

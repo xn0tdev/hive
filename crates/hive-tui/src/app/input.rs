@@ -310,7 +310,7 @@ fn display_width(s: &str) -> usize {
 }
 
 /// Normalize clipboard paste: CRLF/CR → LF, drop other C0 controls (keep tab/LF).
-fn normalize_paste(text: &str) -> String {
+pub fn normalize_paste(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

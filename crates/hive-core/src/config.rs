@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
@@ -92,6 +92,11 @@ fn short_model_id(model: &str) -> &str {
 pub struct ModelsConfig {
     /// The one model Hive uses for chat, tools, and subagents.
     pub default: ModelRef,
+    /// Optional curated picker (`id` + pretty `name`). Non-empty replaces
+    /// `GET /models` for the active provider when that profile has no
+    /// `models` list of its own.
+    #[serde(default)]
+    pub catalog: Vec<ModelRef>,
 }
 
 impl Default for ModelsConfig {
@@ -101,6 +106,7 @@ impl Default for ModelsConfig {
                 id: "accounts/fireworks/routers/kimi-k2p6-fast".into(),
                 name: Some("Kimi Fast".into()),
             },
+            catalog: Vec::new(),
         }
     }
 }
@@ -316,6 +322,10 @@ pub struct ConnectionProfile {
     pub api_key_env: String,
     pub api_key: Option<String>,
     pub model: ModelRef,
+    /// Curated picker for this provider. Non-empty replaces `GET /models`
+    /// so a local/test API can show only the ids you named.
+    #[serde(default)]
+    pub models: Vec<ModelRef>,
 }
 
 /// Saved providers + which one is active. Mirrored into `[provider]` / `[models]`.
@@ -345,20 +355,6 @@ pub struct AgentConfig {
     /// explicit; it is not a substitute for an OS-level shell sandbox.
     #[serde(default = "default_true")]
     pub workspace_only: bool,
-    /// Max model rounds per user turn (0 = unlimited). Stops a runaway tool loop.
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u64,
-    /// Max model rounds for a subagent job (0 = unlimited).
-    #[serde(default = "default_max_turns_subagent")]
-    pub max_turns_subagent: u64,
-}
-
-fn default_max_turns() -> u64 {
-    80
-}
-
-fn default_max_turns_subagent() -> u64 {
-    40
 }
 
 impl Default for AgentConfig {
@@ -366,10 +362,22 @@ impl Default for AgentConfig {
         AgentConfig {
             context_window: DEFAULT_CONTEXT_WINDOW,
             workspace_only: true,
-            max_turns: default_max_turns(),
-            max_turns_subagent: default_max_turns_subagent(),
         }
     }
+}
+
+/// One stdio MCP server: a process speaking JSON-RPC over stdin/stdout.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Executable to spawn.
+    pub command: String,
+    /// Arguments passed to `command`.
+    pub args: Vec<String>,
+    /// Extra environment variables for the server process.
+    pub env: std::collections::HashMap<String, String>,
+    /// Per-request timeout in seconds (default 60).
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -390,6 +398,9 @@ pub struct AppConfig {
     /// Reserved for multi-provider support.
     #[serde(default)]
     pub connections: ConnectionsConfig,
+    /// External MCP tools via stdio servers: `[mcp_servers.<id>]`.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
     #[serde(skip)]
     pub secrets: Secrets,
 }
@@ -415,7 +426,47 @@ impl AppConfig {
         if r.id() == id {
             return r.display_name().to_string();
         }
+        for m in self.curated_models_for(&self.connections.active) {
+            if m.id() == id {
+                return m.display_name().to_string();
+            }
+        }
         short_model_id(id).to_string()
+    }
+
+    /// Curated picker for a connection. Non-empty means skip auto-detect.
+    ///
+    /// Profile `models` wins; `[models].catalog` is the fallback for the
+    /// active provider so a simple config doesn't have to touch `[connections]`.
+    pub fn curated_models_for(&self, connection_id: &str) -> &[ModelRef] {
+        if let Some(profile) = self.connections.profiles.get(connection_id) {
+            if profile.models.iter().any(|m| !m.id().trim().is_empty()) {
+                return &profile.models;
+            }
+        }
+        if !self
+            .models
+            .catalog
+            .iter()
+            .any(|m| !m.id().trim().is_empty())
+        {
+            return &[];
+        }
+        let active = self.connections.active.as_str();
+        let is_active = connection_id == active
+            || self.connections.profiles.is_empty()
+            || (active.is_empty() && (connection_id.is_empty() || connection_id == "default"));
+        if is_active {
+            &self.models.catalog
+        } else {
+            &[]
+        }
+    }
+
+    pub fn has_curated_models(&self, connection_id: &str) -> bool {
+        self.curated_models_for(connection_id)
+            .iter()
+            .any(|m| !m.id().trim().is_empty())
     }
 }
 
@@ -434,5 +485,63 @@ mod tests {
             name: Some("Bar".into()),
         };
         assert_eq!(named.display_name(), "Bar");
+    }
+
+    #[test]
+    fn curated_models_parse_on_profile_and_top_level_catalog() {
+        let mut cfg = AppConfig::default();
+        cfg.models.default = ModelRef::Named {
+            id: "local-a".into(),
+            name: Some("A".into()),
+        };
+        cfg.models.catalog = vec![
+            ModelRef::Named {
+                id: "local-a".into(),
+                name: Some("A".into()),
+            },
+            ModelRef::Id("local-b".into()),
+        ];
+        cfg.connections.active = "local".into();
+        cfg.connections.profiles.insert(
+            "local".into(),
+            ConnectionProfile {
+                label: "Local".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                api_key_env: "LOCAL_API_KEY".into(),
+                model: ModelRef::Named {
+                    id: "local-a".into(),
+                    name: Some("A".into()),
+                },
+                ..Default::default()
+            },
+        );
+        cfg.connections.profiles.insert(
+            "lab".into(),
+            ConnectionProfile {
+                label: "Lab".into(),
+                base_url: "http://127.0.0.1:9000/v1".into(),
+                api_key_env: "LAB_API_KEY".into(),
+                models: vec![ModelRef::Named {
+                    id: "exp-1".into(),
+                    name: Some("Experiment".into()),
+                }],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(cfg.curated_models_for("lab").len(), 1);
+        assert_eq!(cfg.curated_models_for("lab")[0].id(), "exp-1");
+        assert_eq!(
+            cfg.curated_models_for("lab")[0].display_name(),
+            "Experiment"
+        );
+        // Active profile has no `models` list → top-level catalog.
+        let active = cfg.curated_models_for("local");
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].display_name(), "A");
+        assert_eq!(active[1].id(), "local-b");
+        assert!(cfg.has_curated_models("local"));
+        assert!(cfg.has_curated_models("lab"));
+        assert!(!cfg.has_curated_models("missing"));
     }
 }

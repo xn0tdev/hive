@@ -67,6 +67,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Prompt + text first (caret stays on top); @chips sit under the message.
     let mut lines: Vec<Line> = Vec::new();
+    // Composer text with `[ pasted text N ]` tokens tinted in place.
     if app.input.is_empty() {
         let placeholder = if app.in_plan_view() && app.plan_composing() {
             "Comment · MARK saves · select more anytime"
@@ -98,13 +99,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Span::styled("  ", text_style)
             };
-            lines.push(Line::from(vec![head, Span::styled(text, text_style)]));
+            let mut spans = vec![head];
+            spans.extend(app.pasted_token_spans(&text, text_style, bg));
+            lines.push(Line::from(spans));
         }
     }
     if app.has_pending_attaches() {
         let mut spans = vec![Span::styled("  ", text_style)];
         spans.extend(attach_chip_spans(app, bg));
-        // Nobody guesses ↓ on their own; say it, then say what to press next.
         let hint = if app.selected_attach().is_some() {
             "  ⌫ remove · esc back"
         } else {
@@ -151,6 +153,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         || app.about_open()
         // A highlighted chip owns the keyboard; two carets would be a lie.
         || app.selected_attach().is_some()
+        || app.selected_pasted().is_some()
     {
         return;
     }
@@ -160,7 +163,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let max_x = inner.x + inner.width.saturating_sub(1);
     let max_y = inner.y + inner.height.saturating_sub(1);
     let x = (inner.x + x_off + vcol as u16).min(max_x);
-    // Chips are below the text — don't push the caret down.
     let y = (inner.y + vrow.saturating_sub(scroll) as u16).min(max_y);
     f.set_cursor(x, y);
 }

@@ -883,10 +883,7 @@ pub(crate) fn keep_preformatted(line: &Line) -> bool {
 }
 
 fn fence_lang_label(raw: Option<&str>) -> Option<String> {
-    let token = raw?
-        .split([',', ' ', '\t'])
-        .next()?
-        .trim();
+    let token = raw?.split([',', ' ', '\t']).next()?.trim();
     if token.is_empty() {
         return None;
     }
@@ -910,7 +907,9 @@ fn fence_lang_label(raw: Option<&str>) -> Option<String> {
         "cpp" | "c++" | "cxx" => Some("C++".into()),
         other => {
             let mut chars = other.chars();
-            chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
         }
     }
 }
@@ -1078,11 +1077,7 @@ mod tests {
         );
         let line = out
             .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.content == "function")
-            })
+            .find(|line| line.spans.iter().any(|span| span.content == "function"))
             .expect("highlighted source row");
         let style = |text: &str| {
             line.spans

@@ -20,6 +20,7 @@ pub(crate) struct Panel<'a> {
     max_width: u16,
     pad_x: u16,
     pad_y: u16,
+    v_margin: u16,
 }
 
 impl<'a> Panel<'a> {
@@ -34,6 +35,7 @@ impl<'a> Panel<'a> {
             max_width: u16::MAX,
             pad_x: 2,
             pad_y: 1,
+            v_margin: 0,
         }
     }
 
@@ -55,6 +57,12 @@ impl<'a> Panel<'a> {
         self
     }
 
+    /// Keep this many rows free above and below the panel when possible.
+    pub(crate) fn vertical_margin(mut self, rows: u16) -> Self {
+        self.v_margin = rows;
+        self
+    }
+
     pub(crate) fn layout(self, area: Rect) -> ModalLayout {
         self.modal(Style::default()).layout(area)
     }
@@ -72,6 +80,7 @@ impl<'a> Panel<'a> {
         Modal::new(self.height)
             .width_ratio(self.width_numerator, self.width_denominator)
             .width_bounds(self.min_width, self.max_width)
+            .vertical_margin(self.v_margin)
             .padding(self.pad_x, self.pad_y)
             .fill(fill)
     }

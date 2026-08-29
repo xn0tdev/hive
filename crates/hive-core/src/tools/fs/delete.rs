@@ -19,9 +19,10 @@ impl Tool for DeletePath {
 
     fn description(&self) -> &str {
         "Delete a specific file or directory (directories recursively). Use for paths \
-the user asked to remove or that you created and need to clean up — do not refuse, do \
-not ask for confirmation, and prefer this over shell. Target only the named path; do \
-not delete broad trees unless the user explicitly named them."
+the user asked to remove or that you created and need to clean up. Target only the \
+named path; never delete broad trees (home, `.git`, node_modules, whole projects) \
+unless the user explicitly named that path. If the delete is large, outside the \
+workspace, or hard to recover, confirm the target with the user in chat first."
     }
 
     fn parameters(&self) -> Value {

@@ -258,6 +258,10 @@ impl App {
         self.scroll_from_bottom = 0;
         self.pending_attaches.clear();
         self.attach_selected = None;
+        self.pasted_blocks.clear();
+        self.pasted_selected = None;
+        self.pasted_view = None;
+        self.next_pasted_id = 1;
         self.follow_up = None;
         self.prompt_history.reset();
         self.pending_dispatch = None;
@@ -266,9 +270,7 @@ impl App {
         self.close_palette();
         self.close_about();
         self.close_context_menu();
-        self.close_goal_overlay();
         self.close_recap();
-        self.goal = None;
         self.clear_todos();
         self.running = false;
         self.click_hits.clear();
@@ -306,7 +308,6 @@ impl App {
             && !self.in_special_view()
             && !self.about_open()
             && !self.settings_open()
-            && !self.goal_overlay_open()
             && !self.recap_open()
             && !self.palette_open()
     }
@@ -346,6 +347,7 @@ impl App {
             return false;
         };
         self.pending_attaches = fu.attaches;
+        self.pasted_blocks = fu.pasted;
         self.agent_mode = fu.mode;
         self.input.value = fu.composer;
         self.input.end();
@@ -441,6 +443,7 @@ impl App {
         self.input.value = pd.composer;
         self.input.end();
         self.pending_attaches = pd.attaches;
+        self.pasted_blocks = pd.pasted;
         self.agent_mode = pd.mode;
         self.reset_menu();
         self.scroll_from_bottom = 0;
@@ -622,6 +625,16 @@ impl App {
             return false;
         }
         self.attach_selected = Some(0);
+        true
+    }
+
+    /// Step onto the last chip — ↑ from the pasted chips walks back onto the
+    /// @chips. False when there are none.
+    pub fn select_last_attach(&mut self) -> bool {
+        if self.pending_attaches.is_empty() {
+            return false;
+        }
+        self.attach_selected = Some(self.pending_attaches.len() - 1);
         true
     }
 

@@ -24,13 +24,14 @@ pub enum PlanStatus {
     Ready,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
     Ok,
     Err,
 }
 
+#[derive(Clone)]
 pub struct ToolCard {
     pub id: String,
     pub name: String,
@@ -56,6 +57,33 @@ pub struct FileSnapshot {
 }
 
 impl ToolCard {
+    pub fn secs(&self) -> f64 {
+        match self.elapsed_ms {
+            Some(ms) => ms as f64 / 1000.0,
+            None => self.started.elapsed().as_millis() as f64 / 1000.0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ExploreCard {
+    pub id: String,
+    pub tools: Vec<ToolCard>,
+    pub started: std::time::Instant,
+    pub elapsed_ms: Option<u128>,
+    pub failed: usize,
+    pub details_open: bool,
+}
+
+impl ExploreCard {
+    pub fn running(&self) -> bool {
+        self.elapsed_ms.is_none()
+            || self
+                .tools
+                .iter()
+                .any(|tool| tool.status == ToolStatus::Running)
+    }
+
     pub fn secs(&self) -> f64 {
         match self.elapsed_ms {
             Some(ms) => ms as f64 / 1000.0,
@@ -406,10 +434,6 @@ pub struct ModeSwitchCard {
     pub reason: String,
 }
 
-/// Inline card announcing a detected tool-call loop.
-#[derive(Clone)]
-pub struct LoopDetectedCard;
-
 /// Inline card showing context compaction in progress or completed.
 #[derive(Clone)]
 pub struct CompactedCard {
@@ -467,6 +491,8 @@ pub enum Block {
     },
     Reasoning(Thought),
     Tool(ToolCard),
+    /// Several independent read-only tools executed in parallel.
+    Explore(ExploreCard),
     /// Persistent interactive terminal session.
     Terminal(Box<TerminalCard>),
     /// Subagent status + expandable conversation.
@@ -475,25 +501,12 @@ pub enum Block {
     Plan(PlanCard),
     /// The agent switched its working mode with a reason.
     ModeSwitch(ModeSwitchCard),
-    /// The agent was stuck in a tool-call loop; recovery was attempted.
-    LoopDetected(LoopDetectedCard),
     /// Context compaction in progress or completed.
     Compacted(CompactedCard),
     /// "Worked for Nm" summary at the end of a turn.
     WorkSummary(WorkSummaryCard),
-    /// Goal set — autonomous agent loop card.
-    Goal(GoalCard),
-    /// "Circle N" separator between goal turns.
-    GoalCircle(u64),
     /// Agent's task list progress (set_todos tool).
     Todos(Vec<hive_core::TodoItem>),
     Notice(String),
     Error(String),
-}
-
-/// Goal card shown in the transcript when `/goal` is started.
-#[derive(Debug, Clone)]
-pub struct GoalCard {
-    pub objective: String,
-    pub deadline: Option<std::time::Instant>,
 }

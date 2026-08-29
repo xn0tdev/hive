@@ -80,12 +80,8 @@ impl PersonaBook {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "agent".to_string());
-                let (name, description, prompt) =
-                    parse_persona(&content, &fallback);
-                if personas
-                    .iter()
-                    .any(|p| p.meta.name == name)
-                {
+                let (name, description, prompt) = parse_persona(&content, &fallback);
+                if personas.iter().any(|p| p.meta.name == name) {
                     tracing::info!("persona `{name}` overridden by an earlier scope");
                     continue;
                 }
@@ -160,10 +156,8 @@ mod tests {
     use super::*;
 
     fn tmp_scope(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "hive-persona-test-{tag}-{}",
-            std::process::id()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("hive-persona-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -198,7 +192,10 @@ mod tests {
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].name, "vasya");
         assert_eq!(metas[0].description, "Manager");
-        assert_eq!(book.read("vasya").unwrap().prompt, "Talk to Artem politely.");
+        assert_eq!(
+            book.read("vasya").unwrap().prompt,
+            "Talk to Artem politely."
+        );
         let _ = std::fs::remove_dir_all(&scope);
     }
 
@@ -206,11 +203,7 @@ mod tests {
     fn earlier_scope_wins_on_name_collision() {
         let global = tmp_scope("global");
         let project = tmp_scope("project");
-        PersonaBook::save(
-            &global,
-            &Persona::new("dev", "Global dev", "global prompt"),
-        )
-        .unwrap();
+        PersonaBook::save(&global, &Persona::new("dev", "Global dev", "global prompt")).unwrap();
         PersonaBook::save(
             &project,
             &Persona::new("dev", "Project dev", "project prompt"),

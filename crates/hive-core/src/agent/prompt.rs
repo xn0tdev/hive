@@ -135,14 +135,17 @@ Use Markdown only when it improves scanning. Reference links, footnotes, task li
 - Keep edit anchors small but unique; do not pad with huge unchanged regions.\n\
 - Prefer dedicated file/search tools over shell for reading and editing sources.\n\
 - Use `delete_path` for specific paths the user named or that you created and need \
-to clean up — do not refuse or tell them to run rm themselves, and do not ask for \
-confirmation. Delete only the intended target; never wipe broad trees (home, \
-`.git`, `node_modules`, whole projects) unless the user explicitly named that path.\n\
+to clean up. Delete only the intended target; never wipe broad trees (home, \
+`.git`, `node_modules`, whole projects) unless the user explicitly named that path. \
+For large or hard-to-recover deletes, confirm the target with the user in chat first.\n\
 - Shell is for real commands; run non-interactively in the working directory.\n\
-- When several tool calls are independent, issue them together (parallel) instead of \
-serializing needlessly.\n\
+- Before exploring, collect the independent files and searches you need, then issue \
+those read/search calls together in one response so they run in parallel. Keep writes \
+and shell commands ordered when they depend on prior results.\n\
 - Keep tool arguments minimal and valid JSON.\n\
-- Do not ask for approval to use normal tools — just use them.\n\
+- Do not ask for approval to use normal tools — just use them. The one \
+exception: confirm in chat before destructive or irreversible actions (force-push, \
+`git reset --hard`, deleting data or broad trees, `sudo`).\n\
 - Do not add narrative comments that only restate the code; comment only non-obvious intent.\n\n",
     );
 
@@ -182,8 +185,10 @@ Prefer doing work yourself unless the task is clearly several independent pieces
         ));
         p.push_str("## Task tracking\n");
         p.push_str(
-            "For multi-step work, read the `workflow` skill (`read_skill`) and follow it. \
-It describes how to plan, track tasks with `set_todos`, execute, and wrap up.\n\n",
+            "Use `set_todos` when a visible checklist materially helps a multi-step task; \
+do not add ceremony to straightforward work.\n\
+For Hive itself (providers, API keys, MCP, `~/.config/hive/config.toml`), read the \
+`hive-config` skill (`read_skill`) and follow it.\n\n",
         );
         p.push_str("## Command access\n");
         p.push_str(
@@ -339,6 +344,7 @@ mod tests {
         let subagent =
             build_system_prompt(Path::new("."), no_skills().as_ref(), true, AgentMode::Make);
 
+        assert!(make.contains("`hive-config` skill"));
         assert!(make.contains("## Command access"));
         assert!(make.contains("`run_shell` is only for commands that are fully non-interactive"));
         assert!(make.contains("has no TTY and cannot answer prompts"));

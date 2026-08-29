@@ -4,7 +4,7 @@
 //! While a turn is running, a compact 5-cube ping-pong wave sits just left of
 //! the mode chip (or flush-right when there is no chip) — not next to the model.
 
-use comb::{Buffer, Color, Frame, Line, Modifier, Rect, Span, Style};
+use comb::{Buffer, Color, Frame, Line, Rect, Span, Style};
 use hive_core::AgentMode;
 
 use crate::render::input_bars;
@@ -41,19 +41,6 @@ pub fn model_line(app: &crate::app::App) -> Line {
         spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
         spans.push(Span::styled(cost, Style::default().fg(theme.faint)));
     }
-    // Goal timer.
-    if let Some(g) = app.goal.as_ref() {
-        let label = g.timer_label();
-        let color = if g.paused {
-            theme.faint
-        } else if g.deadline.is_some_and(|_| g.remaining_secs() < 300) {
-            theme.warn
-        } else {
-            theme.dim
-        };
-        spans.push(Span::styled(" · ", Style::default().fg(theme.faint)));
-        spans.push(Span::styled(label, Style::default().fg(color)));
-    }
     Line::from(spans)
 }
 
@@ -75,27 +62,13 @@ pub fn draw_with_mode(f: &mut Frame, area: Rect, app: &crate::app::App) {
     f.buffer()
         .set_line(area.x, area.y, &model_line(app), area.width);
     let chip_w = mode_chip_width(app);
-    let goal_w: u16 = if app.goal.is_some() { 6 } else { 0 };
     draw_working(
         f.buffer(),
         Rect::new(area.x, area.y, area.width, 1),
         app,
-        chip_w + goal_w,
+        chip_w,
     );
     input_bars::draw_mode_chip(f, Rect::new(area.x, area.y, area.width, 1), app);
-    // GOAL chip on the model row, just left of the mode chip.
-    if app.goal.is_some() {
-        let theme = &app.theme;
-        let label = " GOAL ";
-        let w = label.chars().count() as u16;
-        let x = area.x + area.width.saturating_sub(chip_w).saturating_sub(w);
-        let style = Style::default()
-            .fg(theme.sel_fg)
-            .bg(theme.goal)
-            .add(Modifier::BOLD);
-        let line = Line::from(Span::styled(label, style));
-        f.buffer().set_line(x, area.y, &line, w);
-    }
     f.buffer()
         .set_line(area.x, area.y + 1, &cwd_line(app), area.width);
 }
@@ -177,9 +150,6 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 }
 
 /// `used / window` for the context meter in the footer.
-/// A goal loop keeps one conversation across circles, so there is only ever one
-/// context to report — the running total the model is actually being sent, and
-/// the one auto-compact fires on.
 fn format_context(used: u64, window: u64) -> String {
     let window = window.max(1);
     format!("{} / {}", short_tokens(used), short_tokens(window))

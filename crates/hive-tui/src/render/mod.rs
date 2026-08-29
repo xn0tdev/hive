@@ -20,12 +20,12 @@ pub(crate) mod about;
 pub mod bot;
 mod context_menu;
 mod footer;
-pub(crate) mod goal;
 mod input_bars;
 mod jump_bottom;
 mod menu;
 pub(crate) mod palette;
 mod panel;
+pub(crate) mod pasted_view;
 pub(crate) mod recap;
 pub(crate) mod settings;
 pub(crate) mod sidebar;
@@ -138,7 +138,7 @@ fn draw_landing(f: &mut Frame, area: Rect, app: &mut App) {
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
-    draw_goal(f, area, app);
+    draw_pasted_view(f, area, app);
 }
 
 /// The normal, bottom-anchored conversation layout.
@@ -278,20 +278,14 @@ fn draw_active(f: &mut Frame, area: Rect, app: &mut App) {
     draw_palette(f, area, app);
     draw_about(f, area, app);
     draw_settings(f, area, app);
-    draw_goal(f, area, app);
     draw_recap(f, area, app);
     draw_context_menu(f, area, app);
+    draw_pasted_view(f, area, app);
 }
 
 fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
     if app.settings_open() {
         settings::draw(f.buffer(), area, app);
-    }
-}
-
-fn draw_goal(f: &mut Frame, area: Rect, app: &App) {
-    if app.goal_overlay_open() {
-        goal::draw(f.buffer(), area, app);
     }
 }
 
@@ -323,6 +317,12 @@ fn draw_about(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_context_menu(f: &mut Frame, area: Rect, app: &mut App) {
     if app.context_menu_open() {
         context_menu::draw(f.buffer(), area, app);
+    }
+}
+
+fn draw_pasted_view(f: &mut Frame, area: Rect, app: &mut App) {
+    if app.pasted_view.is_some() {
+        crate::render::pasted_view::draw(f.buffer(), area, app);
     }
 }
 

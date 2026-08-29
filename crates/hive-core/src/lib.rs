@@ -2,7 +2,7 @@
 //!
 //! Layout:
 //! - root modules — shared types and traits (`config`, `tool`, `provider`, …)
-//! - [`agent`] — the YOLO loop, session, prompt
+//! - [`agent`] — the agent loop, session, prompt
 //! - [`tools`] — filesystem, shell, web, skill, delegate
 //! - [`swarm`] — background subagent jobs
 //! - [`skills`] — disk-backed `SKILL.md` loader
@@ -32,7 +32,7 @@ pub use config::{
 pub use error::{CoreError, Result};
 pub use event::{
     AgentEvent, CatalogModel, ConnectionInfo, EventReceiver, EventSender, Renderer, SubagentLine,
-    SubagentStatus, TodoItem,
+    SubagentStatus, TodoItem, ToolBatchCall,
 };
 pub use message::{ContentPart, ImageSource, Message, Role, ToolCall};
 pub use provider::{ChatOutcome, ChatRequest, Delta, LlmProvider, ToolSpec, Usage};
@@ -51,8 +51,8 @@ pub use tool::{Tool, ToolContext, ToolRegistration, ToolResult};
 pub use agent::{
     discover_context_files, is_orchestrator_tool, is_plan_path, multitask_mode_check,
     multitask_mode_tool_allowed, plan_mode_check, plan_mode_tool_allowed, plan_path, plan_summary,
-    tool_args_preview, Agent, AgentBuilder, AgentMode, ContextFile, FollowUpSlot, GoalState,
-    Session, SessionMeta, SessionSnapshot, UserInput, PLAN_REL_PATH,
+    tool_args_preview, Agent, AgentBuilder, AgentMode, ContextFile, FollowUpSlot, Session,
+    SessionMeta, SessionSnapshot, UserInput, MAX_ROUNDS, PLAN_REL_PATH,
 };
 pub use skills::inside::{CompositeSkills, InsideSkills};
 pub use skills::DiskSkills;

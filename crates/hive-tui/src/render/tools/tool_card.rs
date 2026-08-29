@@ -27,7 +27,7 @@ pub(crate) fn tool_lines(card: &ToolCard, app: &App, width: usize, hovered: bool
 /// Lay the hover band under a card's rows so it reads as one clickable block.
 /// Spans that already carry a background (diff bands, code) keep theirs — the
 /// band only fills what's behind the plain text and past the end of the row.
-fn hover_band(lines: Vec<Line>, bg: Color, width: usize) -> Vec<Line> {
+pub(crate) fn hover_band(lines: Vec<Line>, bg: Color, width: usize) -> Vec<Line> {
     lines
         .into_iter()
         .map(|line| {

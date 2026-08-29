@@ -36,6 +36,10 @@ api_key_env = "FIREWORKS_API_KEY"
 # Bare string = provider id (display = last path segment).
 # Or table: id for the API, name for the TUI footer.
 default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast" }
+# Optional curated picker. Non-empty replaces GET /models for the active provider.
+# catalog = [
+#   { id = "my-local-model", name = "Local" },
+# ]
 
 # Saved connections are managed in /connect; choosing a model activates its provider.
 # [connections]
@@ -63,8 +67,6 @@ max_depth = 1
 [agent]
 context_window = 256000
 workspace_only = true
-max_turns = 80
-max_turns_subagent = 40
 
 [ui]
 theme = "gray"
@@ -199,6 +201,7 @@ fn ensure_connections(cfg: &mut AppConfig) {
                 api_key_env: cfg.provider.api_key_env.clone(),
                 api_key: cfg.provider.api_key.clone(),
                 model: cfg.models.default.clone(),
+                models: cfg.models.catalog.clone(),
             },
         );
         return;
@@ -699,6 +702,11 @@ fn upsert_connection_in_root(
             .and_then(|value| value.as_table())
             .and_then(|profile| profile.get("model"))
             .cloned();
+        let existing_models = profiles
+            .get(id)
+            .and_then(|value| value.as_table())
+            .and_then(|profile| profile.get("models"))
+            .cloned();
 
         let mut profile = toml::map::Map::new();
         profile.insert("label".into(), toml::Value::String(label.to_string()));
@@ -721,6 +729,9 @@ fn upsert_connection_in_root(
             profile.insert("model".into(), toml::Value::Table(model));
         } else if let Some(model) = existing_model {
             profile.insert("model".into(), model);
+        }
+        if let Some(models) = existing_models {
+            profile.insert("models".into(), models);
         }
 
         profiles.insert(id.to_string(), toml::Value::Table(profile.clone()));
@@ -1073,6 +1084,45 @@ model = { id = "gpt-5", name = "GPT-5" }
         assert!(root["connections"]["profiles"]["groq"]
             .get("model")
             .is_none());
+    }
+
+    #[test]
+    fn upsert_keeps_a_curated_models_list() {
+        let value: toml::Value = toml::from_str(
+            r#"
+[connections]
+active = "local"
+
+[connections.profiles.local]
+label = "Local"
+base_url = "http://127.0.0.1:8000/v1"
+api_key_env = "LOCAL_API_KEY"
+models = [
+  { id = "hive-dev", name = "Hive Dev" },
+]
+"#,
+        )
+        .unwrap();
+        let mut root = value.as_table().unwrap().clone();
+
+        upsert_connection_in_root(
+            &mut root,
+            "local",
+            "Local",
+            "http://127.0.0.1:8000/v1",
+            "LOCAL_API_KEY",
+            Some("sk-test"),
+            "",
+            "",
+        )
+        .unwrap();
+
+        let models = root["connections"]["profiles"]["local"]["models"]
+            .as_array()
+            .expect("models list kept");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"].as_str(), Some("hive-dev"));
+        assert_eq!(models[0]["name"].as_str(), Some("Hive Dev"));
     }
 
     #[test]

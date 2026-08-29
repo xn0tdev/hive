@@ -497,7 +497,10 @@ mod tests {
 
     #[test]
     fn wrap_breaks_words_and_long_tokens() {
-        assert_eq!(wrap_text("hello brave world", 5), ["hello", "brave", "world"]);
+        assert_eq!(
+            wrap_text("hello brave world", 5),
+            ["hello", "brave", "world"]
+        );
         assert_eq!(wrap_text("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrap_text("a\n\nb", 5), ["a", "", "b"]);
     }

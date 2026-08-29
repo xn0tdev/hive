@@ -63,24 +63,6 @@ impl App {
         self.settings.is_some()
     }
 
-    // ── Goal overlay ────────────────────────────────────────────────────
-
-    pub fn open_goal_overlay(&mut self) {
-        self.close_palette();
-        self.close_settings();
-        self.close_about();
-        self.close_recap();
-        self.goal_overlay = Some(goal::GoalOverlayState::new());
-    }
-
-    pub fn close_goal_overlay(&mut self) {
-        self.goal_overlay = None;
-    }
-
-    pub fn goal_overlay_open(&self) -> bool {
-        self.goal_overlay.is_some()
-    }
-
     // ── Sessions picker ─────────────────────────────────────────────────
 
     pub fn open_sessions_picker(&mut self) {
@@ -99,14 +81,6 @@ impl App {
                 pal.list_offset = 0;
             }
         }
-    }
-
-    pub fn goal_active(&self) -> bool {
-        self.goal.is_some()
-    }
-
-    pub fn goal_paused(&self) -> bool {
-        self.goal.as_ref().is_some_and(|g| g.paused)
     }
 
     /// Apply in-memory UI prefs and ask the driver to persist them.

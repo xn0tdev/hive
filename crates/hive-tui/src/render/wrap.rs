@@ -347,11 +347,9 @@ mod tests {
         let wrapped = wrap_lines(source, 5);
 
         assert!(!wrapped.is_empty());
-        assert!(
-            wrapped
-                .iter()
-                .all(|line| crate::render::markdown::code_line_marker(line).is_some())
-        );
+        assert!(wrapped
+            .iter()
+            .all(|line| crate::render::markdown::code_line_marker(line).is_some()));
         let body = wrapped
             .iter()
             .map(|l| {

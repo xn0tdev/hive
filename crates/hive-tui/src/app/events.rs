@@ -48,6 +48,34 @@ impl App {
                 self.finalize_assistant(text);
                 true
             }
+            AgentEvent::ToolBatchStarted { id, calls } => {
+                self.close_thought();
+                let started = std::time::Instant::now();
+                let tools = calls
+                    .into_iter()
+                    .filter(|call| shows_generic_tool_card(&call.name, &call.args_preview))
+                    .map(|call| ToolCard {
+                        id: call.id,
+                        name: call.name,
+                        args: call.args_preview,
+                        output: String::new(),
+                        status: ToolStatus::Running,
+                        started,
+                        elapsed_ms: None,
+                        details_open: false,
+                        snapshot: None,
+                    })
+                    .collect();
+                self.blocks.push(Block::Explore(ExploreCard {
+                    id,
+                    tools,
+                    started,
+                    elapsed_ms: None,
+                    failed: 0,
+                    details_open: false,
+                }));
+                true
+            }
             AgentEvent::ToolStarted {
                 id,
                 name,
@@ -61,7 +89,10 @@ impl App {
                 // Plan writes are card-only (no green/orange tool chrome).
                 // Subagent tools render as Subagent cards, not tool rows.
                 // `switch_mode` renders as its own "Switched to … Mode" card.
-                if shows_generic_tool_card(&name, &args_preview) {
+                let already_grouped = self.blocks.iter().any(|block| {
+                    matches!(block, Block::Explore(group) if group.tools.iter().any(|tool| tool.id == id))
+                });
+                if !already_grouped && shows_generic_tool_card(&name, &args_preview) {
                     let details_open = matches!(name.as_str(), "edit_file" | "write_file");
                     self.blocks.push(Block::Tool(ToolCard {
                         id,
@@ -83,6 +114,21 @@ impl App {
             }
             AgentEvent::ToolFinished { id, ok, .. } => {
                 self.finish_tool(&id, ok);
+                true
+            }
+            AgentEvent::ToolBatchFinished {
+                id,
+                elapsed_ms,
+                failed,
+            } => {
+                if let Some(group) = self.blocks.iter_mut().rev().find_map(|block| match block {
+                    Block::Explore(group) if group.id == id => Some(group),
+                    _ => None,
+                }) {
+                    group.elapsed_ms = Some(elapsed_ms);
+                    group.failed = failed;
+                    group.details_open |= failed > 0;
+                }
                 true
             }
             AgentEvent::FileSnapshot { id, path, content } => {
@@ -135,12 +181,6 @@ impl App {
                     .push(Block::ModeSwitch(ModeSwitchCard { mode, reason }));
                 self.scroll_from_bottom = 0;
                 self.flash(format!("Switched to {} mode", mode.title()));
-                true
-            }
-            AgentEvent::LoopDetected { tool: _ } => {
-                self.blocks.push(Block::LoopDetected(LoopDetectedCard));
-                self.scroll_from_bottom = 0;
-                self.flash("Loop detected · restarting task");
                 true
             }
             AgentEvent::Compacted { before, after } => {
@@ -415,87 +455,6 @@ impl App {
                 }
                 true
             }
-            AgentEvent::GoalSet {
-                objective,
-                deadline,
-            } => {
-                self.goal = Some(goal::GoalStatus {
-                    objective: objective.clone(),
-                    deadline,
-                    paused: false,
-                    circle: 0,
-                });
-                self.blocks.push(Block::User(objective.clone()));
-                self.blocks.push(Block::Goal(GoalCard {
-                    objective,
-                    deadline,
-                }));
-                self.running = true;
-                self.turn_started_at = Some(std::time::Instant::now());
-                self.scroll_from_bottom = 0;
-                true
-            }
-            AgentEvent::GoalContinue {
-                objective,
-                remaining_secs,
-            } => {
-                if let Some(g) = self.goal.as_mut() {
-                    g.objective = objective;
-                    if let Some(d) = g.deadline {
-                        let now = std::time::Instant::now();
-                        g.deadline = Some(now + std::time::Duration::from_secs(remaining_secs));
-                        let _ = d;
-                    }
-                    g.circle += 1;
-                }
-                // Treat like TurnFinished for UI state (stop spinner).
-                self.running = false;
-                self.close_thought();
-                self.finalize_streaming();
-                self.collapse_completed_tool_details();
-                // "Circle N" summary instead of "Worked for Nm" during a goal loop.
-                if let Some(g) = self.goal.as_ref() {
-                    self.blocks.push(Block::GoalCircle(g.circle));
-                    self.scroll_from_bottom = 0;
-                }
-                self.project.invalidate();
-                self.refresh_project();
-                true
-            }
-            AgentEvent::GoalExpired { objective } => {
-                self.goal = None;
-                self.running = false;
-                self.close_thought();
-                self.finalize_streaming();
-                self.collapse_completed_tool_details();
-                self.blocks
-                    .push(Block::Notice(format!("Goal time expired: {objective}")));
-                self.scroll_from_bottom = 0;
-                self.project.invalidate();
-                self.refresh_project();
-                true
-            }
-            AgentEvent::GoalStopped => {
-                self.goal = None;
-                self.collapse_completed_tool_details();
-                self.flash("Goal stopped");
-                true
-            }
-            AgentEvent::GoalPaused => {
-                if let Some(g) = self.goal.as_mut() {
-                    g.paused = true;
-                }
-                // Pausing on its own looks like a dead end — say what stops it.
-                self.flash("Goal paused — esc again to stop");
-                true
-            }
-            AgentEvent::GoalResumed => {
-                if let Some(g) = self.goal.as_mut() {
-                    g.paused = false;
-                }
-                self.flash("Goal resumed");
-                true
-            }
             AgentEvent::Notice(s) => {
                 if looks_like_error(&s) {
                     self.flash_error(s);
@@ -563,11 +522,14 @@ impl App {
                             let Some(call_id) = m.tool_call_id.as_deref() else {
                                 continue;
                             };
-                            if let Some(Block::Tool(card)) = self
-                                .blocks
-                                .iter_mut()
-                                .rev()
-                                .find(|b| matches!(b, Block::Tool(c) if c.id == call_id))
+                            if let Some(card) =
+                                self.blocks.iter_mut().rev().find_map(|block| match block {
+                                    Block::Tool(card) if card.id == call_id => Some(card),
+                                    Block::Explore(group) => {
+                                        group.tools.iter_mut().find(|tool| tool.id == call_id)
+                                    }
+                                    _ => None,
+                                })
                             {
                                 card.output = m.text();
                             }

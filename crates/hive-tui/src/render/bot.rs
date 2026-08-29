@@ -16,10 +16,7 @@ pub fn draw(f: &mut Frame, hub: &BotHub) {
     let area = f.area();
 
     let rail_w = (area.width * 24 / 100).clamp(16, 30);
-    let chat_w = area
-        .width
-        .saturating_sub(RIGHT_MARGIN + rail_w)
-        .max(10);
+    let chat_w = area.width.saturating_sub(RIGHT_MARGIN + rail_w).max(10);
 
     // The rail header carries the brand; panels span the full screen height.
     let rail = Rect::new(0, 0, rail_w, area.height);
@@ -54,16 +51,14 @@ fn chip(buf: &mut comb::Buffer, x: u16, y: u16, label: &str, theme: &Theme) -> u
 
 /// `Name, preview` on one line, truncating to fit. The name is plain, the
 /// preview is italic metadata.
-fn rail_card_label(
-    name: &str,
-    preview: &str,
-    width: usize,
-    theme: &Theme,
-    selected: bool,
-) -> Line {
+fn rail_card_label(name: &str, preview: &str, width: usize, theme: &Theme, selected: bool) -> Line {
     let name_style = Style::new()
         .fg(if selected { theme.accent } else { theme.fg })
-        .add(if selected { Modifier::BOLD } else { Modifier::NONE });
+        .add(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::NONE
+        });
     let meta_style = Style::new()
         .fg(if selected { theme.dim } else { theme.faint })
         .add(Modifier::ITALIC);
@@ -145,7 +140,11 @@ fn draw_rail(f: &mut Frame, rect: Rect, hub: &BotHub) {
         }
         let selected = idx == hub.selected_index();
         let card = Rect::new(card_x, y, card_w, 3);
-        let bg = if selected { theme.strip_hover } else { theme.input };
+        let bg = if selected {
+            theme.strip_hover
+        } else {
+            theme.input
+        };
         buf.paint(card, Style::new().bg(bg));
 
         let chat = hub.chat_for(&persona.name);

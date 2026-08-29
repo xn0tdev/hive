@@ -187,150 +187,6 @@ pub async fn run(
                     }
                 }
             }
-            InputCommand::SetGoal {
-                objective,
-                duration,
-            } => {
-                let deadline = duration.map(|d| std::time::Instant::now() + d);
-                agent.set_goal(objective.clone(), deadline);
-                let _ = events.send(AgentEvent::GoalSet {
-                    objective: objective.clone(),
-                    deadline,
-                });
-                // Start the first turn with the objective as the user prompt.
-                interrupt.store(false, Ordering::Relaxed);
-                if let Ok(mut g) = follow_up.lock() {
-                    *g = None;
-                }
-                let turn = agent.run_turn(
-                    UserInput::from(objective),
-                    interrupt.clone(),
-                    follow_up.clone(),
-                );
-                if drive_turn(
-                    turn,
-                    &mut input_rx,
-                    &terminal,
-                    &events,
-                    &mut pending,
-                    interrupt.as_ref(),
-                )
-                .await
-                .is_none()
-                {
-                    break 'commands;
-                }
-                // Goal continuation loop.
-                loop {
-                    drain_goal_commands(&agent, &events, &mut pending);
-                    if !agent.goal_active() {
-                        break;
-                    }
-                    let snap = match agent.goal_snapshot() {
-                        Some(g) => g,
-                        None => break,
-                    };
-                    let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
-                    interrupt.store(false, Ordering::Relaxed);
-                    if let Ok(mut g) = follow_up.lock() {
-                        *g = None;
-                    }
-                    let turn = agent.run_turn(
-                        UserInput::from(prompt),
-                        interrupt.clone(),
-                        follow_up.clone(),
-                    );
-                    if drive_turn(
-                        turn,
-                        &mut input_rx,
-                        &terminal,
-                        &events,
-                        &mut pending,
-                        interrupt.as_ref(),
-                    )
-                    .await
-                    .is_none()
-                    {
-                        break 'commands;
-                    }
-                }
-            }
-            InputCommand::StopGoal => {
-                agent.stop_goal();
-                let _ = events.send(AgentEvent::GoalStopped);
-            }
-            InputCommand::PauseGoal => {
-                agent.pause_goal();
-                let _ = events.send(AgentEvent::GoalPaused);
-            }
-            InputCommand::ResumeGoal => {
-                agent.resume_goal();
-                let _ = events.send(AgentEvent::GoalResumed);
-                if !agent.goal_active() {
-                    continue;
-                }
-                let snap = match agent.goal_snapshot() {
-                    Some(g) => g,
-                    None => continue,
-                };
-                let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
-                interrupt.store(false, Ordering::Relaxed);
-                if let Ok(mut g) = follow_up.lock() {
-                    *g = None;
-                }
-                let turn = agent.run_turn(
-                    UserInput::from(prompt),
-                    interrupt.clone(),
-                    follow_up.clone(),
-                );
-                if drive_turn(
-                    turn,
-                    &mut input_rx,
-                    &terminal,
-                    &events,
-                    &mut pending,
-                    interrupt.as_ref(),
-                )
-                .await
-                .is_none()
-                {
-                    break 'commands;
-                }
-                // Goal continuation loop.
-                loop {
-                    drain_goal_commands(&agent, &events, &mut pending);
-                    if !agent.goal_active() {
-                        break;
-                    }
-                    let snap = match agent.goal_snapshot() {
-                        Some(g) => g,
-                        None => break,
-                    };
-                    let prompt = build_goal_continuation(&snap.objective, snap.remaining_secs());
-                    interrupt.store(false, Ordering::Relaxed);
-                    if let Ok(mut g) = follow_up.lock() {
-                        *g = None;
-                    }
-                    let turn = agent.run_turn(
-                        UserInput::from(prompt),
-                        interrupt.clone(),
-                        follow_up.clone(),
-                    );
-                    if drive_turn(
-                        turn,
-                        &mut input_rx,
-                        &terminal,
-                        &events,
-                        &mut pending,
-                        interrupt.as_ref(),
-                    )
-                    .await
-                    .is_none()
-                    {
-                        break 'commands;
-                    }
-                }
-            }
             InputCommand::FetchModels => {
                 spawn_model_refresh(cfg.clone(), events.clone());
             }
@@ -781,11 +637,63 @@ fn spawn_model_refresh(cfg: Arc<AppConfig>, events: EventSender) {
     });
 }
 
+fn connection_label(cfg: &AppConfig, id: &str, base_url: &str) -> String {
+    cfg.connections
+        .profiles
+        .get(id)
+        .map(|p| p.label.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| provider_label_for_base(base_url).to_string())
+}
+
+fn curated_catalog_rows(cfg: &AppConfig) -> Vec<CatalogModel> {
+    let mut rows = Vec::new();
+    if cfg.connections.profiles.is_empty() {
+        let id = if cfg.connections.active.is_empty() {
+            "default"
+        } else {
+            cfg.connections.active.as_str()
+        };
+        push_curated_rows(cfg, id, &cfg.provider.base_url, &mut rows);
+        return rows;
+    }
+    for (id, profile) in &cfg.connections.profiles {
+        push_curated_rows(cfg, id, &profile.base_url, &mut rows);
+    }
+    rows
+}
+
+fn push_curated_rows(cfg: &AppConfig, id: &str, base_url: &str, rows: &mut Vec<CatalogModel>) {
+    if !cfg.has_curated_models(id) {
+        return;
+    }
+    let group = connection_label(cfg, id, base_url);
+    for model in cfg.curated_models_for(id) {
+        let model_id = model.id().trim();
+        if model_id.is_empty() {
+            continue;
+        }
+        rows.push(CatalogModel {
+            id: model_id.to_string(),
+            name: model.display_name().to_string(),
+            detail: String::new(),
+            group: group.clone(),
+            connection_id: id.to_string(),
+            vision: false,
+            context: 0,
+            cost_input: 0.0,
+            cost_output: 0.0,
+        });
+    }
+}
+
 fn listing_targets(cfg: &AppConfig) -> Result<Vec<ListingTarget>, String> {
     let mut targets: Vec<ListingTarget> = cfg
         .connections
         .profiles
         .iter()
+        .filter(|(id, _)| !cfg.has_curated_models(id))
         .filter_map(|(id, p)| {
             let key = cfg
                 .secrets
@@ -793,39 +701,37 @@ fn listing_targets(cfg: &AppConfig) -> Result<Vec<ListingTarget>, String> {
                 .get(id)
                 .cloned()
                 .filter(|k| !k.is_empty())?;
-            let label = if p.label.trim().is_empty() {
-                provider_label_for_base(&p.base_url).to_string()
-            } else {
-                p.label.clone()
-            };
             Some(ListingTarget {
                 connection_id: id.clone(),
-                label,
+                label: connection_label(cfg, id, &p.base_url),
                 base_url: p.base_url.clone(),
                 api_key: key,
             })
         })
         .collect();
 
-    // No profiles / no keys on profiles — fall back to active [provider].
+    // No auto-detect targets — fall back to active [provider] unless that
+    // provider already has a curated picker (no GET /models needed).
     if targets.is_empty() {
-        let key = cfg.secrets.provider_api_key.clone();
-        if key.is_empty() {
-            return Err("no provider API key — add one with /connect".into());
-        }
-        let base = cfg.provider.base_url.clone();
-        let label = active_provider_label(cfg, &base);
         let id = if cfg.connections.active.is_empty() {
-            "default".into()
+            "default".to_string()
         } else {
             cfg.connections.active.clone()
         };
-        targets.push(ListingTarget {
-            connection_id: id,
-            label,
-            base_url: base,
-            api_key: key,
-        });
+        if !cfg.has_curated_models(&id) {
+            let key = cfg.secrets.provider_api_key.clone();
+            if key.is_empty() {
+                return Err("no provider API key — add one with /connect".into());
+            }
+            let base = cfg.provider.base_url.clone();
+            let label = active_provider_label(cfg, &base);
+            targets.push(ListingTarget {
+                connection_id: id,
+                label,
+                base_url: base,
+                api_key: key,
+            });
+        }
     }
     Ok(targets)
 }
@@ -857,16 +763,46 @@ fn emit_models(events: &EventSender, models: Vec<CatalogModel>) {
     let _ = events.send(AgentEvent::ModelsListed { models });
 }
 
+fn sort_catalog(models: &mut [CatalogModel]) {
+    models.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
+    let curated = curated_catalog_rows(cfg);
     let targets = match listing_targets(cfg) {
         Ok(targets) => targets,
         Err(message) => {
-            let _ = events.send(AgentEvent::ModelsListFailed(message));
+            if curated.is_empty() {
+                let _ = events.send(AgentEvent::ModelsListFailed(message));
+                return;
+            }
+            let mut models = curated;
+            sort_catalog(&mut models);
+            emit_models(events, models);
             return;
         }
     };
+    if targets.is_empty() {
+        if curated.is_empty() {
+            let _ = events.send(AgentEvent::ModelsListFailed(
+                "no provider API key — add one with /connect".into(),
+            ));
+            return;
+        }
+        let mut models = curated;
+        sort_catalog(&mut models);
+        emit_models(events, models);
+        return;
+    }
     let sources = listing_sources(&targets);
-    if let Some(models) = cached_listing(&sources) {
+    if let Some(mut models) = cached_listing(&sources) {
+        models.extend(curated);
+        sort_catalog(&mut models);
         emit_models(events, models);
         return;
     }
@@ -874,12 +810,14 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
     // Startup prefetch and an immediate /models open can race. One network
     // fan-out does the work; the follower reuses the populated cache.
     let _fetch_guard = LISTING_FETCH_LOCK.lock().await;
-    if let Some(models) = cached_listing(&sources) {
+    if let Some(mut models) = cached_listing(&sources) {
+        models.extend(curated);
+        sort_catalog(&mut models);
         emit_models(events, models);
         return;
     }
 
-    let mut models = Vec::new();
+    let mut remote = Vec::new();
     let mut errors = Vec::new();
 
     // Every listing is independent of the others and of the models.dev catalog,
@@ -894,17 +832,17 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
 
     for (target, listed) in targets.iter().zip(listings) {
         match listed {
-            Ok(remote) => {
+            Ok(listed) => {
                 let hint = models_dev_hint_for_base(&target.base_url);
-                let remote = merge_catalog_models(remote, catalog.as_ref(), hint);
-                let cards = enrich_models(&remote, catalog.as_ref(), hint);
-                models.extend(catalog_rows(&target.label, &target.connection_id, &cards));
+                let listed = merge_catalog_models(listed, catalog.as_ref(), hint);
+                let cards = enrich_models(&listed, catalog.as_ref(), hint);
+                remote.extend(catalog_rows(&target.label, &target.connection_id, &cards));
             }
             Err(e) => errors.push(format!("{}: {e}", target.label)),
         }
     }
 
-    if models.is_empty() {
+    if remote.is_empty() && curated.is_empty() {
         let msg = if errors.is_empty() {
             "no models returned".into()
         } else {
@@ -914,20 +852,14 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
         return;
     }
 
-    models.sort_by(|a, b| {
-        a.group
-            .cmp(&b.group)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    // A partial list is still useful now, but must not hide a temporarily
-    // failing provider for the full cache TTL.
+    // Cache only auto-detected rows. Curated lists are cheap and must not
+    // duplicate on a later cache hit.
     if errors.is_empty() {
         if let Ok(mut g) = LISTING_CACHE.lock() {
             *g = Some(ListingCacheEntry {
                 sources,
                 fetched_at: Instant::now(),
-                models: models.clone(),
+                models: remote.clone(),
             });
         }
     } else {
@@ -936,7 +868,9 @@ async fn fetch_and_emit_models(cfg: &AppConfig, events: &EventSender) {
             errors.join("; ")
         )));
     }
-    emit_models(events, models);
+    remote.extend(curated);
+    sort_catalog(&mut remote);
+    emit_models(events, remote);
 }
 
 /// One section header for `/model`: active connection label, else host → known name.
@@ -948,58 +882,6 @@ fn active_provider_label(cfg: &AppConfig, base_url: &str) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| provider_label_for_base(base_url).to_string())
-}
-
-/// Apply any goal commands (pause/stop/resume) that queued up during a turn,
-/// so the continuation loop sees the updated state before deciding to go again.
-fn drain_goal_commands(agent: &Agent, events: &EventSender, pending: &mut VecDeque<InputCommand>) {
-    let mut i = 0;
-    while i < pending.len() {
-        let is_goal_cmd = matches!(
-            pending[i],
-            InputCommand::StopGoal | InputCommand::PauseGoal | InputCommand::ResumeGoal
-        );
-        if !is_goal_cmd {
-            i += 1;
-            continue;
-        }
-        let cmd = pending.remove(i).unwrap();
-        match cmd {
-            InputCommand::StopGoal => {
-                agent.stop_goal();
-                let _ = events.send(AgentEvent::GoalStopped);
-            }
-            InputCommand::PauseGoal => {
-                agent.pause_goal();
-                let _ = events.send(AgentEvent::GoalPaused);
-            }
-            InputCommand::ResumeGoal => {
-                agent.resume_goal();
-                let _ = events.send(AgentEvent::GoalResumed);
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// Build the continuation prompt for the goal loop.
-fn build_goal_continuation(objective: &str, remaining_secs: u64) -> String {
-    let time_line = if remaining_secs > 0 {
-        if remaining_secs >= 3600 {
-            format!(
-                " ({}h {}m left)",
-                remaining_secs / 3600,
-                (remaining_secs % 3600) / 60
-            )
-        } else if remaining_secs >= 60 {
-            format!(" ({}m left)", remaining_secs / 60)
-        } else {
-            format!(" ({}s left)", remaining_secs)
-        }
-    } else {
-        " (no time limit — keep working until stopped)".to_string()
-    };
-    format!("Continue: {objective}{time_line}")
 }
 
 fn catalog_rows(group: &str, connection_id: &str, cards: &[ModelCard]) -> Vec<CatalogModel> {
@@ -1083,6 +965,7 @@ mod tests {
                 api_key_env: "GROQ_API_KEY".into(),
                 api_key: None,
                 model: ModelRef::Id("llama".into()),
+                models: Vec::new(),
             },
         );
         cfg.connections.profiles.insert(
@@ -1093,6 +976,7 @@ mod tests {
                 api_key_env: "OPENAI_API_KEY".into(),
                 api_key: None,
                 model: ModelRef::Id("gpt-5".into()),
+                models: Vec::new(),
             },
         );
         cfg.secrets
@@ -1112,6 +996,77 @@ mod tests {
         assert_eq!(targets[0].label, "Groq");
         assert_eq!(targets[1].connection_id, "openai");
         assert_eq!(targets[1].label, "OpenAI");
+    }
+
+    #[test]
+    fn curated_profile_is_skipped_by_auto_detect() {
+        let mut cfg = multi_provider_config();
+        cfg.connections.profiles.get_mut("openai").unwrap().models = vec![
+            ModelRef::Named {
+                id: "exp-1".into(),
+                name: Some("Experiment".into()),
+            },
+            ModelRef::Id("exp-2".into()),
+        ];
+
+        let targets = listing_targets(&cfg).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].connection_id, "groq");
+
+        let rows = curated_catalog_rows(&cfg);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "exp-1");
+        assert_eq!(rows[0].name, "Experiment");
+        assert_eq!(rows[0].connection_id, "openai");
+        assert_eq!(rows[1].id, "exp-2");
+        assert_eq!(rows[1].name, "exp-2");
+    }
+
+    #[test]
+    fn curated_list_does_not_need_an_api_key_to_show() {
+        use hive_core::config::{ConnectionProfile, ModelRef};
+
+        let mut cfg = AppConfig::default();
+        cfg.connections.active = "local".into();
+        cfg.connections.profiles.clear();
+        cfg.connections.profiles.insert(
+            "local".into(),
+            ConnectionProfile {
+                label: "Local".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                api_key_env: "LOCAL_API_KEY".into(),
+                api_key: None,
+                model: ModelRef::Id("hive-dev".into()),
+                models: vec![ModelRef::Named {
+                    id: "hive-dev".into(),
+                    name: Some("Hive Dev".into()),
+                }],
+            },
+        );
+
+        assert!(listing_targets(&cfg).unwrap().is_empty());
+        let rows = curated_catalog_rows(&cfg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Hive Dev");
+    }
+
+    #[test]
+    fn top_level_catalog_covers_active_provider() {
+        let mut cfg = multi_provider_config();
+        cfg.models.catalog = vec![ModelRef::Named {
+            id: "llama-local".into(),
+            name: Some("Local Llama".into()),
+        }];
+
+        let targets = listing_targets(&cfg).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].connection_id, "openai");
+
+        let rows = curated_catalog_rows(&cfg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "llama-local");
+        assert_eq!(rows[0].name, "Local Llama");
+        assert_eq!(rows[0].connection_id, "groq");
     }
 
     #[test]

@@ -89,9 +89,10 @@ impl Tool for RunShell {
     fn description(&self) -> &str {
         "Run a shell command non-interactively in the working directory \
 (Unix: `sh -c`, Windows: `cmd.exe /C`). Output is streamed live. \
-Executes immediately without confirmation. It has no TTY and cannot answer prompts; \
-use `terminal_start` first for sudo, passwords, confirmations, interactive CLIs, \
-or long-lived processes."
+It has no TTY and cannot answer prompts; use `terminal_start` first for sudo, \
+passwords, confirmations, interactive CLIs, or long-lived processes. \
+Confirm with the user in chat before destructive or irreversible commands \
+(force-push, hard reset, deleting data, wiping directories)."
     }
 
     fn parameters(&self) -> Value {

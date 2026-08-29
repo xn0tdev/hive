@@ -5,7 +5,7 @@ use super::*;
 /// Wheel scrolls the transcript; left-click toggles thoughts, opens subagent
 /// chats, hits `← back` / Make, or bonks the logo.
 ///
-/// Palette / Settings / Goal / About are keyboard-only — mouse events are
+/// Palette / Settings / About are keyboard-only — mouse events are
 /// swallowed so they don't leak through to the chat underneath. Recap takes
 /// clicks on Generating and wheel-scrolls the body.
 /// Returns `true` when the UI should redraw.
@@ -39,7 +39,7 @@ pub(super) fn handle_mouse(
     if app.recap_open() {
         return handle_recap_mouse(app, m);
     }
-    if app.palette_open() || app.settings_open() || app.goal_overlay_open() || app.about_open() {
+    if app.palette_open() || app.settings_open() || app.about_open() {
         return false;
     }
     // The composer menu is on top of the transcript, so it gets first refusal
@@ -293,6 +293,7 @@ pub(super) fn handle_mouse(
                             | Some(crate::app::state::Block::Terminal(_))
                             | Some(crate::app::state::Block::User(_))
                             | Some(crate::app::state::Block::Tool(_))
+                            | Some(crate::app::state::Block::Explore(_))
                             | Some(crate::app::state::Block::WorkSummary(_))
                     )
                     .then_some(i)

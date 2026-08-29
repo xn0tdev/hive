@@ -430,6 +430,184 @@ fn down_still_scrolls_when_there_is_nothing_attached() {
     assert_eq!(app.selected_attach(), None);
 }
 
+// ── Pasted-text chips ────────────────────────────────────────────────────
+
+fn pasted_app() -> App {
+    let mut app = test_app();
+    app.add_pasted_block("line one\nline two\nline three".into());
+    app.add_pasted_block("just one line but long enough to chip".into());
+    app.focus_input();
+    app
+}
+
+#[test]
+fn down_steps_onto_pasted_chips_after_attach_chips() {
+    let mut app = pasted_app();
+    app.attach_clipboard_image(b"png".to_vec()).expect("attach");
+
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.selected_attach(), Some(0), "attach chips come first");
+    assert_eq!(app.selected_pasted(), None);
+
+    // ↓ again walks off the attach chip onto the pasted chips.
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.selected_attach(), None);
+    assert_eq!(app.selected_pasted(), Some(0));
+
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.selected_pasted(), Some(1));
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.selected_pasted(), Some(0));
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.selected_pasted(), Some(1), "wraps backwards");
+}
+
+#[test]
+fn backspace_removes_the_highlighted_pasted_chip() {
+    let mut app = pasted_app();
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.selected_pasted(), Some(1));
+
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(app.pasted_blocks.len(), 1);
+    assert_eq!(app.selected_pasted(), Some(0), "lands on what's left");
+
+    press(&mut app, KeyCode::Backspace);
+    assert!(app.pasted_blocks.is_empty());
+    assert_eq!(app.selected_pasted(), None);
+}
+
+#[test]
+fn enter_opens_the_pasted_viewer_and_esc_closes_it() {
+    let mut app = pasted_app();
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.selected_pasted(), Some(1));
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.pasted_view.as_ref().map(|v| v.idx), Some(1));
+    assert_eq!(app.pasted_view.as_ref().map(|v| v.scroll), Some(0));
+
+    // The viewer owns the keyboard: esc closes it, chips keep their state.
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.pasted_view_open());
+    assert_eq!(app.selected_pasted(), Some(1));
+}
+
+#[test]
+fn pasted_viewer_scrolls_and_clamps() {
+    let mut app = test_app();
+    let body: String = (0..200).map(|i| format!("row {i}\n")).collect();
+    app.add_pasted_block(body);
+    app.open_pasted_view(0);
+
+    assert!(app.pasted_view_scroll(5));
+    assert_eq!(app.pasted_view.as_ref().unwrap().scroll, 5);
+    assert!(app.pasted_view_scroll(-10));
+    assert_eq!(app.pasted_view.as_ref().unwrap().scroll, 0, "clamps at 0");
+    assert!(!app.pasted_view_scroll(-1), "no move → no redraw");
+
+    // usize::MAX (End key) clamps to the last page at paint time.
+    app.pasted_view.as_mut().unwrap().scroll = usize::MAX;
+    let _ = comb::render(comb::Size::new(80, 24), |f| {
+        crate::render::draw(f, &mut app)
+    });
+    let scroll = app.pasted_view.as_ref().unwrap().scroll;
+    assert!(scroll < usize::MAX, "paint must clamp the scroll");
+}
+
+#[test]
+fn large_paste_becomes_a_chip_small_paste_stays_text() {
+    let mut app = test_app();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let big = "word ".repeat(120);
+    assert!(handle_paste(&mut app, &big, &tx));
+    assert_eq!(app.pasted_blocks.len(), 1);
+    assert_eq!(
+        app.input.value, "[ pasted text 1 ] ",
+        "token instead of the pasted text"
+    );
+
+    assert!(handle_paste(&mut app, "short note", &tx));
+    assert_eq!(app.pasted_blocks.len(), 1, "small paste stays inline");
+    assert_eq!(app.input.value, "[ pasted text 1 ] short note");
+}
+
+#[test]
+fn submit_sends_pasted_blocks_and_clears_the_chips() {
+    let mut app = test_app();
+    let token = app.add_pasted_block("alpha\nbeta".into());
+    app.input.value = format!("{token} look at this");
+    app.input.cursor = app.input.value.chars().count();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let interrupt = Arc::new(AtomicBool::new(false));
+
+    assert!(!handle_key(&mut app, key(KeyCode::Enter), &tx, &interrupt));
+    assert!(app.pasted_blocks.is_empty(), "tokens are consumed");
+    let pd = app.pending_dispatch.expect("deferred dispatch");
+    assert!(pd.agent_text.contains("look at this"), "{}", pd.agent_text);
+    assert!(pd.agent_text.contains(&token), "{}", pd.agent_text);
+    assert!(pd.agent_text.contains("alpha\nbeta"), "{}", pd.agent_text);
+    assert!(
+        app.blocks.iter().any(|b| matches!(
+            b,
+            crate::app::state::Block::User(d) if d.contains(&token)
+        )),
+        "transcript shows the token"
+    );
+}
+
+#[test]
+fn esc_recall_restores_pasted_blocks() {
+    let mut app = test_app();
+    let token = app.add_pasted_block("precious paste".into());
+    app.input.value = format!("{token} with paste");
+    app.input.cursor = app.input.value.chars().count();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let interrupt = Arc::new(AtomicBool::new(false));
+
+    assert!(!handle_key(&mut app, key(KeyCode::Enter), &tx, &interrupt));
+    assert!(app.pasted_blocks.is_empty());
+    assert!(app.pending_dispatch.is_some());
+
+    // ESC within the grace window pulls everything back.
+    assert!(!handle_key(&mut app, key(KeyCode::Esc), &tx, &interrupt));
+    assert!(app.pending_dispatch.is_none());
+    assert_eq!(app.input.value, format!("{token} with paste"));
+    assert_eq!(app.pasted_blocks.len(), 1);
+    assert_eq!(app.pasted_blocks[0].content, "precious paste");
+}
+
+#[test]
+fn new_chat_clears_pasted_state() {
+    let mut app = pasted_app();
+    app.open_pasted_view(0);
+    app.new_chat();
+    assert!(app.pasted_blocks.is_empty());
+    assert_eq!(app.selected_pasted(), None);
+    assert!(!app.pasted_view_open());
+}
+
+#[test]
+fn pasted_viewer_keeps_a_blank_row_above_the_header() {
+    let mut app = pasted_app();
+    app.open_pasted_view(0);
+    let buf = comb::render(comb::Size::new(80, 24), |f| {
+        crate::render::draw(f, &mut app)
+    });
+    let rows: Vec<String> = buf.text().lines().map(|l| l.to_string()).collect();
+    let header = rows
+        .iter()
+        .position(|r| r.contains("PASTED TEXT 1"))
+        .expect("viewer header");
+    assert!(
+        header >= 1 && rows[header - 1].trim().is_empty(),
+        "blank row expected above the header: {rows:?}"
+    );
+}
+
 fn mouse(kind: MouseKind, col: u16, row: u16) -> Mouse {
     Mouse { kind, col, row }
 }
@@ -719,6 +897,7 @@ fn follow_up_up_arrow_recalls_for_edit() {
         text: "queued text".into(),
         composer: "queued text".into(),
         attaches: Vec::new(),
+        pasted: Vec::new(),
         mode: AgentMode::Make,
     });
     assert!(app.recall_follow_up());
@@ -735,6 +914,7 @@ fn follow_up_second_enter_does_not_inject_mid_task() {
         text: "now".into(),
         composer: "now".into(),
         attaches: Vec::new(),
+        pasted: Vec::new(),
         mode: AgentMode::Make,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -864,93 +1044,6 @@ fn esc_key() -> Key {
         code: KeyCode::Esc,
         mods: KeyMods::NONE,
     }
-}
-
-fn with_goal(app: &mut App) {
-    app.goal = Some(crate::app::goal::GoalStatus {
-        objective: "keep going".into(),
-        deadline: None,
-        paused: false,
-        circle: 0,
-    });
-    app.focus_input();
-}
-
-fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputCommand>) -> Vec<InputCommand> {
-    std::iter::from_fn(|| rx.try_recv().ok()).collect()
-}
-
-/// Esc from the composer — the normal place to press it — never reached the
-/// goal, so the loop just started the next turn again.
-#[test]
-fn esc_pauses_then_stops_the_goal() {
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let interrupt = Arc::new(AtomicBool::new(false));
-    with_goal(&mut app);
-
-    assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
-    assert!(
-        drain(&mut rx)
-            .iter()
-            .any(|c| matches!(c, InputCommand::PauseGoal)),
-        "first esc pauses"
-    );
-
-    // The driver answers by flipping the flag; mirror that here.
-    if let Some(g) = app.goal.as_mut() {
-        g.paused = true;
-    }
-    assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
-    assert!(
-        drain(&mut rx)
-            .iter()
-            .any(|c| matches!(c, InputCommand::StopGoal)),
-        "second esc stops"
-    );
-}
-
-/// Mid-turn, Esc has to do both: end the turn and stop the loop from
-/// starting another one.
-#[test]
-fn esc_during_a_goal_turn_interrupts_and_pauses() {
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let interrupt = Arc::new(AtomicBool::new(false));
-    with_goal(&mut app);
-    app.running = true;
-
-    assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
-    assert!(
-        interrupt.load(Ordering::Relaxed),
-        "the turn was interrupted"
-    );
-    assert!(
-        drain(&mut rx)
-            .iter()
-            .any(|c| matches!(c, InputCommand::PauseGoal)),
-        "and the goal was paused"
-    );
-}
-
-/// Typed text still wins the first Esc — the ladder is unchanged.
-#[test]
-fn esc_clears_the_composer_before_touching_the_goal() {
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let interrupt = Arc::new(AtomicBool::new(false));
-    with_goal(&mut app);
-    app.input.value = "half-typed".into();
-    app.input.cursor = 10;
-
-    assert!(!handle_key(&mut app, esc_key(), &tx, &interrupt));
-    assert_eq!(app.input.value, "");
-    assert!(
-        !drain(&mut rx)
-            .iter()
-            .any(|c| matches!(c, InputCommand::PauseGoal)),
-        "the goal is not touched while there is text to clear"
-    );
 }
 
 #[test]
@@ -1167,13 +1260,13 @@ fn hovering_the_slash_menu_moves_the_highlight() {
 fn clicking_a_slash_row_with_an_argument_completes_it() {
     let mut app = test_app();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (rect, window) = open_slash_menu(&mut app, "/goal");
+    let (rect, window) = open_slash_menu(&mut app, "/model");
     let item = app.slash_items()[window].clone();
-    assert_eq!(item.name(), "goal");
+    assert_eq!(item.name(), "model");
     assert!(item.takes_arg());
 
     assert!(handle_mouse(&mut app, click(rect.x + 2, rect.y), &tx));
-    assert_eq!(app.input.value, "/goal ");
+    assert_eq!(app.input.value, "/model ");
 }
 
 /// A command that takes none runs on the click.
@@ -1222,84 +1315,6 @@ fn the_slash_menu_swallows_clicks() {
     assert!(
         app.menu_hit.is_some() || !app.input.value.is_empty() || !app.input_focused,
         "click reached the chat underneath"
-    );
-}
-
-#[test]
-fn goal_overlay_ignores_the_mouse() {
-    use crate::app::goal::GoalField;
-
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_goal_overlay();
-    let area = lay_out(&mut app);
-    assert_eq!(
-        app.goal_overlay.as_ref().unwrap().focus,
-        GoalField::Objective
-    );
-
-    let mut hit = None;
-    for row in area.y..area.bottom() {
-        if render::goal::field_at(area, &app, area.x + area.width / 2, row)
-            == Some(GoalField::TimeLimit)
-        {
-            hit = Some(row);
-            break;
-        }
-    }
-    let row = hit.expect("time limit row");
-    assert!(!handle_mouse(
-        &mut app,
-        click(area.x + area.width / 2, row),
-        &tx
-    ));
-    assert_eq!(
-        app.goal_overlay.as_ref().unwrap().focus,
-        GoalField::Objective,
-        "click must not steal focus"
-    );
-}
-
-#[test]
-fn goal_time_limit_is_parsed_and_sent() {
-    use crate::app::goal::GoalField;
-
-    let mut app = test_app();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_goal_overlay();
-    assert!(!handle_goal_key(&mut app, key(KeyCode::Tab), &tx));
-    let st = app.goal_overlay.as_mut().unwrap();
-    assert_eq!(st.focus, GoalField::TimeLimit);
-    st.objective = "ship it".into();
-    st.time_limit = "1h30m".into();
-
-    assert!(!handle_goal_key(&mut app, key(KeyCode::Enter), &tx));
-    let command = rx.try_recv().expect("goal command");
-    assert!(matches!(
-        command,
-        InputCommand::SetGoal { objective, duration }
-            if objective == "ship it"
-                && duration == Some(std::time::Duration::from_secs(5_400))
-    ));
-    assert!(!app.goal_overlay_open());
-}
-
-/// Typed text must survive a stray click off the goal panel.
-#[test]
-fn clicking_away_from_the_goal_form_keeps_it_open() {
-    let mut app = test_app();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.open_goal_overlay();
-    lay_out(&mut app);
-    if let Some(st) = app.goal_overlay.as_mut() {
-        st.objective = "ship the thing".into();
-    }
-
-    assert!(!handle_mouse(&mut app, click(0, 0), &tx));
-    assert!(app.goal_overlay_open());
-    assert_eq!(
-        app.goal_overlay.as_ref().unwrap().objective,
-        "ship the thing"
     );
 }
 

@@ -1,9 +1,9 @@
 //! The TUI application state and how it reacts to `AgentEvent`s.
 
 pub mod files;
-pub mod goal;
 pub mod input;
 pub mod palette;
+pub mod pasted;
 pub mod recap;
 pub mod settings;
 pub mod state;
@@ -64,10 +64,10 @@ use settings::SettingsState;
 use input::InputState;
 use state::{
     AssistantPoint, AssistantResponseRow, AssistantRowHit, AssistantRowJoin, AssistantSelection,
-    Block, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem, FileSnapshot,
-    GoalCard, LoopDetectedCard, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection, PlanStatus,
-    PlanViewState, PromptHistory, RecapBody, SubagentCard, TerminalCard, TerminalViewPhase,
-    TerminalViewState, Thought, ToolCard, ToolStatus, WorkSummaryCard,
+    Block, ChatView, CompactedCard, ContextAction, ContextMenu, ContextMenuItem, ExploreCard,
+    FileSnapshot, ModeSwitchCard, PlanAction, PlanCard, PlanCorrection,
+    PlanStatus, PlanViewState, PromptHistory, RecapBody, SubagentCard, TerminalCard,
+    TerminalViewPhase, TerminalViewState, Thought, ToolCard, ToolStatus, WorkSummaryCard,
 };
 
 /// Cached markdown wraps for finished assistant bodies — avoids re-parsing on
@@ -185,6 +185,8 @@ pub struct QueuedFollowUp {
     pub composer: String,
     /// Attachments restored on ↑ / re-queued on Enter.
     pub attaches: Vec<PendingAttach>,
+    /// Large pasted blocks restored on ↑ / re-queued on Enter.
+    pub pasted: Vec<pasted::PastedBlock>,
     pub mode: AgentMode,
 }
 
@@ -199,6 +201,8 @@ pub struct PendingDispatch {
     pub composer: String,
     /// Attachments (for restoring on recall).
     pub attaches: Vec<PendingAttach>,
+    /// Large pasted blocks (for restoring on recall).
+    pub pasted: Vec<pasted::PastedBlock>,
     pub submitted_at: std::time::Instant,
 }
 
@@ -251,6 +255,12 @@ pub struct App {
     pub(crate) pending_attaches: Vec<PendingAttach>,
     /// Attachment chip the keyboard is on, once ↓ steps out of the composer.
     pub(crate) attach_selected: Option<usize>,
+    /// Large pasted text blocks parked behind inline `[ pasted text N ]` tokens.
+    pub(crate) pasted_blocks: Vec<pasted::PastedBlock>,
+    pub(crate) pasted_selected: Option<usize>,
+    pub(crate) pasted_view: Option<pasted::PastedViewState>,
+    /// Next number for a `[ pasted text N ]` token.
+    pub(crate) next_pasted_id: usize,
     /// Set by ctrl+L: repaint every cell, not just the diff.
     pub(crate) repaint_requested: bool,
     /// When an image last landed from the clipboard, so the composer can say
@@ -278,16 +288,12 @@ pub struct App {
     pub(crate) about_open: bool,
     /// Settings overlay (chat / sidebar / tools / landing).
     pub(crate) settings: Option<SettingsState>,
-    /// `/goal` overlay (editable objective + time limit).
-    pub(crate) goal_overlay: Option<goal::GoalOverlayState>,
     /// Recap panel opened from a "Worked for" line.
     pub(crate) recap_overlay: Option<RecapOverlay>,
     /// Click target for the centered Generating label (last draw).
     pub(crate) recap_generating_hit: Option<Rect>,
     /// Next id stamped on a WorkSummaryCard so recap events find it.
     pub(crate) next_recap_id: u64,
-    /// Active goal state for the autonomous loop (footer + transcript card).
-    pub(crate) goal: Option<goal::GoalStatus>,
     /// Agent's self-managed task list (set_todos tool).
     pub(crate) todos: Vec<hive_core::TodoItem>,
     /// Completed tasks stay visible briefly, then retire from the live UI.
@@ -453,6 +459,10 @@ impl App {
             transcript_max_scroll: 0,
             pending_attaches: Vec::new(),
             attach_selected: None,
+            pasted_blocks: Vec::new(),
+            pasted_selected: None,
+            pasted_view: None,
+            next_pasted_id: 1,
             repaint_requested: false,
             image_pasted_at: None,
             follow_up: None,
@@ -466,11 +476,9 @@ impl App {
             palette: None,
             about_open: false,
             settings: None,
-            goal_overlay: None,
             recap_overlay: None,
             recap_generating_hit: None,
             next_recap_id: 1,
-            goal: None,
             todos: Vec::new(),
             todos_completed_at: None,
             saved_sessions: Vec::new(),

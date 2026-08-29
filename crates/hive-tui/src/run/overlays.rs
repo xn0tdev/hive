@@ -1,4 +1,4 @@
-//! Settings, goal, palette, and context overlay handlers.
+//! Settings, palette, and context overlay handlers.
 
 use super::*;
 
@@ -54,68 +54,6 @@ pub(super) fn handle_settings_key(
     false
 }
 
-pub(super) fn handle_goal_key(
-    app: &mut App,
-    key: Key,
-    input_tx: &UnboundedSender<InputCommand>,
-) -> bool {
-    let ctrl = key.mods.ctrl;
-    match key.code {
-        KeyCode::Esc => {
-            app.close_goal_overlay();
-        }
-        KeyCode::Backspace => {
-            if let Some(st) = app.goal_overlay.as_mut() {
-                st.backspace();
-            }
-        }
-        KeyCode::Tab => {
-            if let Some(st) = app.goal_overlay.as_mut() {
-                st.toggle_focus();
-            }
-        }
-        KeyCode::Enter => {
-            let Some((objective, time_limit)) = app
-                .goal_overlay
-                .as_ref()
-                .map(|st| (st.objective.trim().to_string(), st.time_limit.clone()))
-            else {
-                return false;
-            };
-            if objective.is_empty() {
-                app.flash("Enter an objective first");
-                return false;
-            }
-            let duration = if time_limit.trim().is_empty() {
-                None
-            } else if let Some(duration) = crate::app::goal::parse_duration(&time_limit) {
-                Some(duration)
-            } else {
-                app.flash_error("Invalid time limit — try 30m or 2h");
-                return false;
-            };
-            app.close_goal_overlay();
-            let _ = input_tx.send(InputCommand::SetGoal {
-                objective,
-                duration,
-            });
-        }
-        KeyCode::Char(c) if !ctrl => {
-            if let Some(st) = app.goal_overlay.as_mut() {
-                st.type_char(c);
-            }
-        }
-        KeyCode::Char('p') if ctrl => {
-            app.close_goal_overlay();
-            app.open_palette();
-        }
-        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
-        KeyCode::Char('q') if ctrl => return true,
-        _ => {}
-    }
-    false
-}
-
 pub(super) fn handle_recap_key(app: &mut App, key: Key) -> bool {
     let ctrl = key.mods.ctrl;
     match key.code {
@@ -138,6 +76,41 @@ pub(super) fn handle_recap_key(app: &mut App, key: Key) -> bool {
         KeyCode::Char('p') if ctrl => {
             app.close_recap();
             app.open_palette();
+        }
+        KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
+        KeyCode::Char('q') if ctrl => return true,
+        _ => {}
+    }
+    false
+}
+
+/// Keys for the full-screen pasted-text viewer.
+pub(super) fn handle_pasted_view_key(app: &mut App, key: Key) -> bool {
+    let ctrl = key.mods.ctrl;
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') if !ctrl => app.close_pasted_view(),
+        KeyCode::Up => {
+            app.pasted_view_scroll(-1);
+        }
+        KeyCode::Down => {
+            app.pasted_view_scroll(1);
+        }
+        KeyCode::PageUp => {
+            app.pasted_view_scroll(-20);
+        }
+        KeyCode::PageDown => {
+            app.pasted_view_scroll(20);
+        }
+        KeyCode::Home => {
+            if let Some(v) = app.pasted_view.as_mut() {
+                v.scroll = 0;
+            }
+        }
+        KeyCode::End => {
+            // Jump to the end; the paint clamps to the real last page.
+            if let Some(v) = app.pasted_view.as_mut() {
+                v.scroll = usize::MAX;
+            }
         }
         KeyCode::Char('c') if ctrl => return app.arm_or_confirm_quit(),
         KeyCode::Char('q') if ctrl => return true,

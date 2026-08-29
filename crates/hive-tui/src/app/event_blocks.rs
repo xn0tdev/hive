@@ -66,6 +66,7 @@ impl App {
         }
         let tool_running = self.blocks.iter().any(|b| match b {
             Block::Tool(c) => c.status == ToolStatus::Running,
+            Block::Explore(c) => c.running(),
             Block::Subagent(c) => c.status == SubagentStatus::Running,
             _ => false,
         });
@@ -121,6 +122,12 @@ impl App {
             }
             Some(Block::Tool(_)) => {
                 self.open_tool_menu(block_idx);
+            }
+            Some(Block::Explore(_)) => {
+                if let Some(Block::Explore(card)) = self.blocks.get_mut(block_idx) {
+                    card.details_open = !card.details_open;
+                    self.invalidate_transcript();
+                }
             }
             _ => {}
         }
@@ -265,33 +272,39 @@ impl App {
 
     pub(super) fn append_tool_output(&mut self, id: &str, chunk: &str) {
         for block in self.blocks.iter_mut().rev() {
-            if let Block::Tool(card) = block {
-                if card.id == id {
-                    card.output.push_str(chunk);
-                    const CAP: usize = 8000;
-                    if card.output.len() > CAP {
-                        let mut start = card.output.len() - CAP;
-                        while !card.output.is_char_boundary(start) {
-                            start += 1;
-                        }
-                        card.output = card.output.split_off(start);
+            let card = match block {
+                Block::Tool(card) if card.id == id => Some(card),
+                Block::Explore(group) => group.tools.iter_mut().find(|tool| tool.id == id),
+                _ => None,
+            };
+            if let Some(card) = card {
+                card.output.push_str(chunk);
+                const CAP: usize = 8000;
+                if card.output.len() > CAP {
+                    let mut start = card.output.len() - CAP;
+                    while !card.output.is_char_boundary(start) {
+                        start += 1;
                     }
-                    return;
+                    card.output = card.output.split_off(start);
                 }
+                return;
             }
         }
     }
 
     pub(super) fn finish_tool(&mut self, id: &str, ok: bool) {
         for block in self.blocks.iter_mut().rev() {
-            if let Block::Tool(card) = block {
-                if card.id == id {
-                    card.status = if ok { ToolStatus::Ok } else { ToolStatus::Err };
-                    if card.elapsed_ms.is_none() {
-                        card.elapsed_ms = Some(card.started.elapsed().as_millis());
-                    }
-                    return;
+            let card = match block {
+                Block::Tool(card) if card.id == id => Some(card),
+                Block::Explore(group) => group.tools.iter_mut().find(|tool| tool.id == id),
+                _ => None,
+            };
+            if let Some(card) = card {
+                card.status = if ok { ToolStatus::Ok } else { ToolStatus::Err };
+                if card.elapsed_ms.is_none() {
+                    card.elapsed_ms = Some(card.started.elapsed().as_millis());
                 }
+                return;
             }
         }
     }
@@ -302,6 +315,12 @@ impl App {
                 Block::Tool(card) if card.status == ToolStatus::Ok => {
                     card.details_open = false;
                 }
+                Block::Explore(group) if group.failed == 0 => {
+                    group.details_open = false;
+                    for tool in &mut group.tools {
+                        tool.details_open = false;
+                    }
+                }
                 _ => {}
             }
         }
@@ -309,11 +328,14 @@ impl App {
 
     pub(super) fn attach_snapshot(&mut self, id: &str, snapshot: FileSnapshot) {
         for block in self.blocks.iter_mut().rev() {
-            if let Block::Tool(card) = block {
-                if card.id == id {
-                    card.snapshot = Some(snapshot);
-                    return;
-                }
+            let card = match block {
+                Block::Tool(card) if card.id == id => Some(card),
+                Block::Explore(group) => group.tools.iter_mut().find(|tool| tool.id == id),
+                _ => None,
+            };
+            if let Some(card) = card {
+                card.snapshot = Some(snapshot);
+                return;
             }
         }
     }

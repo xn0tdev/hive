@@ -3,7 +3,6 @@
 //! `main` is intentionally tiny: initialize logging, run first-run setup if
 //! needed, then hand off to the composition root in `wire.rs`.
 
-
 mod bot;
 mod config;
 mod driver;

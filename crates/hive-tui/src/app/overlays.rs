@@ -171,6 +171,7 @@ impl App {
     pub fn toggle_tool_details(&mut self, id: &str) {
         if let Some(card) = self.blocks.iter_mut().rev().find_map(|block| match block {
             Block::Tool(card) if card.id == id => Some(card),
+            Block::Explore(group) => group.tools.iter_mut().find(|tool| tool.id == id),
             _ => None,
         }) {
             card.details_open = !card.details_open;

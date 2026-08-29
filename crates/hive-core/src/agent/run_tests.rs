@@ -169,7 +169,7 @@ async fn parallel_results_keep_their_original_call_ids() {
     ];
 
     agent
-        .run_tools_parallel(&calls, &Arc::new(AtomicBool::new(false)), &mut Vec::new())
+        .run_tools_parallel(&calls, &Arc::new(AtomicBool::new(false)))
         .await;
 
     let results = &agent.session.messages[1..];

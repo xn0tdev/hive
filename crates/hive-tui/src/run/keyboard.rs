@@ -79,6 +79,12 @@ pub(super) fn handle_key(
         return handle_recap_key(app, key);
     }
 
+    // Pasted-text viewer captures keys while open: esc closes, arrows /
+    // PageUp/Down scroll, ctrl+c / ctrl+q quit as usual.
+    if app.pasted_view_open() {
+        return handle_pasted_view_key(app, key);
+    }
+
     let ctrl = key.mods.ctrl;
     let alt = key.mods.alt;
     let shift = key.mods.shift;
@@ -110,10 +116,6 @@ pub(super) fn handle_key(
 
     if app.settings_open() {
         return handle_settings_key(app, key, input_tx);
-    }
-
-    if app.goal_overlay_open() {
-        return handle_goal_key(app, key, input_tx);
     }
 
     // Plan preview: section select / amend / Make / back.
@@ -199,8 +201,20 @@ pub(super) fn handle_key(
                 app.move_attach_selection(-1);
                 return false;
             }
-            KeyCode::Right | KeyCode::Down => {
+            KeyCode::Right => {
                 app.move_attach_selection(1);
+                return false;
+            }
+            KeyCode::Down => {
+                // Past the last @chip the walk continues onto the pasted chips.
+                let on_last = app
+                    .selected_attach()
+                    .is_some_and(|i| i + 1 >= app.pending_attaches.len());
+                if on_last && app.select_first_pasted() {
+                    app.clear_attach_selection();
+                } else {
+                    app.move_attach_selection(1);
+                }
                 return false;
             }
             KeyCode::Backspace | KeyCode::Delete => {
@@ -213,9 +227,53 @@ pub(super) fn handle_key(
                 app.clear_attach_selection();
                 return false;
             }
-            // Typing, Enter, chords: back to the composer, then handle normally.
+            // Typing, chords: back to the composer, then handle normally.
             _ => {
                 app.clear_attach_selection();
+            }
+        }
+    }
+
+    // A pasted-text token has the keyboard: arrows walk the tokens, backspace
+    // drops one (token text goes with it), Enter opens the full-text viewer,
+    // anything else hands control back to the composer.
+    if app.selected_pasted().is_some() {
+        match key.code {
+            KeyCode::Left => {
+                app.move_pasted_selection(-1);
+                return false;
+            }
+            KeyCode::Right | KeyCode::Down => {
+                app.move_pasted_selection(1);
+                return false;
+            }
+            KeyCode::Up => {
+                // Back up onto the @chips when there are any.
+                let on_first = app.selected_pasted() == Some(0);
+                if on_first && app.select_last_attach() {
+                    app.clear_pasted_selection();
+                } else {
+                    app.move_pasted_selection(-1);
+                }
+                return false;
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if let Some(token) = app.remove_selected_pasted() {
+                    app.flash(format!("Removed {token}"));
+                }
+                return false;
+            }
+            KeyCode::Enter => {
+                app.open_selected_pasted();
+                return false;
+            }
+            KeyCode::Esc => {
+                app.clear_pasted_selection();
+                return false;
+            }
+            // Typing, chords: back to the composer, then handle normally.
+            _ => {
+                app.clear_pasted_selection();
             }
         }
     }
@@ -226,6 +284,12 @@ pub(super) fn handle_key(
     // focuses and falls through. Subagent/plan views already returned above.
     if !app.input_focused {
         match key.code {
+            KeyCode::Enter => {
+                if let Some(block) = app.hover_block {
+                    app.activate_expandable_at(block);
+                }
+                return false;
+            }
             KeyCode::Up if app.can_scroll_up() => {
                 app.scroll_up(1);
                 return false;
@@ -247,23 +311,10 @@ pub(super) fn handle_key(
                 if app.clear_follow_up() {
                     return false;
                 }
-                // If a goal is active, pause it so the next turn doesn't auto-start.
-                if app.goal_active() && !app.goal_paused() {
-                    let _ = input_tx.send(InputCommand::PauseGoal);
-                }
                 interrupt.store(true, Ordering::Relaxed);
                 return false;
             }
             KeyCode::Esc => {
-                // Active goal: Esc pauses (or stops if already paused).
-                if app.goal_active() && !app.goal_paused() {
-                    let _ = input_tx.send(InputCommand::PauseGoal);
-                    return false;
-                }
-                if app.goal_paused() {
-                    let _ = input_tx.send(InputCommand::StopGoal);
-                    return false;
-                }
                 // Recall a just-submitted prompt before the agent starts.
                 if app.recall_pending_dispatch() {
                     app.focus_input();
@@ -375,8 +426,8 @@ pub(super) fn handle_key(
                 composer_activity = true;
             } else if app.input.down() {
                 composer_activity = true;
-            } else if app.select_first_attach() {
-                // Past the last row of text sit the @chips.
+            } else if app.select_first_attach() || app.select_first_pasted() {
+                // Past the last row of text sit the @chips, then the pasted tokens.
                 composer_activity = true;
             } else {
                 app.scroll_down(1);
@@ -392,18 +443,9 @@ pub(super) fn handle_key(
             } else if app.clear_follow_up() {
                 composer_activity = true;
             } else if app.running {
-                // Interrupting only ends the current turn — an active goal would
-                // start the next one right back up, so pause it on the way out.
-                if app.goal_active() && !app.goal_paused() {
-                    let _ = input_tx.send(InputCommand::PauseGoal);
-                }
                 // Stop the turn. The agent reports "Interrupted." in the chat
                 // only once it has actually stopped.
                 interrupt.store(true, Ordering::Relaxed);
-            } else if app.goal_active() && !app.goal_paused() {
-                let _ = input_tx.send(InputCommand::PauseGoal);
-            } else if app.goal_paused() {
-                let _ = input_tx.send(InputCommand::StopGoal);
             } else {
                 app.blur_input();
             }

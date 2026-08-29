@@ -65,6 +65,7 @@ impl App {
             })
             || self.blocks.iter().any(|b| match b {
                 Block::Tool(c) => c.status == ToolStatus::Running,
+                Block::Explore(c) => c.running(),
                 Block::Subagent(c) => c.status == SubagentStatus::Running,
                 Block::Plan(c) => c.status == PlanStatus::Writing,
                 Block::Terminal(c) => {
@@ -80,8 +81,6 @@ impl App {
             });
         if fast {
             Some(std::time::Duration::from_millis(100))
-        } else if self.goal.as_ref().is_some_and(|g| !g.paused) {
-            Some(std::time::Duration::from_secs(1))
         } else {
             None
         }

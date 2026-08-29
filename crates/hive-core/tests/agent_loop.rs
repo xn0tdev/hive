@@ -1,7 +1,7 @@
-//! End-to-end test of the YOLO loop with a mock provider and a mock tool.
+//! End-to-end test of the agent loop with a mock provider and a mock tool.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -133,4 +133,203 @@ async fn runs_tool_then_answers() {
     assert!(saw_final, "expected final assistant message");
     assert!(saw_finish, "expected turn to finish");
     assert_eq!(total_tokens, 30, "usage should accumulate across steps");
+}
+
+struct BatchProvider {
+    calls: AtomicUsize,
+    result_order: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl LlmProvider for BatchProvider {
+    async fn chat_stream(
+        &self,
+        req: ChatRequest<'_>,
+        _on_delta: &mut (dyn FnMut(Delta) + Send),
+    ) -> Result<ChatOutcome> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(ChatOutcome {
+                message: Message {
+                    role: Role::Assistant,
+                    content: Vec::new(),
+                    tool_calls: vec![
+                        call("read-1", "read_file", "slow"),
+                        call("read-2", "read_file", "fast"),
+                        call("shell-1", "run_shell", "write"),
+                        call("search-1", "grep", "needle"),
+                    ],
+                    tool_call_id: None,
+                    name: None,
+                    provider_items: Vec::new(),
+                },
+                usage: Usage::default(),
+                finish_reason: "tool_calls".into(),
+            });
+        }
+
+        let order = req
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect();
+        *self.result_order.lock().expect("result order lock") = order;
+        Ok(ChatOutcome {
+            message: Message::assistant("done"),
+            usage: Usage::default(),
+            finish_reason: "stop".into(),
+        })
+    }
+}
+
+fn call(id: &str, name: &str, label: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: serde_json::json!({ "label": label }).to_string(),
+    }
+}
+
+struct NamedTool(&'static str);
+
+#[async_trait]
+impl Tool for NamedTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "test tool"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "label": { "type": "string" } },
+            "required": ["label"]
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        let label = args["label"].as_str().unwrap_or_default();
+        if label == "slow" {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+        ToolResult::ok(format!("{}:{label}", self.0))
+    }
+}
+
+#[tokio::test]
+async fn batches_only_adjacent_parallel_reads_and_preserves_result_order() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result_order = Arc::new(Mutex::new(Vec::new()));
+    let builder = AgentBuilder {
+        provider: Arc::new(BatchProvider {
+            calls: AtomicUsize::new(0),
+            result_order: result_order.clone(),
+        }),
+        tools: vec![
+            Arc::new(NamedTool("read_file")),
+            Arc::new(NamedTool("run_shell")),
+            Arc::new(NamedTool("grep")),
+        ],
+        skills: no_skills(),
+        config: Arc::new(AppConfig::default()),
+    };
+    let mut agent = builder.build(tx, "test-model".into(), 0, noop_spawner());
+    let result = agent
+        .run_turn(
+            UserInput::from("inspect"),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+    assert_eq!(result, "done");
+
+    let mut batches = Vec::new();
+    let mut finished = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::ToolBatchStarted { calls, .. } => {
+                batches.push(calls.into_iter().map(|call| call.id).collect::<Vec<_>>());
+            }
+            AgentEvent::ToolBatchFinished { failed, .. } => finished.push(failed),
+            _ => {}
+        }
+    }
+    assert_eq!(batches, vec![vec!["read-1", "read-2"]]);
+    assert_eq!(finished, vec![0]);
+    assert_eq!(
+        *result_order.lock().expect("result order lock"),
+        vec!["read-1", "read-2", "shell-1", "search-1"]
+    );
+}
+
+struct NeverStopsProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for NeverStopsProvider {
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest<'_>,
+        _on_delta: &mut (dyn FnMut(Delta) + Send),
+    ) -> Result<ChatOutcome> {
+        let round = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ChatOutcome {
+            message: Message {
+                role: Role::Assistant,
+                content: Vec::new(),
+                tool_calls: vec![call(
+                    &format!("read-{round}"),
+                    "read_file",
+                    &format!("file-{round}"),
+                )],
+                tool_call_id: None,
+                name: None,
+                provider_items: Vec::new(),
+            },
+            usage: Usage::default(),
+            finish_reason: "tool_calls".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn turn_stops_at_the_round_cap() {
+    let provider = Arc::new(NeverStopsProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let builder = AgentBuilder {
+        provider: provider.clone(),
+        tools: vec![Arc::new(NamedTool("read_file"))],
+        skills: no_skills(),
+        config: Arc::new(AppConfig::default()),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut agent = builder.build(tx, "test-model".into(), 0, noop_spawner());
+    let result = agent
+        .run_turn(
+            UserInput::from("keep reading"),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+    assert_eq!(result, "");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst) as u64,
+        hive_core::MAX_ROUNDS,
+        "the turn must stop exactly at the round cap"
+    );
+
+    let mut stopped = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Notice(msg) = ev {
+            if msg.contains("not converging") {
+                stopped = true;
+            }
+        }
+    }
+    assert!(stopped, "expected a round-cap Notice event");
 }

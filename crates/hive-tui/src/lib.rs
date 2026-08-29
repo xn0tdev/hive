@@ -1,7 +1,7 @@
 //! Hive terminal frontend on the `comb` engine.
 
-pub mod bot;
 mod app;
+pub mod bot;
 mod commands;
 mod farewell;
 mod intro;
@@ -144,17 +144,6 @@ pub enum InputCommand {
     UpdateContextWindow {
         context: u64,
     },
-    /// Set a goal for the autonomous agent loop.
-    SetGoal {
-        objective: String,
-        duration: Option<std::time::Duration>,
-    },
-    /// Stop the active goal loop.
-    StopGoal,
-    /// Pause the goal loop (finishes current turn, then waits).
-    PauseGoal,
-    /// Resume a paused goal loop.
-    ResumeGoal,
     /// Refresh the `/model` picker from `GET /models` + models.dev.
     FetchModels,
     /// Add a provider profile without changing the active model/provider.

@@ -107,8 +107,7 @@ impl Agent {
         &mut self,
         batch: &[ToolCall],
         interrupt: &Arc<AtomicBool>,
-        loop_redirects: &mut Vec<String>,
-    ) {
+    ) -> usize {
         enum PendingResult {
             Ready {
                 result: ToolResult,
@@ -122,20 +121,10 @@ impl Agent {
             if interrupt.load(Ordering::Relaxed) {
                 pending.push(PendingResult::Ready {
                     result: ToolResult::error("turn interrupted"),
-                    emit_finished: false,
+                    emit_finished: true,
                 });
                 continue;
             }
-            if self.detect_repeated_tool_call(tc, loop_redirects) {
-                pending.push(PendingResult::Ready {
-                    result: ToolResult::error(
-                        "tool call not run: identical call repeated too many times",
-                    ),
-                    emit_finished: false,
-                });
-                continue;
-            }
-
             self.emit(AgentEvent::ToolStarted {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
@@ -180,6 +169,7 @@ impl Agent {
 
         // Tasks are already running concurrently. Awaiting their handles in
         // call order preserves the required call-id/result pairing.
+        let mut failed = 0;
         for (tc, pending) in batch.iter().zip(pending) {
             let (result, emit_finished) = match pending {
                 PendingResult::Ready {
@@ -201,9 +191,11 @@ impl Agent {
                     summary: first_line(&result.content, 120),
                 });
             }
+            failed += usize::from(result.is_error);
             self.session
                 .push(Message::tool_result(&tc.id, &tc.name, result.content));
         }
+        failed
     }
 
     /// Record a result for calls that were requested by the model but could
@@ -216,23 +208,6 @@ impl Agent {
                 format!("tool call not run: {reason}"),
             ));
         }
-    }
-
-    pub(super) fn detect_repeated_tool_call(
-        &mut self,
-        call: &ToolCall,
-        loop_redirects: &mut Vec<String>,
-    ) -> bool {
-        if !self.loop_detector.record(&call.name, &call.arguments) {
-            return false;
-        }
-
-        self.emit(AgentEvent::LoopDetected {
-            tool: call.name.clone(),
-        });
-        loop_redirects.push(redirect_message(&call.name, &call.arguments));
-        self.loop_detector.reset_streak();
-        true
     }
 
     fn validate_tool_call(&self, name: &str, path: Option<&str>) -> Result<(), String> {

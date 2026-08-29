@@ -3,8 +3,7 @@
 //! Lives in hive-tui (not comb): comb stays primitives; these compose them.
 
 mod compacted_card;
-mod goal_card;
-mod loop_detected_card;
+mod explore_card;
 mod mode_switch_card;
 mod plan_card;
 mod plan_layout;
@@ -16,8 +15,7 @@ pub(crate) mod tool_card;
 mod work_summary_card;
 
 pub(crate) use compacted_card::compacted_card_lines;
-pub(crate) use goal_card::goal_card_lines;
-pub(crate) use loop_detected_card::loop_detected_card_lines;
+pub(crate) use explore_card::explore_card_lines;
 pub(crate) use mode_switch_card::mode_switch_card_lines;
 pub(crate) use plan_card::plan_card_lines;
 pub(crate) use plan_layout::{

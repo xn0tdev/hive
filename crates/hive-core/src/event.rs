@@ -30,6 +30,14 @@ pub enum SubagentLine {
     Notice(String),
 }
 
+/// One member of a parallel read-only tool batch.
+#[derive(Debug, Clone)]
+pub struct ToolBatchCall {
+    pub id: String,
+    pub name: String,
+    pub args_preview: String,
+}
+
 /// Everything the agent core wants to tell a frontend. The TUI is just one
 /// consumer of this stream; a headless frontend could consume the same events.
 #[derive(Debug, Clone)]
@@ -59,6 +67,17 @@ pub enum AgentEvent {
         name: String,
         ok: bool,
         summary: String,
+    },
+    /// Independent read-only calls started together.
+    ToolBatchStarted {
+        id: String,
+        calls: Vec<ToolBatchCall>,
+    },
+    /// The slowest member of a parallel read-only batch has completed.
+    ToolBatchFinished {
+        id: String,
+        elapsed_ms: u128,
+        failed: usize,
     },
     /// Original file content before a file-writing tool modified it.
     /// The TUI stores this so the user can revert the change.
@@ -103,10 +122,6 @@ pub enum AgentEvent {
     ModeSwitched {
         mode: AgentMode,
         reason: String,
-    },
-    /// The agent was stuck in a tool-call loop and is being redirected.
-    LoopDetected {
-        tool: String,
     },
     /// Context compaction started (spinner) or finished (with token counts).
     Compacted {
@@ -170,27 +185,6 @@ pub enum AgentEvent {
         active: String,
         profiles: Vec<ConnectionInfo>,
     },
-    /// A goal was set — the agent will work autonomously until it expires or is stopped.
-    GoalSet {
-        objective: String,
-        /// Absolute deadline (None = no timer).
-        deadline: Option<std::time::Instant>,
-    },
-    /// A turn finished but the goal is still active — the driver should start the next turn.
-    GoalContinue {
-        objective: String,
-        remaining_secs: u64,
-    },
-    /// The goal timer expired.
-    GoalExpired {
-        objective: String,
-    },
-    /// The goal was stopped by the user.
-    GoalStopped,
-    /// The goal loop was paused.
-    GoalPaused,
-    /// The goal loop was resumed.
-    GoalResumed,
     /// Informational notice (e.g. "Exa disabled: no key").
     Notice(String),
     /// Saved sessions list (response to ListSessions).

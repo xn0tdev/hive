@@ -38,7 +38,6 @@ impl App {
         self.close_palette();
         self.close_settings();
         self.close_about();
-        self.close_goal_overlay();
         self.close_context_menu();
 
         let Some(Block::WorkSummary(card)) = self.blocks.get(block_idx) else {
@@ -155,6 +154,12 @@ pub fn turn_context(blocks: &[Block], summary_idx: usize) -> String {
                 line.push('\n');
                 line
             }
+            Block::Explore(group) => group
+                .tools
+                .iter()
+                .map(|card| format!("Tool {} {}", card.name, card.args))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Block::Plan(card) => format!("Plan: {}\n", clip(&card.summary, 200)),
             Block::ModeSwitch(card) => format!("Mode: {}\n", card.reason),
             Block::Notice(s) | Block::Error(s) => format!("{s}\n"),

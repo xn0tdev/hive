@@ -16,7 +16,7 @@ pub(super) fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) ->
         }
     }
 
-    if trimmed.is_empty() && !app.has_pending_attaches() {
+    if trimmed.is_empty() && !app.has_pending_attaches() && !app.has_pasted_blocks() {
         return false;
     }
 
@@ -38,6 +38,7 @@ pub(super) fn submit(app: &mut App, input_tx: &UnboundedSender<InputCommand>) ->
             text: prepared.agent_text,
             composer: prepared.composer,
             attaches: prepared.attaches,
+            pasted: prepared.pasted,
             mode: prepared.mode,
         });
         return false;
@@ -53,6 +54,7 @@ pub(super) struct PreparedUser {
     /// Original composer text (for ↑ recall).
     composer: String,
     attaches: Vec<crate::app::PendingAttach>,
+    pasted: Vec<crate::app::pasted::PastedBlock>,
     mode: AgentMode,
 }
 
@@ -71,6 +73,10 @@ pub(super) fn prepare_user_message(
     trimmed: String,
 ) -> Option<PreparedUser> {
     let attaches = app.take_pending_attaches();
+    let mut pasted = app.take_pasted_blocks();
+    // The token lives in the composer text now — deleting it by hand takes
+    // the paste with it.
+    pasted.retain(|p| text.contains(&p.token()));
     let tags = attaches
         .iter()
         .map(|a| a.tag())
@@ -88,21 +94,29 @@ pub(super) fn prepare_user_message(
             None => format!("[Attached file: {}]", a.path),
         })
         .collect();
+    let pasted_notes: Vec<String> = pasted
+        .iter()
+        .map(|p| format!("{}\n```\n{}\n```", p.token(), truncate_attach(&p.content)))
+        .collect();
 
-    let display = match (tags.is_empty(), trimmed.is_empty()) {
+    let all_tags = tags;
+    let display = match (all_tags.is_empty(), trimmed.is_empty()) {
         (true, true) => return None,
-        (false, true) => tags,
+        (false, true) => all_tags,
         (true, false) => text.clone(),
-        (false, false) => format!("{tags} {text}"),
+        (false, false) => format!("{all_tags} {text}"),
     };
 
     let composer = text.clone();
     let mut agent_text = text;
-    if !file_notes.is_empty() {
+    for notes in [file_notes, pasted_notes] {
+        if notes.is_empty() {
+            continue;
+        }
         if !agent_text.is_empty() {
             agent_text.push('\n');
         }
-        agent_text.push_str(&file_notes.join("\n"));
+        agent_text.push_str(&notes.join("\n"));
     }
 
     Some(PreparedUser {
@@ -110,6 +124,7 @@ pub(super) fn prepare_user_message(
         agent_text,
         composer,
         attaches,
+        pasted,
         mode: app.agent_mode,
     })
 }
@@ -143,6 +158,7 @@ pub(super) fn dispatch_user(
         mode: prepared.mode,
         composer: prepared.composer,
         attaches: prepared.attaches,
+        pasted: prepared.pasted,
         submitted_at: std::time::Instant::now(),
     });
 }
@@ -175,6 +191,7 @@ pub(super) fn flush_follow_up(app: &mut App, input_tx: &UnboundedSender<InputCom
             agent_text: fu.text,
             composer: fu.composer,
             attaches: fu.attaches,
+            pasted: fu.pasted,
             mode: fu.mode,
         },
     );
@@ -290,21 +307,6 @@ pub(super) fn run_command(
             app.usage.prompt_tokens, app.usage.completion_tokens, app.usage.total_tokens
         )),
         CmdId::Connect => app.open_connect_picker(),
-        CmdId::Goal => {
-            if app.goal_active() {
-                if let Some(g) = app.goal.as_ref() {
-                    app.flash(format!("Goal: {} · {}", g.objective, g.timer_label()));
-                }
-            } else if !arg.is_empty() {
-                let objective = arg.trim().to_string();
-                let _ = input_tx.send(InputCommand::SetGoal {
-                    objective,
-                    duration: None,
-                });
-            } else {
-                app.open_goal_overlay();
-            }
-        }
         CmdId::About => app.open_about(),
         CmdId::Settings => app.open_settings(),
         CmdId::Resume => {

@@ -119,30 +119,32 @@ pub async fn run(cfg: Arc<AppConfig>, resume: Option<Resume>) -> Result<()> {
         terminal.clone(),
     );
 
-    // Show the last model used with every saved provider immediately; the
-    // background catalog refresh expands each group without a blank/loading
-    // detour on startup.
-    let mut model_choices: Vec<ModelChoice> = cfg
-        .connections
-        .profiles
-        .iter()
-        .filter(|(_, profile)| !profile.model.id().trim().is_empty())
-        .map(|(connection_id, profile)| ModelChoice {
-            key: profile.model.id().to_string(),
-            display: profile.model.display_name().to_string(),
-            detail: String::new(),
-            group: if profile.label.trim().is_empty() {
-                hive_llm::catalog::provider_label_for_base(&profile.base_url).to_string()
-            } else {
-                profile.label.clone()
-            },
-            connection_id: connection_id.clone(),
-            vision: false,
-            context: 0,
-            cost_input: 0.0,
-            cost_output: 0.0,
-        })
-        .collect();
+    // Show curated pickers (and last-used model per auto-detect provider)
+    // immediately; the background catalog refresh expands auto-detect groups.
+    let mut model_choices: Vec<ModelChoice> = Vec::new();
+    if cfg.connections.profiles.is_empty() {
+        seed_model_choices(
+            &mut model_choices,
+            &cfg,
+            &cfg.connections.active,
+            &cfg.provider.base_url,
+            "",
+            &default_model,
+            &default_display,
+        );
+    } else {
+        for (connection_id, profile) in &cfg.connections.profiles {
+            seed_model_choices(
+                &mut model_choices,
+                &cfg,
+                connection_id,
+                &profile.base_url,
+                &profile.label,
+                profile.model.id(),
+                profile.model.display_name(),
+            );
+        }
+    }
     if model_choices.is_empty() {
         model_choices.push(ModelChoice {
             key: default_model.clone(),
@@ -224,6 +226,60 @@ fn install_panic_hook() {
         comb::restore();
         default_hook(info);
     }));
+}
+
+fn seed_model_choices(
+    out: &mut Vec<ModelChoice>,
+    cfg: &AppConfig,
+    connection_id: &str,
+    base_url: &str,
+    label: &str,
+    fallback_id: &str,
+    fallback_name: &str,
+) {
+    let group = if label.trim().is_empty() {
+        hive_llm::catalog::provider_label_for_base(base_url).to_string()
+    } else {
+        label.to_string()
+    };
+    if cfg.has_curated_models(connection_id) {
+        let mut has_current = false;
+        for model in cfg.curated_models_for(connection_id) {
+            let id = model.id().trim();
+            if id.is_empty() {
+                continue;
+            }
+            has_current |= id == fallback_id;
+            out.push(ModelChoice {
+                key: id.to_string(),
+                display: model.display_name().to_string(),
+                detail: String::new(),
+                group: group.clone(),
+                connection_id: connection_id.to_string(),
+                vision: false,
+                context: 0,
+                cost_input: 0.0,
+                cost_output: 0.0,
+            });
+        }
+        if has_current || fallback_id.trim().is_empty() {
+            return;
+        }
+    }
+    if fallback_id.trim().is_empty() {
+        return;
+    }
+    out.push(ModelChoice {
+        key: fallback_id.to_string(),
+        display: fallback_name.to_string(),
+        detail: String::new(),
+        group,
+        connection_id: connection_id.to_string(),
+        vision: false,
+        context: 0,
+        cost_input: 0.0,
+        cost_output: 0.0,
+    });
 }
 
 fn seed_sample_skill(skills_dir: &Path) {

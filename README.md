@@ -53,6 +53,8 @@ api_key_env = "FIREWORKS_API_KEY"
 
 [models]
 default = { id = "accounts/fireworks/routers/kimi-k2p6-fast", name = "Kimi Fast" }
+# Optional. Non-empty replaces GET /models for the active provider:
+# catalog = [{ id = "my-local-model", name = "Local" }]
 
 [agent]
 context_window = 128000   # auto-/compact around 75% of this
