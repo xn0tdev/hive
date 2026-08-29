@@ -12,9 +12,15 @@ mod write;
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
-    use super::{delete::refuse_dangerous_delete, read::image_media_type, write::compact_diff};
+    use super::{
+        delete::refuse_dangerous_delete, read::image_media_type, write::EditFile,
+        write::compact_diff,
+    };
+    use crate::tool::{Tool, ToolContext};
+    use crate::{config::AppConfig, skill::no_skills, spawner::noop_spawner};
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn detects_image_extensions() {
@@ -88,5 +94,49 @@ mod tests {
         fs::create_dir_all(&child).unwrap();
         assert!(refuse_dangerous_delete(&dir, &child).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_empty_old_string() {
+        let dir = std::env::temp_dir().join(format!(
+            "hive-edit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("a.txt"), "hello").await.unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolContext {
+            cwd: dir.clone(),
+            events: tx,
+            spawner: noop_spawner(),
+            skills: no_skills(),
+            config: Arc::new(AppConfig::default()),
+            terminal: None,
+            vision: false,
+            depth: 0,
+            call_id: "call-1".to_string(),
+            isolate_worktrees: false,
+            interrupt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let result = EditFile
+            .execute(
+                serde_json::json!({"path": "a.txt", "old_string": "", "new_string": "x"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("must not be empty"),
+            "{}",
+            result.content
+        );
+        // The file must be untouched.
+        assert_eq!(tokio::fs::read_to_string(dir.join("a.txt")).await.unwrap(), "hello");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

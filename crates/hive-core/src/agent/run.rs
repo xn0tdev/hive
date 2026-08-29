@@ -439,11 +439,8 @@ impl Agent {
             .await
             .map_err(|e| format!("compact failed: {e}"))?;
 
-        self.last_prompt_tokens = outcome.usage.prompt_tokens;
-        self.session.add_usage(outcome.usage);
-        self.emit(AgentEvent::Usage(self.session.usage));
-        self.emit(AgentEvent::ContextTokens(self.last_prompt_tokens));
-
+        // The summarizer call is maintenance, not conversation: its tokens
+        // must not pollute the session usage gauge or compact thresholds.
         let summary = outcome.message.text();
         if summary.trim().is_empty() {
             return Err("compact failed: empty summary".into());

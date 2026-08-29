@@ -99,6 +99,9 @@ impl Tool for EditFile {
         let Some(old) = str_arg(&args, "old_string") else {
             return ToolResult::error("missing 'old_string'");
         };
+        if old.is_empty() {
+            return ToolResult::error("old_string must not be empty");
+        }
         let Some(new) = str_arg(&args, "new_string") else {
             return ToolResult::error("missing 'new_string'");
         };

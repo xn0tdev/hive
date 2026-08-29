@@ -22,6 +22,10 @@ pub struct Accumulator {
     finish_reason: String,
 }
 
+/// A provider (or a corrupted stream) must not be able to force OOM by
+/// sending a huge tool-call index that inflates the vec.
+const MAX_TOOL_CALL_INDEX: usize = 64;
+
 impl Accumulator {
     pub fn new() -> Self {
         Self::default()
@@ -67,6 +71,13 @@ impl Accumulator {
     }
 
     fn merge_tool_call(&mut self, tc: DeltaToolCall) {
+        if tc.index > MAX_TOOL_CALL_INDEX {
+            tracing::warn!(
+                index = tc.index,
+                "dropping tool-call delta with implausible index"
+            );
+            return;
+        }
         while self.tool_calls.len() <= tc.index {
             self.tool_calls.push(PartialToolCall::default());
         }
@@ -125,5 +136,40 @@ impl Accumulator {
             usage: self.usage,
             finish_reason: self.finish_reason,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::response::DeltaFn;
+
+    #[test]
+    fn implausible_tool_call_index_is_dropped() {
+        let mut acc = Accumulator::new();
+        acc.merge_tool_call(DeltaToolCall {
+            index: 1_000_000_000,
+            id: Some("call_1".into()),
+            function: Some(DeltaFn {
+                name: Some("read_file".into()),
+                arguments: Some("{}".into()),
+            }),
+        });
+        assert_eq!(acc.tool_calls.len(), 0);
+    }
+
+    #[test]
+    fn normal_indices_still_merge() {
+        let mut acc = Accumulator::new();
+        acc.merge_tool_call(DeltaToolCall {
+            index: 2,
+            id: Some("call_3".into()),
+            function: Some(DeltaFn {
+                name: Some("read_file".into()),
+                arguments: Some("{}".into()),
+            }),
+        });
+        assert_eq!(acc.tool_calls.len(), 3);
+        assert_eq!(acc.tool_calls[2].name, "read_file");
     }
 }
